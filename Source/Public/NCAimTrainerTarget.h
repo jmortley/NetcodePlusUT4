@@ -43,6 +43,11 @@ public:
     bool HasCharacterAssets() const;
     void ReverseStrafe();
     void ConfigurePopupStrafe(const FVector& Center, float HalfWidth, float DirectionRoll);
+    /** A persistent pop-up dodger can use a diagonal lane without changing tracking. */
+    void SetPopupStrafeAxis(const FVector& Axis);
+    /** Commit to a safe walking destination; brake there instead of bouncing. */
+    bool SetPopupDestination(const FVector& Destination);
+    bool HasReachedPopupDestination() const;
     bool TryTrainerDodge(float DirectionRoll);
     /** Guarded native diagonal dodge, optionally holding slide through a backward landing. */
     bool TryTrainerPopupDodge(int32 Slot, const FVector& Direction, const FVector& ArenaOrigin, bool bSlideOnLanding = false);
@@ -73,6 +78,10 @@ private:
     bool bRecenterWiggleAfterDodge = false;
     bool bTrainerDodgeSlidePending = false;
     FVector StrafeCenter = FVector::ZeroVector;
+    FVector StrafeAxis = FVector(0.f, 1.f, 0.f);
+    FVector PopupDestination = FVector::ZeroVector;
+    bool bPopupTravel = false;
+    bool bPopupTravelComplete = false;
     FVector TrainerSlideDirection = FVector::ZeroVector;
     float AppearanceTime = 0.f;
     struct FTrainerMaterialTint

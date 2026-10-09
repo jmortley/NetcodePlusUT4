@@ -4,9 +4,49 @@ An opt-in game mode with real animated UT character targets, eleven 60-second
 scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
 
-## Airborne and instagib movement variety (2026-10-09)
+## Headshot line clears (2026-10-09)
 
-The four Airborne presets and instagib pop-up now use fresh revision-16 boards,
+Regular Sniper/LG and SACTF headshots use fresh revision-18 boards. Each confirmed
+headshot locks that station empty until all five stations have been hit. After
+the last hit, the whole line returns following a 0.35-second pause. Missed targets
+keep their existing expiry/reappearance timing, but expiries never clear a station
+or unlock an already-hit seat. Abort, scenario changes and new runs reset the locks.
+Body hits do not advance the line. Existing headshot scoring and movement are unchanged.
+
+Deploy the matching Django revision-18 support before the updated plugin. Local
+checkpoints enforce the same five-station rule across checkpoint boundaries; older
+scores remain on their historical boards. Other presets retain their board versions.
+
+## Pop-up travel and a second persistent dodger (2026-10-09)
+
+All three pop-up presets now use revision 17. The left platform target becomes
+a second persistent dodger; the total remains six targets (four timed, two
+persistent). It walks and dodges lengthwise along the left side, with a small
+random diagonal angle per appearance and its own direction/dodge timers. Both
+persistent targets use longer strafe decisions and refill after a hit.
+
+Timed targets on the center/right platforms and the near/deep floor lanes pick
+random destinations at least 350 units away. They commit for 1.0–2.2 seconds,
+or select a fresh destination once they finish braking at the previous one.
+Native speed and acceleration are unchanged. Reaching a destination never
+causes an automatic tiny A/D bounce. The rear head-peek keeps its cover lane.
+
+The high-right target selects a slide on 35% of appearances, with a 0.45–2.25
+second delay, rather than always sliding shortly after spawning. Left timed
+appearances independently choose forward/backward diagonal dodges, backward
+dodge-to-slide, or walking. Native cooldown, landing, exposure and full-path
+clearance checks still apply. No movement decision reads the trainee's aim.
+
+Deploy the paired Django update before this plugin build: it accepts revision
+17 for all three pop-up presets and validates both persistent target IDs in
+local checkpoints. Fresh fixed/movement and local/server boards retain old
+scores in their archives. Tracking, headshots and Airborne keep their existing
+boards. No migration or map recook is required. A rebuilt packaged game still
+needs a playtest for movement feel.
+
+## Earlier Airborne and instagib movement variety (2026-10-09)
+
+Revision 16 introduced fresh boards for the four Airborne presets and instagib pop-up,
 for fixed/movement practice and local/approved-server results. Tracking,
 headshots, and Sniper/LG/SACTF pop-up keep their existing boards and behavior.
 The matching Django change accepts local checkpoints and server submissions;

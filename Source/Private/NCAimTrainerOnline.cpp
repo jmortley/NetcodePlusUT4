@@ -162,8 +162,9 @@ namespace
 
 int32 FNCAimTrainerOnline::PresetRevisionForScenario(int32 Scenario)
 {
-	return NCAimTrainerScenarioPolicy::IsAirborneScenario(Scenario)
-		|| Scenario == NCAimTrainerScenarioId::InstagibPopup ? AirbornePresetRevision : PresetRevision;
+	return NCAimTrainerScenarioPolicy::IsHeadshotScenario(Scenario) ? HeadshotPresetRevision
+		: NCAimTrainerScenarioPolicy::IsPopupScenario(Scenario) ? PopupPresetRevision
+		: NCAimTrainerScenarioPolicy::IsAirborneScenario(Scenario) ? AirbornePresetRevision : PresetRevision;
 }
 
 const TCHAR* FNCAimTrainerOnline::ScenarioSlug(int32 Scenario)

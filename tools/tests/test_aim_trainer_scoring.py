@@ -85,6 +85,7 @@ struct TargetsAdapter : std::vector<ANCAimTrainerTarget*> {
 struct ANCAimTrainerGame {
     FVector ArenaOrigin;
     FNCAimTrainerSpawnBalance AirborneSpawnBalance;
+    int32 HeadshotClearedSlots = 0;
     struct {
         int Phase = 2, Scenario = 1, Hits = 0, Headshots = 0, Score = 0, Shots = 0, TargetsExpired = 0;
         float TrackingSeconds = 0.f, FiringSeconds = 0.f, Accuracy = 0.f;
@@ -562,6 +563,7 @@ class AimTrainerScoringTests(unittest.TestCase):
         scoring = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScoring.h").as_posix() + '"'
         source = directory / "trainer.cpp"
         policy = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix() + '"'
+        policy += '\n#include "' + (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix() + '"'
         balance = '#include "' + (PLUGIN / "Source/Public/NCAimTrainerSpawnBalance.h").as_posix() + '"'
         source.write_text("\n".join((balance, ADAPTER, scoring, policy,
                                     native_function(weapon, "float AUTWeapon::GetWeaponShotsStats"),

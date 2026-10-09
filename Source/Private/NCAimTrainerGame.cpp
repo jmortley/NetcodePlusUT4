@@ -539,6 +539,7 @@ void ANCAimTrainerGame::BeginActiveRun()
     Progress.RemainingSeconds = 60.f;
     PhaseStartedAt = LastTraceTime = GetWorld()->GetTimeSeconds();
     AirborneSpawnBalance.Reset();
+    HeadshotClearedSlots = 0;
     NextDirectionTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
     NextDodgeTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::DodgeDelaySeconds(Schedule.FRand());
     NextTrackingSlideTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(Schedule.FRand());
@@ -583,6 +584,7 @@ void ANCAimTrainerGame::BeginActiveRun()
 void ANCAimTrainerGame::HideAllTargets()
 {
     AirborneSpawnBalance.Reset();
+    HeadshotClearedSlots = 0;
     NextTrackingSlideTime = 0.f;
     ClearTrainerProjectiles();
     for (int32 Index = 0; Index < NextCrouchTime.Num(); ++Index)
@@ -604,7 +606,7 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     // class default gives the standing seat before ActivateTarget resets it.
     const float StandingHeight = Targets[Index]->GetClass()->GetDefaultObject<ANCAimTrainerTarget>()
         ->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-    const bool bPopupDodger = NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && Index == NCAimTrainerLayout::PopupDodgerSlot;
+    const bool bPopupDodger = NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && NCAimTrainerLayout::IsPopupDodgerSlot(Index);
     const bool bTimedPopup = NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && !bPopupDodger;
     const bool bInstagibPopup = Progress.Scenario == NCAimTrainerScenarioId::InstagibPopup;
     PopupSpawnVariants[Index] = bTimedPopup ? NCAimTrainerScenarioPolicy::PopupSpawnVariant(Index, Schedule.FRand()) : 0;
@@ -619,21 +621,19 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     }
     else if (NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario))
     {
-        if (Index >= NCAimTrainerLayout::HeadSlotCount) { return; }
+        if (Index >= NCAimTrainerLayout::HeadSlotCount || (HeadshotClearedSlots & (1 << Index)) != 0) { return; }
         const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::HeadSeat(Index);
         Position = FVector(Seat.MinX, Seat.CenterY, StandingHeight + Seat.FloorZ);
         TargetExpiry[Index] = Now + 6.5f;
     }
     else if (bPopupDodger)
     {
-        const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::PopupDodgerSeat();
-        Position = FVector(bInstagibPopup ? Seat.MinX - Schedule.FRandRange(0.f, 300.f) : Seat.MinX,
-            bInstagibPopup ? Schedule.FRandRange(-450.f, 450.f) : Seat.CenterY, StandingHeight + Seat.FloorZ);
+        const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::PopupDodgerSeat(Index);
+        const bool bLeft = Index == NCAimTrainerLayout::PopupLeftDodgerSlot;
+        Position = FVector(bLeft ? Seat.MinX + Schedule.FRandRange(-350.f, 350.f)
+            : bInstagibPopup ? Seat.MinX - Schedule.FRandRange(0.f, 300.f) : Seat.MinX,
+            bLeft ? Seat.CenterY : bInstagibPopup ? Schedule.FRandRange(-450.f, 450.f) : Seat.CenterY, StandingHeight + Seat.FloorZ);
         TargetExpiry[Index] = PhaseStartedAt + 60.f;
-        NextDodgeTime = Now + (bInstagibPopup ? NCAimTrainerScenarioPolicy::InstagibFirstDodgeDelay(Schedule.FRand())
-            : NCAimTrainerScenarioPolicy::PopupFirstDodgeDelaySeconds(Schedule.FRand()));
-        NextDirectionTime = Now + (bInstagibPopup ? NCAimTrainerScenarioPolicy::InstagibStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand())
-            : NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand()));
     }
     else
     {
@@ -645,14 +645,26 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     Targets[Index]->ActivateTarget(ArenaOrigin + Position, NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario) || bPopupDodger);
     Targets[Index]->SetTrainerSpeedScale(Progress.Scenario == 6 ? 1.3f : 1.f);
     Targets[Index]->SetTrainerHeadshotScale(NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario) ? 1.15f : 1.f);
-    if (bInstagibPopup && bPopupDodger)
+    if (bPopupDodger)
     {
-        Targets[Index]->ConfigurePopupStrafe(ArenaOrigin + FVector(Position.X, 0.f, Position.Z), 800.f, Schedule.FRand());
+        const bool bLeft = Index == NCAimTrainerLayout::PopupLeftDodgerSlot;
+        const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::PopupDodgerSeat(Index);
+        Targets[Index]->ConfigurePopupStrafe(ArenaOrigin + FVector(bLeft ? Seat.MinX : Position.X, Seat.CenterY, Position.Z), 800.f, Schedule.FRand());
+        if (bLeft)
+        {
+            const float Angle = Schedule.FRandRange(-8.f, 8.f) * (PI / 180.f);
+            Targets[Index]->SetPopupStrafeAxis(FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.f));
+        }
     }
     ++LocalAppearances[Index];
     NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
     NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = NextPopupDodgeTime[Index] = 0.f;
     PopupDodgeActions[Index] = NCAimTrainerScenarioPolicy::PopupStrafe;
+    if (bPopupDodger)
+    {
+        NextPopupDodgeTime[Index] = Now + NCAimTrainerScenarioPolicy::InstagibFirstDodgeDelay(Schedule.FRand());
+        NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::PopupDodgerStrafeHoldSeconds(Schedule.FRand());
+    }
     if (NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario))
     {
         NextCrouchTime[Index] = Now + NCAimTrainerScenarioPolicy::TrackingCrouchDelaySeconds(Schedule.FRand());
@@ -662,24 +674,12 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
         const NCAimTrainerLayout::FSeat Seat = NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario)
             ? NCAimTrainerLayout::HeadSeat(Index) : NCAimTrainerLayout::PopupSeat(Index, PopupSpawnVariants[Index], bInstagibPopup);
         Targets[Index]->StartWiggle(Seat.WiggleRange);
-        if (bInstagibPopup && NCAimTrainerScenarioPolicy::HasVariedPopupMovement(Index))
-        {
-            // Each appearance gets its own travel band inside the checked seat.
-            Targets[Index]->ConfigurePopupStrafe(ArenaOrigin + Position,
-                Seat.WiggleRange * Schedule.FRandRange(0.75f, 1.f), Schedule.FRand());
-        }
-        if (bTimedPopup && NCAimTrainerScenarioPolicy::HasVariedPopupMovement(Index) && Schedule.FRand() < 0.5f)
-        {
-            Targets[Index]->ReverseStrafe();
-        }
-        NextWiggleTime[Index] = Now + (bInstagibPopup
-            ? NCAimTrainerScenarioPolicy::InstagibStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand(), PopupSpawnVariants[Index]) : bTimedPopup
-            ? NCAimTrainerScenarioPolicy::PopupStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand(), PopupSpawnVariants[Index])
-            : NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand()));
+        NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
+        if (bTimedPopup && NCAimTrainerScenarioPolicy::HasVariedPopupMovement(Index)) { ChoosePopupTravel(Index, Now); }
         if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario))
         {
-            // Pick one special movement per appearance. Dodges do not repeat
-            // on the permanent foreground target's timer or compete with slides.
+            // Timed targets independently choose a special movement. The two
+            // persistent dodgers have separate recurring timers below.
             const int32 Action = bInstagibPopup
                 ? NCAimTrainerScenarioPolicy::InstagibPopupAction(Index, PopupSpawnVariants[Index], Schedule.FRand())
                 : NCAimTrainerScenarioPolicy::PopupAction(Index, PopupSpawnVariants[Index], Schedule.FRand());
@@ -703,6 +703,32 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
             }
         }
     }
+}
+
+void ANCAimTrainerGame::ChoosePopupTravel(int32 Index, float Now)
+{
+    const NCAimTrainerLayout::FPopupTravelArea Area = NCAimTrainerLayout::PopupTravelArea(Index, PopupSpawnVariants[Index]);
+    const FVector Current = Targets[Index]->GetActorLocation();
+    FVector Destination;
+    for (int32 Attempt = 0; Attempt < 4; ++Attempt)
+    {
+        Destination = FVector(ArenaOrigin.X + Schedule.FRandRange(Area.MinX, Area.MaxX),
+            ArenaOrigin.Y + Schedule.FRandRange(Area.MinY, Area.MaxY), Current.Z);
+        const float DX = Destination.X - Current.X, DY = Destination.Y - Current.Y;
+        if (DX * DX + DY * DY >= 350.f * 350.f) { break; }
+        if (Attempt == 3)
+        {
+            // Even unlucky rolls must produce useful travel, not a few units
+            // of A/D. The room's checked rectangles are convex and unobstructed.
+            Destination.X = ArenaOrigin.X + (Current.X - ArenaOrigin.X < (Area.MinX + Area.MaxX) * 0.5f ? Area.MaxX : Area.MinX);
+            Destination.Y = ArenaOrigin.Y + (Current.Y - ArenaOrigin.Y < (Area.MinY + Area.MaxY) * 0.5f ? Area.MaxY : Area.MinY);
+        }
+    }
+    const bool bMoving = Targets[Index]->SetPopupDestination(Destination);
+    // Native dodge/slide ownership wins; retry later instead of steering a
+    // character in midair or imposing a repeated action sequence.
+    NextWiggleTime[Index] = Now + (bMoving ? NCAimTrainerScenarioPolicy::PopupTravelHoldSeconds(Schedule.FRand())
+        : Schedule.FRandRange(0.2f, 0.45f));
 }
 
 void ANCAimTrainerGame::UpdateShotCount()
@@ -783,6 +809,20 @@ float ANCAimTrainerGame::RecordTargetHit(ANCAimTrainerTarget* Target, float Dama
     RecordLocalTarget(Slot, true, bHeadshot);
     Target->HideTarget();
     NextTargetTime[Slot] = Now + (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) ? 0.f : 0.35f);
+    if (NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario))
+    {
+        // Only confirmed headshots clear a station. Expiring another target
+        // cannot reopen an already-cleared seat for repeated easy points.
+        HeadshotClearedSlots |= 1 << Slot;
+        if (HeadshotClearedSlots == (1 << NCAimTrainerLayout::HeadSlotCount) - 1)
+        {
+            HeadshotClearedSlots = 0;
+            for (int32 Index = 0; Index < NCAimTrainerLayout::HeadSlotCount; ++Index)
+            {
+                NextTargetTime[Index] = Now + 0.35f;
+            }
+        }
+    }
     Trainee->NotifyTrainerHit(Damage);
     // Keep the pawn alive and bypass ordinary frag/drop/scoring paths. One
     // appearance can score exactly once, even if a repeated RPC reaches it.
@@ -1051,6 +1091,7 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
     TArray<int32> EligibleSlots;
     for (int32 Index = 0; Index < ActiveSlots; ++Index)
     {
+        if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && NCAimTrainerLayout::IsPopupDodgerSlot(Index)) { continue; }
         if (Targets[Index]->IsAvailable() && Now >= TargetExpiry[Index])
         {
             RecordLocalTarget(Index, false);
@@ -1063,16 +1104,18 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
             if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario)) { EligibleSlots.Add(Index); }
             else { ActivateSlot(Index, Now); }
         }
-        if (!NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario) && Targets[Index]->IsAvailable() && Now >= NextWiggleTime[Index])
+        if (!NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario) && Targets[Index]->IsAvailable()
+            && (Now >= NextWiggleTime[Index] || Targets[Index]->HasReachedPopupDestination()))
         {
-            const bool bInstagibPopup = Progress.Scenario == NCAimTrainerScenarioId::InstagibPopup;
-            if (!bInstagibPopup || !NCAimTrainerScenarioPolicy::HasVariedPopupMovement(Index)
-                || NCAimTrainerScenarioPolicy::ReverseInstagibStrafe(Schedule.FRand())) { Targets[Index]->ReverseStrafe(); }
-            NextWiggleTime[Index] = Now + (bInstagibPopup
-                ? NCAimTrainerScenarioPolicy::InstagibStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand(), PopupSpawnVariants[Index])
-                : NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario)
-                ? NCAimTrainerScenarioPolicy::PopupStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand(), PopupSpawnVariants[Index])
-                : NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand()));
+            if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && NCAimTrainerScenarioPolicy::HasVariedPopupMovement(Index))
+            {
+                ChoosePopupTravel(Index, Now);
+            }
+            else
+            {
+                Targets[Index]->ReverseStrafe();
+                NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
+            }
         }
         if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && Targets[Index]->IsAvailable())
         {
@@ -1151,30 +1194,29 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
 void ANCAimTrainerGame::UpdatePopupDodger(float Now)
 {
     if (Progress.Phase != 2 || !NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) || Now >= PhaseStartedAt + 60.f) { return; }
-    const int32 Slot = NCAimTrainerLayout::PopupDodgerSlot;
-    if (!Targets.IsValidIndex(Slot) || !Targets[Slot]) { return; }
-    // This sixth target has a clear floor lane and never times out. Refill on
-    // the next game tick after a hit, independently of the five popup seats.
-    if (!Targets[Slot]->IsAvailable()) { ActivateSlot(Slot, Now); }
-    if (!Targets[Slot]->IsAvailable()) { return; }
-    if (Now >= NextDodgeTime)
+    for (int32 Slot = 0; Slot < Targets.Num(); ++Slot)
     {
-        const bool bInstagibPopup = Progress.Scenario == NCAimTrainerScenarioId::InstagibPopup;
-        const bool bAttempt = !bInstagibPopup || Schedule.FRand() < 0.8f;
-        const bool bDodged = bAttempt && Targets[Slot]->TryTrainerDodge(Schedule.FRand());
-        // A landing or native cooldown can reject an attempt. Retry shortly;
-        // never bypass UT's grounded/cooldown checks or queue several dodges.
-        NextDodgeTime = Now + (bInstagibPopup
-            ? (bDodged || !bAttempt ? NCAimTrainerScenarioPolicy::InstagibDodgeDelay(Schedule.FRand()) : Schedule.FRandRange(0.25f, 0.6f))
-            : bDodged ? NCAimTrainerScenarioPolicy::PopupDodgeDelaySeconds(Schedule.FRand()) : 0.2f);
-    }
-    if (Now >= NextDirectionTime)
-    {
-        const bool bInstagibPopup = Progress.Scenario == NCAimTrainerScenarioId::InstagibPopup;
-        if (!bInstagibPopup || NCAimTrainerScenarioPolicy::ReverseInstagibStrafe(Schedule.FRand())) { Targets[Slot]->ReverseStrafe(); }
-        NextDirectionTime = Now + (bInstagibPopup
-            ? NCAimTrainerScenarioPolicy::InstagibStrafeHoldSeconds(Slot, Schedule.FRand(), Schedule.FRand())
-            : NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand()));
+        if (!NCAimTrainerLayout::IsPopupDodgerSlot(Slot) || !Targets[Slot]) { continue; }
+        // Reuse the left seat and foreground actor: six total, with independent
+        // random decisions and immediate replacement of either persistent target.
+        if (!Targets[Slot]->IsAvailable()) { ActivateSlot(Slot, Now); }
+        if (!Targets[Slot]->IsAvailable()) { continue; }
+        if (Now >= NextPopupDodgeTime[Slot])
+        {
+            const bool bInstagibPopup = Progress.Scenario == NCAimTrainerScenarioId::InstagibPopup;
+            const bool bAttempt = !bInstagibPopup || Schedule.FRand() < 0.8f;
+            const bool bDodged = bAttempt && Targets[Slot]->TryTrainerDodge(Schedule.FRand());
+            // Respect native landing/cooldown. A blocked attempt retries later;
+            // stalled frames never queue several impulses.
+            NextPopupDodgeTime[Slot] = Now + (bInstagibPopup
+                ? (bDodged || !bAttempt ? NCAimTrainerScenarioPolicy::InstagibDodgeDelay(Schedule.FRand()) : Schedule.FRandRange(0.25f, 0.6f))
+                : bDodged ? NCAimTrainerScenarioPolicy::PopupDodgeDelaySeconds(Schedule.FRand()) : 0.2f);
+        }
+        if (Now >= NextWiggleTime[Slot])
+        {
+            if (NCAimTrainerScenarioPolicy::ReverseInstagibStrafe(Schedule.FRand())) { Targets[Slot]->ReverseStrafe(); }
+            NextWiggleTime[Slot] = Now + NCAimTrainerScenarioPolicy::PopupDodgerStrafeHoldSeconds(Schedule.FRand());
+        }
     }
 }
 

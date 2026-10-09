@@ -209,10 +209,10 @@ void ANCAimTrainerHUD::DrawModePicker(ANCAimTrainerPlayerController* PC)
 	Label(TEXT("REAL UT CHARACTERS. 60-SECOND RUNS. CHOOSE YOUR WEAPON AND CHALLENGE."), 120.f, 188.f, 14.f, TrainerMuted);
 	const TCHAR* Descriptions[] = {
 		TEXT("Hold fire. Track strafes and dodges."),
-		TEXT("Sniper/LG. 100 per headshot."),
+		TEXT("Sniper/LG. 100 per headshot. Clear all five positions before the line refills."),
 		TEXT("Instagib. 100 per hit, before expiry."),
 		TEXT("Sniper/LG. 100 per hit, +50 headshot."),
-		TEXT("SACTF sniper. 100 per headshot."),
+		TEXT("SACTF sniper. 100 per headshot. Clear all five positions before the line refills."),
 		TEXT("SACTF sniper. 100 per hit, +50 headshot."),
 		TEXT("Link tracking with 30% faster target movement. Hold either fire button."),
 		TEXT("Hitscan Airborne: instagib. Hit jump-pad and falling targets before they reach the goo."),

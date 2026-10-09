@@ -52,6 +52,7 @@ private:
     FNCAimTrainerProgress Progress;
     FRandomStream Schedule;
     FNCAimTrainerSpawnBalance AirborneSpawnBalance;
+    int32 HeadshotClearedSlots = 0;
     FVector ArenaOrigin = FVector(0.f, 0.f, 50000.f);
     float PhaseStartedAt = 0.f;
     float LastTraceTime = 0.f;
@@ -108,6 +109,7 @@ private:
     float PracticeFloorZ() const;
     void UpdateTargets(float Now);
     void UpdatePopupDodger(float Now);
+    void ChoosePopupTravel(int32 Index, float Now);
     void UpdateTrackingMovement(float Now);
     void UpdateShotCount();
     bool HasTrackingContact() const;

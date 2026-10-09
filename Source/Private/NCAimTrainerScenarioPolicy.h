@@ -31,7 +31,9 @@ namespace NCAimTrainerScenarioPolicy
         return 0.12f + 0.16f * UnitRoll(Roll);
     }
 
-    inline bool HasVariedPopupMovement(int Slot) { return Slot == 0 || Slot == 1 || Slot == 4; }
+    inline bool HasVariedPopupMovement(int Slot) { return Slot == 0 || Slot == 1 || Slot == 2 || Slot == 4; }
+    inline float PopupTravelHoldSeconds(float Roll) { return 1.f + 1.2f * UnitRoll(Roll); }
+    inline float PopupDodgerStrafeHoldSeconds(float Roll) { return 0.65f + 1.1f * UnitRoll(Roll); }
 
     inline int PopupSpawnVariant(int Slot, float Roll)
     {
@@ -77,38 +79,24 @@ namespace NCAimTrainerScenarioPolicy
 
     inline int PopupAction(int Slot, int Variant, float Roll)
     {
-        if (Slot == 2) { return PopupSlide; }
         const float Choice = UnitRoll(Roll);
+        if (Slot == 2) { return Choice < 0.35f ? PopupSlide : PopupStrafe; }
         if (Slot == 0 || (Slot == 4 && Variant != 1))
         {
-            if (Choice < 0.15f) { return PopupForwardDodge; }
-            if (Choice < 0.30f) { return PopupBackwardDodge; }
-            if (Choice < 0.40f) { return PopupDodgeSlide; }
-            // Deep left seats have a narrow outer corridor. Use their checked
-            // angled dodge/slide path instead of the foreground lateral slide.
-            if (Choice < 0.60f && !(Slot == 4 && Variant == 2)) { return PopupSlide; }
-            if (Choice < 0.80f && Slot == 0) { return PopupLongStrafe; }
+            if (Choice < 0.25f) { return PopupForwardDodge; }
+            if (Choice < 0.50f) { return PopupBackwardDodge; }
+            if (Choice < 0.65f) { return PopupDodgeSlide; }
         }
-        else if (Slot == 4 && Choice < 0.45f) { return PopupSlide; }
+        else if (Slot == 4 && Choice < 0.3f) { return PopupSlide; }
         return PopupStrafe;
     }
 
     inline int InstagibPopupAction(int Slot, int Variant, float Roll)
     {
-        if (Slot == 2) { return PopupSlide; }
-        const float Choice = UnitRoll(Roll);
-        if (Slot == 0 || (Slot == 4 && Variant != 1))
-        {
-            if (Choice < 0.12f) { return PopupForwardDodge; }
-            if (Choice < 0.24f) { return PopupBackwardDodge; }
-            if (Choice < 0.32f) { return PopupDodgeSlide; }
-            if (Choice < 0.44f && !(Slot == 4 && Variant == 2)) { return PopupSlide; }
-        }
-        else if (Slot == 4 && Choice < 0.2f) { return PopupSlide; }
-        return PopupStrafe;
+        return PopupAction(Slot, Variant, Roll);
     }
 
-    inline float PopupDodgeDelaySecondsForAppearance(float Roll) { return 0.65f + 0.70f * UnitRoll(Roll); }
+    inline float PopupDodgeDelaySecondsForAppearance(float Roll) { return 0.45f + 1.5f * UnitRoll(Roll); }
     inline float PopupDodgeAngleDegrees(float Roll) { return 12.f + 16.f * UnitRoll(Roll); }
 
     inline float BoundedStrafeDirection(float Offset, float Velocity, float Acceleration,
@@ -128,7 +116,7 @@ namespace NCAimTrainerScenarioPolicy
     inline bool ShouldCrouch(float Roll) { return UnitRoll(Roll) < 0.65f; }
     inline float CrouchDelaySeconds(float Roll) { return 1.5f + 2.f * UnitRoll(Roll); }
     inline float CrouchHoldSeconds(float Roll) { return 0.25f + 0.20f * UnitRoll(Roll); }
-    inline float PopupSlideDelaySeconds(float Roll) { return 0.8f + 0.6f * UnitRoll(Roll); }
+    inline float PopupSlideDelaySeconds(float Roll) { return 0.45f + 1.8f * UnitRoll(Roll); }
     inline float PopupLongStrafeDelaySeconds(float Roll) { return 0.8f + 0.5f * UnitRoll(Roll); }
     inline float PopupLongStrafeHoldSeconds(float Roll) { return 0.70f + 0.30f * UnitRoll(Roll); }
     inline float PopupLongStrafeDirection(float Offset, float Roll)

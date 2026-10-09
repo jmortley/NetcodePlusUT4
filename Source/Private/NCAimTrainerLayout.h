@@ -4,7 +4,8 @@
 // are relative to ArenaOrigin. Keep movement limits and platform support paired.
 namespace NCAimTrainerLayout
 {
-    enum { TargetCount = 6, PopupSlotCount = 5, PopupSliderSlot = 2, PopupDodgerSlot = 5, HeadSlotCount = 5, PopupPlatformCount = 3 };
+    enum { TargetCount = 6, PopupSlotCount = 5, PopupSliderSlot = 2, PopupLeftDodgerSlot = 0, PopupDodgerSlot = 5, HeadSlotCount = 5, PopupPlatformCount = 3 };
+    inline bool IsPopupDodgerSlot(int Slot) { return Slot == PopupLeftDodgerSlot || Slot == PopupDodgerSlot; }
     // Gameplay movement profiles supply speed and acceleration. The input
     // driver anticipates stopping distance instead of limiting pawn speed.
     // Extra room beyond the predictive reversal threshold for tick integration.
@@ -25,6 +26,19 @@ namespace NCAimTrainerLayout
         float CenterX, CenterY;
         float SizeX, SizeY, Height;
     };
+
+    struct FPopupTravelArea { float MinX, MaxX, MinY, MaxY; };
+
+    inline FPopupTravelArea PopupTravelArea(int Slot, int Variant)
+    {
+        // Capsule centers, with clearance for native braking. Elevated targets
+        // can travel along the platform instead of oscillating across its width.
+        if (Slot == 1) { return { 200.f, 2200.f, Variant == 1 ? 138.f : -218.f, Variant == 1 ? 218.f : -138.f }; }
+        if (Slot == 2) { return { 1000.f, 2200.f, 670.f, 1030.f }; }
+        if (Variant == 1) { return { -600.f, -350.f, 600.f, 1500.f }; }
+        if (Variant == 2) { return { 800.f, 2450.f, -1550.f, -640.f }; }
+        return { -600.f, 600.f, -1500.f, -640.f };
+    }
 
     constexpr float AirborneHazardZ = 20.f;
     constexpr float AirborneDropMinZ = 1350.f;
@@ -174,8 +188,11 @@ namespace NCAimTrainerLayout
             && MinY - CapsuleRadius > -1800.f && MaxY + CapsuleRadius < -290.f;
     }
 
-    inline FSeat PopupDodgerSeat()
+    inline FSeat PopupDodgerSeat(int Slot = PopupDodgerSlot)
     {
+        // A second persistent target runs/dodges lengthwise down the left lane.
+        // Its small diagonal angle keeps the whole lane left of central cover.
+        if (Slot == PopupLeftDodgerSlot) { return { 1100.f, 1100.f, -850.f, 0.f, 800.f, 1.f }; }
         // The open foreground lane stays clear of every platform. Its 800-unit
         // walking reversal threshold leaves additional room for native dodges;
         // the scenario policy turns outward dodges inward beyond 500 units.
