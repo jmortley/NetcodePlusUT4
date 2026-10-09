@@ -112,6 +112,7 @@ private:
 	UFUNCTION()
 	void OnRep_TrainerProgress();
 	void ApplyTrainerMovementMode();
+	void UpdateTrainerCountdownAudio();
 	/** Both tracking buttons hold one secondary beam; release after the final button. */
 	void SetTrackingFireHeld(bool bPrimary, bool bHeld);
 	/** Bound repeated requests without dropping a quick select-then-start sequence. */
@@ -119,6 +120,7 @@ private:
 	bool PrefersTrainerLightningGun() const;
 	double NextTrainerRequestTime[4] = { 0.0, 0.0, 0.0, 0.0 };
 	uint8 LastPresentedPhase = 255;
+	int32 LastAnnouncedCountdown = 4;
 	bool bLastPresentedMovementPractice = false;
 	bool bTrackingPrimaryHeld = false;
 	bool bTrackingAltHeld = false;

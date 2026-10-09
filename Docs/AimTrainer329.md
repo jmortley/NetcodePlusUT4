@@ -93,6 +93,15 @@ Start for the countdown. **F6** cancels an incomplete run and returns to the
 picker. **Enter** retries from the results screen. **Escape** retains the normal
 UT menu. Cancelled runs and disconnects do not submit partial scores.
 
+The starting countdown speaks **3, 2, 1** through the owning player's current
+announcer, including the voice pack selected in NCP settings and the normal
+announcer volume. It uses the existing `CD3`, `CD2` and `CD1` cues, so no new
+sound pak or recook is required. Standalone account verification finishes before
+the voice countdown begins. Speech follows the displayed authority countdown;
+repeated updates do not repeat a number, and delayed updates do not replay
+missed numbers. Queued speech expires if the countdown advances or is cancelled.
+This presentation change does not alter scenario timing, scoring or revisions.
+
 The picker and results screen show the selected scenario's UT4Stats top 10,
 including player names, points and accuracy. Click **Local runs** or
 **Approved servers** to browse either source without leaving the trainer.

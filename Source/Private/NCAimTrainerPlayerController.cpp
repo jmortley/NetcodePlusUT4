@@ -2,6 +2,8 @@
 #include "NCAimTrainerGame.h"
 #include "NCAimTrainerOnline.h"
 #include "NCAimTrainerCharacter.h"
+#include "NCAimTrainerCountdownMessage.h"
+#include "UTAnnouncer.h"
 #include "UTPlayerCameraManager.h"
 #include "UTLocalPlayer.h"
 #include "Net/UnrealNetwork.h"
@@ -256,6 +258,7 @@ void ANCAimTrainerPlayerController::SetTrainerProgress(const FNCAimTrainerProgre
 
 void ANCAimTrainerPlayerController::OnRep_TrainerProgress()
 {
+	UpdateTrainerCountdownAudio();
 	if (bLastPresentedMovementPractice != TrainerProgress.bMovementPractice
 		|| (TrainerProgress.Phase == 1 && LastPresentedPhase != 1))
 	{
@@ -280,6 +283,28 @@ void ANCAimTrainerPlayerController::OnRep_TrainerProgress()
 		Super::OnStopAltFire();
 	}
 	LastPresentedPhase = TrainerProgress.Phase;
+}
+
+void ANCAimTrainerPlayerController::UpdateTrainerCountdownAudio()
+{
+#if !UE_SERVER
+	if (!IsLocalController()) { return; }
+	const float Seconds = TrainerProgress.RemainingSeconds;
+	if (TrainerProgress.Phase != 1 || LastPresentedPhase != 1 || Seconds == 3.f)
+	{
+		LastAnnouncedCountdown = 4;
+	}
+	// Standalone account verification holds the display at exactly three.
+	// Speak only once the authority's countdown moves; never run a separate clock.
+	if (TrainerProgress.Phase != 1 || !Announcer || !FMath::IsFinite(Seconds)
+		|| Seconds <= 0.f || Seconds >= 3.f) { return; }
+	const int32 Count = FMath::CeilToInt(Seconds);
+	if (Count >= LastAnnouncedCountdown) { return; }
+	LastAnnouncedCountdown = Count;
+	// The existing local announcer supplies the selected NCP pack and volume.
+	// Only the current number plays if a replicated update skips a boundary.
+	Announcer->PlayAnnouncement(UNCAimTrainerCountdownMessage::StaticClass(), Count, nullptr, nullptr, this);
+#endif
 }
 
 void ANCAimTrainerPlayerController::SetTrainerLeaderboard(const TArray<FNCAimTrainerLeaderboardRow>& Rows)

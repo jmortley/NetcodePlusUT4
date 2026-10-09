@@ -23,6 +23,8 @@ ADAPTER = r'''
 #include <new>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <limits>
 #define TEXT(value) value
 enum class ESearchCase { IgnoreCase };
 struct FString : std::string {
@@ -59,7 +61,20 @@ struct FPlatformTime { static double Now; static double Seconds() { return Now; 
 double FPlatformTime::Now = 100.;
 struct AClientHitsounds { static int Warmups; static void EnsureCatalog() { ++Warmups; } };
 int AClientHitsounds::Warmups = 0;
-struct FNCAimTrainerProgress { uint8 Scenario = 0, Phase = 0; int Score = 0; bool bMovementPractice = false; };
+struct FNCAimTrainerProgress { uint8 Scenario = 0, Phase = 0; int Score = 0; bool bMovementPractice = false; float RemainingSeconds = 60.f; };
+struct FMath {
+    static bool IsFinite(float value) { return std::isfinite(value); }
+    static int32 CeilToInt(float value) { return int32(std::ceil(value)); }
+};
+struct UNCAimTrainerCountdownMessage { static int StaticClass() { return 321; } };
+struct MockAnnouncer {
+    std::vector<int> Counts;
+    const void* Context = nullptr;
+    void PlayAnnouncement(int message, int count, const void* p1, const void* p2, const void* object) {
+        if (message != 321 || p1 || p2) std::abort();
+        Counts.push_back(count); Context = object;
+    }
+};
 struct FVector { float X, Y, Z; FVector(float x=0, float y=0, float z=0): X(x), Y(y), Z(z) {} };
 enum MovementMode { MOVE_None, MOVE_Walking, MOVE_Falling };
 struct APawn { virtual ~APawn() = default; virtual void PawnStartFire(uint8) {} };
@@ -169,6 +184,8 @@ struct ANCAimTrainerPlayerController : AUTPlayerController {
     FNCAimTrainerProgress TrainerProgress;
     double NextTrainerRequestTime[4] = { 0., 0., 0., 0. };
     uint8 LastPresentedPhase = 255;
+    int32 LastAnnouncedCountdown = 4;
+    MockAnnouncer* Announcer = nullptr;
     bool bLastPresentedMovementPractice = false;
     bool bTrackingPrimaryHeld = false, bTrackingAltHeld = false;
     bool InputFocus = true, Local = true;
@@ -207,6 +224,7 @@ struct ANCAimTrainerPlayerController : AUTPlayerController {
     bool AdmitTrainerRequest(uint8);
     void SetTrainerProgress(const FNCAimTrainerProgress&);
     void OnRep_TrainerProgress();
+    void UpdateTrainerCountdownAudio();
 };
 '''
 
@@ -498,9 +516,52 @@ void HitscanPreference() {
     Require(!pc.PrefersTrainerLightningGun(), "unavailable settings did not fall back to sniper");
     GConfig = &TestConfig;
 }
+void CountdownAudio() {
+    // Authority-local standalone/listen hosts and remote owning clients use
+    // the same progress callback and their own selected announcer instance.
+    for (int role : {ROLE_Authority, 1}) {
+        ANCAimTrainerPlayerController pc; MockAnnouncer selected;
+        pc.Role = role; pc.Announcer = &selected;
+        auto present = [&](uint8 phase, float seconds) {
+            FNCAimTrainerProgress progress;
+            progress.Phase = phase; progress.RemainingSeconds = seconds;
+            if (role == ROLE_Authority) pc.SetTrainerProgress(progress);
+            else { pc.TrainerProgress = progress; pc.OnRep_TrainerProgress(); }
+        };
+        present(0,60.f); present(1,3.f); present(1,3.f);
+        Require(selected.Counts.empty(), "countdown spoke during offline account verification");
+        for (float seconds : {2.99f,2.9f,2.1f,2.f,1.9f,1.f,.1f}) present(1,seconds);
+        Require(selected.Counts == std::vector<int>({3,2,1}), "countdown missing or repeated cue");
+        Require(selected.Context == &pc, "announcer missing owning trainer context");
+        present(1,0.f); present(2,60.f); present(3,0.f);
+        Require(selected.Counts.size() == 3, "countdown escaped active/results boundary");
+        present(1,2.9f); present(0,60.f); present(1,2.9f);
+        Require(selected.Counts == std::vector<int>({3,2,1,3,3}), "replay or abort did not reset countdown");
+        present(1,.9f); present(1,1.9f); present(1,.8f);
+        Require(selected.Counts == std::vector<int>({3,2,1,3,3,1}), "late update replayed a skipped number");
+        for(float value : {-1.f,4.f,std::numeric_limits<float>::quiet_NaN(),std::numeric_limits<float>::infinity()})
+            present(1,value);
+        Require(selected.Counts.size() == 6, "invalid clock generated a countdown cue");
+        present(0,60.f); pc.Announcer = nullptr; present(1,2.9f);
+        pc.Announcer = &selected; present(1,2.8f);
+        Require(selected.Counts.size() == 7 && selected.Counts.back() == 3,
+                "temporarily unavailable announcer consumed countdown cue");
+        MockAnnouncer replacement; pc.Announcer = &replacement;
+        present(1,2.7f); present(1,1.9f);
+        Require(replacement.Counts == std::vector<int>({2}), "changed voice pack repeated old cue or was ignored");
+        present(1,3.f); present(1,2.9f);
+        Require(replacement.Counts == std::vector<int>({2,3}), "quick restart with coalesced menu phase did not reset countdown");
+    }
+    ANCAimTrainerPlayerController remote; MockAnnouncer sound;
+    remote.Local = false; remote.Announcer = &sound;
+    remote.TrainerProgress.Phase = 1; remote.TrainerProgress.RemainingSeconds = 2.9f;
+    remote.OnRep_TrainerProgress();
+    Require(sound.Counts.empty(), "nonlocal controller played countdown audio");
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required"); const std::string name(argv[1]);
-    if (name == "menu") MenuControls();
+    if (name == "countdown_audio") CountdownAudio();
+    else if (name == "menu") MenuControls();
     else if (name == "focus") Focus();
     else if (name == "active") ActiveControls();
     else if (name == "fire") FireGates();
@@ -557,6 +618,7 @@ class AimTrainerControllerTests(unittest.TestCase):
             "bool ANCAimTrainerPlayerController::AdmitTrainerRequest",
             "void ANCAimTrainerPlayerController::SetTrainerProgress",
             "void ANCAimTrainerPlayerController::OnRep_TrainerProgress",
+            "void ANCAimTrainerPlayerController::UpdateTrainerCountdownAudio",
         )
         source = directory / "trainer_controller.cpp"
         source.write_text("\n".join(
@@ -577,6 +639,7 @@ class AimTrainerControllerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_menu_controls_and_repeat_suppression(self): self.run_case("menu")
+    def test_spoken_countdown_follows_progress_and_selected_local_announcer(self): self.run_case("countdown_audio")
     def test_stock_menu_and_chat_keep_input_focus(self): self.run_case("focus")
     def test_cannot_replace_active_run_and_can_abort(self): self.run_case("active")
     def test_each_scenario_uses_real_fire_only_during_run(self): self.run_case("fire")
