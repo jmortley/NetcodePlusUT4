@@ -34,16 +34,18 @@ It does not enable aim assistance or replace the controller in other modes.
   layout based on halving each target center's 3D displacement from the fixed eye position
   `(-800,0,511)`, compared with the previous rocket layout. Its pads move to
   `(-350,-700)` / `(150,700)`, with smaller supports and a narrower ledge;
-  falling centers spawn at Z930.5–1130.5 and the jumper apex is Z1030.5.
+  side-lane falling centers spawn at Z930.5–1130.5 and the jumper apex is Z1030.5.
   Goo rises to Z211.5 and pads to Z290.5 to preserve safe retirement/landing
-  for full-size capsules. Native gravity is retained; launch velocities and
-  flight times scale by sqrt(0.5). The two alternate side lanes move inward
+  for full-size capsules. Native gravity is retained; initial drop velocities
+  retain the compact layout's sqrt(0.5) scale. The two alternate side lanes move inward
   with the rest of this compact layout. Movement practice uses the same
   geometry; its changing viewpoint naturally changes individual shot ranges.
   A subsequent rear-target adjustment moves the nearer falling band another
   75 units forward to X375–475, and the deeper band 200 units forward to
-  X525–650. Jump-pad targets, alternate side lanes, heights and fall timing
-  retain their compact-layout settings.
+  X525–650. These rear falling targets spawn with 60% more capsule-bottom
+  clearance above the goo, raising their centers to Z1297.1–1617.1. Initial
+  velocities and gravity stay the same, providing more time before goo contact.
+  Jump-pad targets and alternate side lanes retain their compact-layout settings.
   Switching back to a rifle restores the original supports, goo and lane.
 - All Airborne presets award 100 per hit with **no miss or expiry deductions**.
   Sniper/LG and SACTF retain the 50-point headshot bonus. Rifle accuracy still
@@ -102,6 +104,14 @@ the current leaderboard UI.
 - Ordinary pop-ups mix 0.24-0.42-second reversals with 0.45-0.75-second holds,
   wider lateral movement and a random initial direction. The rear-center head
   peek and high-right platform target keep their previous movement and seats.
+- Left pop-ups now favor longer runs: 65% of direction decisions hold for
+  0.65-1.0 seconds, with 35% using shorter 0.35-0.55-second holds. The low-left
+  and near-left strafe half-widths are 180 units, and the deep-left corridor
+  uses 150 units. The low-left special long strafe reaches 220 units for
+  0.70-1.0 seconds, starting 0.8-1.3 seconds after spawn so it still fits the
+  shorter SACTF appearances. Tighter low-left spawn jitter keeps full capsules
+  supported. Other seats retain their existing timing and widths; native
+  braking and collision safety can still turn a target inward before a hold ends.
 - The middle platform can use either of two side perches. The outer floor
   target alternates between near-left, deep-left and far-right positions. The
   right seat stays ahead of the tall platform so it remains visible. This

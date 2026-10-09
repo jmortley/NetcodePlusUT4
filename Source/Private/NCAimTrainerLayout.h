@@ -10,7 +10,7 @@ namespace NCAimTrainerLayout
     // Extra room beyond the predictive reversal threshold for tick integration.
     constexpr float WiggleSafetyMargin = 15.f;
     constexpr float HeadWiggleRange = 80.f;
-    constexpr float PopupLongStrafeRange = 180.f;
+    constexpr float PopupLongStrafeRange = 220.f;
 
     struct FSeat
     {
@@ -45,10 +45,20 @@ namespace NCAimTrainerLayout
             - AirborneRocketHalfHeight : AirborneHazardZ;
     }
 
+    inline float AirborneDropHeight(float Height, bool bRockets, bool bSideWall = false)
+    {
+        const float SpawnHeight = AirborneTargetHeight(Height, bRockets);
+        if (!bRockets || bSideWall) { return SpawnHeight; }
+        // Rear rocket targets start with 60% more clearance above the goo.
+        // Measure from capsule contact, leaving the goo and jump arc in place.
+        const float ContactHeight = AirborneHazardHeight(true) + AirborneRocketHalfHeight;
+        return ContactHeight + 1.6f * (SpawnHeight - ContactHeight);
+    }
+
     inline float AirborneJumpApex(bool bRockets) { return AirborneTargetHeight(AirborneJumpApexZ, bRockets); }
 
-    // With native gravity, a half-size ballistic curve takes sqrt(0.5) as
-    // long and uses sqrt(0.5) launch velocities in every spatial direction.
+    // Retain the compact layout's launch velocity scale. Raised rear drops
+    // use the same native gravity and velocities, giving them longer falls.
     inline float AirborneLaunchScale(bool bRockets) { return bRockets ? 0.70710678118f : 1.f; }
 
     inline FBlock AirborneFiringLedge(bool bRockets = false)
@@ -130,12 +140,12 @@ namespace NCAimTrainerLayout
             if (Variant == 1) { return { -600.f, -300.f, 1450.f, 50.f, 100.f, 0.f }; }
             // The deep left corridor gives forward/backward dodges room while
             // retaining clear separation from the foreground dodger's X plane.
-            if (Variant == 2) { return { 800.f, 1400.f, -1550.f, 25.f, 100.f, 0.f }; }
-            return { -600.f, -300.f, -1450.f, 50.f, 100.f, 0.f };
+            if (Variant == 2) { return { 800.f, 1400.f, -1550.f, 25.f, 150.f, 0.f }; }
+            return { -600.f, -300.f, -1450.f, 50.f, 180.f, 0.f };
         default:
             // Forward slide runway and a wider occasional strafe share this
             // low platform. Tighter spawn jitter leaves room for the full capsule.
-            return { 1000.f, 2200.f, -850.f, 50.f, 120.f, PopupPlatform(0).Height };
+            return { 1000.f, 2200.f, -850.f, 10.f, 180.f, PopupPlatform(0).Height };
         }
     }
 

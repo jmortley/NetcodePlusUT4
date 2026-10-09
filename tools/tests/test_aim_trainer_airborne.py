@@ -171,13 +171,13 @@ FVector BallisticPosition(const ANCAimTrainerTarget& target,const FVector& origi
     return FVector(start.X+target.Velocity.X*time,start.Y+target.Velocity.Y*time,
         start.Z+target.Velocity.Z*time+.5f*target.Move.GravityZ*time*time);
 }
-void RequireHalfDistance(const FVector& original,const FVector& compact,float rearOffset=0.f) {
+void RequireHalfDistance(const FVector& original,const FVector& compact,float rearOffset=0.f,float rearRaise=0.f) {
     // Frozen pre-change rocket viewpoint. Test the three coordinates, not only
     // the floor-plane distance: fall height is part of the requested reduction.
     const FVector view(-800.f,0.f,511.f);
-    // Rear falls move a further 75/200 units toward the trainee. Undo that
-    // intentional X translation before checking the unchanged half-size arc.
-    const FVector oldDelta=original-view, newDelta=compact+FVector(rearOffset,0.f,0.f)-view;
+    // Rear falls move nearer and start higher. Undo those intentional spatial
+    // translations before checking the otherwise unchanged native launch arc.
+    const FVector oldDelta=original-view, newDelta=compact+FVector(rearOffset,0.f,-rearRaise)-view;
     Require(Near(newDelta.X,.5f*oldDelta.X) && Near(newDelta.Y,.5f*oldDelta.Y)
             && Near(newDelta.Z,.5f*oldDelta.Z),"compact rocket path is not half the original 3D displacement");
     const float oldDistance=std::sqrt(oldDelta.X*oldDelta.X+oldDelta.Y*oldDelta.Y+oldDelta.Z*oldDelta.Z);
@@ -203,12 +203,16 @@ int main(int argc,char** argv) {
                 const float rate=NCAimTrainerAirbornePolicy::FlightRate(scenario);
                 Require(Near(p.X,seat.MinX+(seat.MaxX-seat.MinX)*roll)
                         && Near(p.Y,seat.CenterY-seat.SpawnJitterY+2.f*seat.SpawnJitterY*roll)
-                        && Near(p.Z,AirborneTargetHeight(AirborneDropMinZ+(AirborneDropMaxZ-AirborneDropMinZ)*roll,rockets)),
+                        && Near(p.Z,AirborneDropHeight(AirborneDropMinZ+(AirborneDropMaxZ-AirborneDropMinZ)*roll,rockets,sideWall)),
                         "fall position ignored the independently selected seat and random range");
                 const float drift=sideWall?(index==1?1.f:-1.f)*(20.f+45.f*roll):-80.f+160.f*roll;
                 const float launchScale=AirborneLaunchScale(rockets);
                 Require(Near(f.Targets[index].Velocity.Y,drift*launchScale)
                         && Near(f.Targets[index].Velocity.Z,(150.f+150.f*roll)*rate*launchScale),"fall drift lost variation");
+                const float apex=p.Z+f.Targets[index].Velocity.Z*f.Targets[index].Velocity.Z
+                    /(-2.f*f.Targets[index].Move.GravityZ);
+                Require(apex+f.Targets[index].Shape.HalfHeight<2000.f,
+                        "fall target's full capsule reaches the ceiling at its native ballistic apex");
                 Require(f.Targets[index].Activations==1 && f.Targets[index].Launches==1
                         && f.Game.LocalAppearances[index]==1 && f.Game.TargetExpiry[index]==70.f
                         && f.Targets[index].HeadScale==1.f && !f.Game.IsAtAirborneHazard(&f.Targets[index]),
@@ -274,12 +278,13 @@ int main(int argc,char** argv) {
     } else if(name=="rocket_compact_falls") {
         const float timeScale=std::sqrt(.5f);
         for(float gravity:{-980.f,-1960.f}) for(float roll:{0.f,.2f,.44f,.45f,.8f,1.f}) {
-            Fixture original,compact;
-            // Scenario9 retains the pre-compaction rocket target layout and
-            // unscaled native gravity; it supplies the matching old trajectory.
-            original.Game.Progress.Scenario=9; compact.Game.Progress.Scenario=10;
-            original.Game.Schedule.Roll=compact.Game.Schedule.Roll=roll;
             for(int index=1;index<6;++index) {
+                Fixture original,compact;
+                // Scenario9 retains the old unscaled layout and native gravity.
+                original.Game.Progress.Scenario=9; compact.Game.Progress.Scenario=10;
+                original.Game.Schedule.Roll=compact.Game.Schedule.Roll=roll;
+                for(float& next:compact.Game.NextTargetTime) next=1000.f;
+                compact.Game.NextPopupTime=1000.f;
                 auto& oldTarget=original.Targets[index]; auto& newTarget=compact.Targets[index];
                 const bool sideWall=NCAimTrainerAirbornePolicy::UseSideWallSeat(index-1,roll);
                 const float rearOffset=sideWall?0.f:((index-1)%2==0?75.f:200.f);
@@ -293,15 +298,36 @@ int main(int argc,char** argv) {
                         "rocket fall did not scale all launch components by sqrt(0.5)");
                 const float oldTime=FallSeconds(oldTarget,original.Game.ArenaOrigin,20.f);
                 const float newTime=FallSeconds(newTarget,compact.Game.ArenaOrigin,211.5f);
-                Require(Near(newTime,oldTime*timeScale),"compact fall duration does not preserve the half-size native ballistic arc");
+                const float baselineHeight=930.5f+200.f*roll;
+                const float rearRaise=sideWall?0.f:.6f*(baselineHeight-319.5f);
+                Require(Near(newTarget.Position.Z-compact.Game.ArenaOrigin.Z,baselineHeight+rearRaise),
+                        "rear rocket spawn did not gain60% clearance above goo or altered a side-wall spawn");
+                Require(sideWall?Near(newTime,oldTime*timeScale):newTime>oldTime*timeScale,
+                        "raised rear fall did not gain flight time or changed side-wall timing");
                 for(int step=0;step<=20;++step) {
-                    const float time=oldTime*float(step)/20.f;
-                    RequireHalfDistance(BallisticPosition(oldTarget,original.Game.ArenaOrigin,time),
-                        BallisticPosition(newTarget,compact.Game.ArenaOrigin,time*timeScale),rearOffset);
+                    const float newSampleTime=newTime*float(step)/20.f;
+                    RequireHalfDistance(BallisticPosition(oldTarget,original.Game.ArenaOrigin,newSampleTime/timeScale),
+                        BallisticPosition(newTarget,compact.Game.ArenaOrigin,newSampleTime),rearOffset,rearRaise);
                 }
-                newTarget.Position=compact.Game.ArenaOrigin+BallisticPosition(newTarget,compact.Game.ArenaOrigin,newTime);
-                Require(Near(newTarget.Position.Z-compact.Game.ArenaOrigin.Z-newTarget.Shape.HalfHeight,211.5f),
-                        "full-size rocket target did not reach the raised hazard at its half-distance endpoint");
+                const FVector end=BallisticPosition(newTarget,compact.Game.ArenaOrigin,newTime);
+                const FVector justAbove=BallisticPosition(newTarget,compact.Game.ArenaOrigin,newTime-.01f);
+                if(!sideWall) {
+                    newTarget.Position=compact.Game.ArenaOrigin+BallisticPosition(newTarget,compact.Game.ArenaOrigin,oldTime*timeScale);
+                    compact.At(10.f+oldTime*timeScale);
+                    Require(newTarget.Visible && compact.Game.Progress.TargetsExpired==0,
+                            "raised rear fall expired at the previous lower spawn's landing time");
+                }
+                newTarget.Position=compact.Game.ArenaOrigin+justAbove;
+                compact.At(10.f+newTime-.01f);
+                Require(newTarget.Visible && compact.Game.Progress.TargetsExpired==0,
+                        "rocket drop expired before physical goo contact");
+                Require(Near(end.Z-newTarget.Shape.HalfHeight,211.5f),
+                        "full-size rocket target did not reach the goo at its native ballistic endpoint");
+                newTarget.Position=compact.Game.ArenaOrigin+FVector(end.X,end.Y,211.5f+108.f);
+                compact.At(10.f+newTime);
+                Require(!newTarget.Visible && compact.Game.Progress.TargetsExpired==1
+                        && compact.Game.Terminals.size()==1 && compact.Game.Terminals[0].Appearance==1,
+                        "rocket fall did not retire exactly once on actual goo contact");
             }
         }
     } else if(name=="rocket_compact_jumper") {

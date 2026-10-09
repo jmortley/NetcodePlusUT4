@@ -101,6 +101,7 @@ struct ANCAimTrainerTarget : AActor {
     bool TryTrainerSlideForward() { ++SlideAttempts; if (!CanSlide) return false; ++Slides; return true; }
     bool Sliding = false;
     int LongStrafes = 0;
+    float LastLongStrafeWidth = 0.f, LastLongStrafeHold = 0.f;
     int LastSlideVariant = -1, PopupDodgeAttempts = 0, LastDodgeSlot = -1;
     bool LastDodgeSlide = false;
     FVector LastDodgeDirection, LastDodgeOrigin;
@@ -110,7 +111,9 @@ struct ANCAimTrainerTarget : AActor {
         LastDodgeOrigin=origin; LastDodgeSlide=slide; return CanDodge;
     }
     bool IsTrainerSliding() const { return Sliding; }
-    bool StartPopupLongStrafe(float,float,float) { ++LongStrafes; return true; }
+    bool StartPopupLongStrafe(float width,float hold,float) {
+        LastLongStrafeWidth=width; LastLongStrafeHold=hold; ++LongStrafes; return true;
+    }
     bool TryTrainerTrackingSlide(float) { ++TrackingSlideAttempts; if (!CanSlide) return false; ++TrackingSlides; return true; }
     bool SetTrainerCrouched(bool crouch) {
         if (crouch) { ++CrouchRequests; if (!CanCrouch) return false; }
@@ -408,9 +411,10 @@ void LayoutAndWiggles() {
                         && z == seat.FloorZ + standing, "activation ignored authored layout bounds or profile height");
                 Require(target.Wiggles == 1 && target.WiggleRange == seat.WiggleRange && !target.Strafing,
                         "precision target did not start its authored wiggle");
-                const bool varied = scenario == 2 && NCAimTrainerScenarioPolicy::HasVariedPopupMovement(slot);
-                Require(f.Game.NextWiggleTime[slot] >= (varied ? 10.24f : 10.12f)
-                        && f.Game.NextWiggleTime[slot] <= (varied ? 10.751f : 10.29f),
+                const float hold=scenario==2
+                    ?NCAimTrainerScenarioPolicy::PopupStrafeHoldSeconds(slot,roll,roll,variant)
+                    :NCAimTrainerScenarioPolicy::WiggleHoldSeconds(roll);
+                Require(FMath::IsNearlyEqual(f.Game.NextWiggleTime[slot],10.f+hold),
                         "initial wiggle decision deadline lost");
                 if (scenario == 2 && slot < 3) {
                     const FBlock platform = PopupPlatform(slot);
@@ -694,14 +698,17 @@ void PopupLongStrafeLifecycle() {
             if(roll<.6f || roll>=.8f) continue;
             f.Game.NextPopupSlideTime[0]=0;
             const float due=f.Game.NextPopupLongStrafeTime[0];
-            Require(due>=11.4f && due<=12.01f && f.Game.NextCrouchTime[0]==0,
-                    "long strafe conflicts with crouch or precedes slide recovery");
+            Require(due>=10.8f && due<=11.31f && f.Game.NextCrouchTime[0]==0,
+                    "long strafe conflicts with crouch or starts too late for the shorter SACTF exposure");
             f.Targets[0].Sliding=true; f.At(due);
             Require(f.Targets[0].LongStrafes==0 && FMath::IsNearlyEqual(f.Game.NextPopupLongStrafeTime[0],due+.15f),
                     "long strafe interrupted native slide or lost its short retry");
             f.Targets[0].Sliding=false; f.At(due+.15f); f.At(due+.25f);
             Require(f.Targets[0].LongStrafes==1 && f.Game.NextPopupLongStrafeTime[0]==0,
                     "long strafe did not start once after slide recovery");
+            Require(f.Targets[0].LastLongStrafeWidth==220.f&&f.Targets[0].LastLongStrafeHold>=.7f
+                    &&f.Targets[0].LastLongStrafeHold<=1.f,
+                    "native scheduler lost wider or longer rear-left sweep arguments");
             f.Game.ActivateSlot(0,due+.5f);
             Require(f.Game.NextPopupLongStrafeTime[0]>due+.5f,"reused rear target inherited prior deadline");
             f.Game.HideAllTargets();
@@ -998,7 +1005,15 @@ void PopupVariety() {
         ++variants[PopupSpawnVariant(4,roll)];
         ++actions[PopupAction(0,0,roll)];
         const float hold=PopupStrafeHoldSeconds(0,roll,.5f);
-        if(hold<.45f) ++shortHolds; else ++longHolds;
+        if(hold<.65f) ++shortHolds; else ++longHolds;
+        Require(hold>=(roll<.35f?.35f:.65f)&&hold<=(roll<.35f?.55f:1.f),
+            "left popup hold escaped its new short/long timing bands");
+        Require(PopupStrafeHoldSeconds(4,roll,.5f,0)==hold&&PopupStrafeHoldSeconds(4,roll,.5f,2)==hold,
+            "near/deep left variants did not share longer holds");
+        const float priorHold=roll<.6f?.33f:.6f;
+        Require(FMath::IsNearlyEqual(PopupStrafeHoldSeconds(4,roll,.5f,1),priorHold)
+            &&FMath::IsNearlyEqual(PopupStrafeHoldSeconds(1,roll,.5f),priorHold),
+            "longer left timing leaked into far-right or center-platform motion");
         for(int slot:{2,3}) {
             Require(PopupSpawnVariant(slot,roll)==0, "protected popup acquired alternate spawn");
             Require(PopupStrafeHoldSeconds(slot,roll,.5f)==WiggleHoldSeconds(.5f),
@@ -1009,7 +1024,7 @@ void PopupVariety() {
         Require(PopupAction(4,1,roll)<PopupForwardDodge,"far-right variant acquired a left-lane dodge");
     }
     Require(variants[0]==400&&variants[1]==300&&variants[2]==300,"alternate near/deep/right spawn mixture drifted");
-    Require(shortHolds==600&&longHolds==400,"readable short/long movement mixture drifted");
+    Require(shortHolds==350&&longHolds==650,"left popup35/65 short/long movement mixture drifted");
     Require(actions[PopupForwardDodge]==150&&actions[PopupBackwardDodge]==150
         &&actions[PopupDodgeSlide]==100&&actions[PopupStrafe]==200,"random appearance actions lost variety");
     for(int scenario:{1,2,3,4,5}) for(float roll:{.05f,.22f,.35f,.55f,.75f,.95f}) {
@@ -1021,6 +1036,13 @@ void PopupVariety() {
                 +int(f.Game.NextPopupLongStrafeTime[slot]>0)+int(f.Game.NextCrouchTime[slot]>0);
             Require(specials<=1,"independent special movements compete in one appearance");
             if(!IsPopupScenario(scenario)) Require(specials==0,"headshot scenario gained popup motion");
+            const float hold=IsPopupScenario(scenario)
+                ?PopupStrafeHoldSeconds(slot,roll,roll,f.Game.PopupSpawnVariants[slot]):WiggleHoldSeconds(roll);
+            Require(FMath::IsNearlyEqual(f.Game.NextWiggleTime[slot],10.f+hold),
+                "initial native scheduler ignored the popup variant's hold timing");
+            f.Game.NextWiggleTime[slot]=10.f; f.At(10.f);
+            Require(FMath::IsNearlyEqual(f.Game.NextWiggleTime[slot],10.f+hold),
+                "recurring native scheduler ignored the popup variant's hold timing");
         }
     }
 }

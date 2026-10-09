@@ -657,7 +657,7 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
             Targets[Index]->ReverseStrafe();
         }
         NextWiggleTime[Index] = Now + (bTimedPopup
-            ? NCAimTrainerScenarioPolicy::PopupStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand())
+            ? NCAimTrainerScenarioPolicy::PopupStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand(), PopupSpawnVariants[Index])
             : NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand()));
         if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario))
         {
@@ -940,8 +940,8 @@ void ANCAimTrainerGame::ActivateAirborneSlot(int32 Index, float Now)
         const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::AirborneDropSeat(Index - 1, bSideWall, bRockets);
         Position = FVector(Schedule.FRandRange(Seat.MinX, Seat.MaxX),
             Seat.CenterY + Schedule.FRandRange(-Seat.SpawnJitterY, Seat.SpawnJitterY),
-            NCAimTrainerLayout::AirborneTargetHeight(
-                Schedule.FRandRange(NCAimTrainerLayout::AirborneDropMinZ, NCAimTrainerLayout::AirborneDropMaxZ), bRockets));
+            NCAimTrainerLayout::AirborneDropHeight(
+                Schedule.FRandRange(NCAimTrainerLayout::AirborneDropMinZ, NCAimTrainerLayout::AirborneDropMaxZ), bRockets, bSideWall));
         // Small varied drift gives each fall a readable arc. Bounds leave room
         // for the entire capsule at the maximum drift until it reaches goo.
         // Side-wall drops drift inward, never out through the adjacent wall.
@@ -1021,7 +1021,7 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
         {
             Targets[Index]->ReverseStrafe();
             NextWiggleTime[Index] = Now + (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario)
-                ? NCAimTrainerScenarioPolicy::PopupStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand())
+                ? NCAimTrainerScenarioPolicy::PopupStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand(), PopupSpawnVariants[Index])
                 : NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand()));
         }
         if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && Targets[Index]->IsAvailable())

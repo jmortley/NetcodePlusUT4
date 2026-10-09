@@ -358,8 +358,8 @@ void LeftMotionLanes() {
         PlatformSupport();
         const FSeat rear=PopupMovementSeat(0),near=PopupMovementSeat(4);
         const FBlock support=PopupPlatform(0);
-        Require(TestPopupSeat(0).MinX>=1000.f&&TestPopupSeat(0).SpawnJitterY<=50.f
-            &&rear.WiggleRange==180.f,"rear-left long strafe lost its required runway or safe lateral extent");
+        Require(TestPopupSeat(0).MinX>=1000.f&&TestPopupSeat(0).SpawnJitterY==10.f
+            &&TestPopupSeat(0).WiggleRange==180.f&&rear.WiggleRange==220.f,"rear-left long strafe lost its required runway or safe lateral extent");
         for(Point point:Endpoints(rear)) {
             Require(point.Y-TestRadius()>support.CenterY-support.SizeY*.5f
                 &&point.Y+TestRadius()<support.CenterY+support.SizeY*.5f,
@@ -525,39 +525,48 @@ void PreservedSeats() {
     Require(PopupSeat(3).MinX==2650.f&&PopupSeat(3).MaxX==2850.f&&PopupSeat(3).CenterY==0.f
         &&PopupSeat(3).SpawnJitterY==0.f&&PopupSeat(3).WiggleRange==60.5f&&PopupSeat(3).FloorZ==0.f,
         "rear-center head-peek no longer has its original movement envelope");
+    Require(PopupSeat(0).SpawnJitterY==10.f&&PopupSeat(0).WiggleRange==180.f&&PopupLongStrafeRange==220.f
+        &&PopupSeat(4,0).SpawnJitterY==50.f&&PopupSeat(4,0).WiggleRange==180.f
+        &&PopupSeat(4,2).SpawnJitterY==25.f&&PopupSeat(4,2).WiggleRange==150.f,
+        "left target strafe widths did not increase within their reserved spawn lanes");
+    Require(PopupSeat(4,1).MinX==-600.f&&PopupSeat(4,1).MaxX==-300.f&&PopupSeat(4,1).CenterY==1450.f
+        &&PopupSeat(4,1).SpawnJitterY==50.f&&PopupSeat(4,1).WiggleRange==100.f,
+        "right foreground target changed with the requested left-side movement");
+    Require(PopupSeat(1,0).WiggleRange==47.f&&PopupSeat(1,1).WiggleRange==47.f,
+        "middle peek changed with the requested left-side movement");
     Require(PopupSeatVariantCount(4)==3&&PopupSeatVariantCount(1)==2
         &&PopupSeatVariantCount(2)==1&&PopupSeatVariantCount(3)==1,"seat variation pool changed");
 }
 void AngledDodgePaths() {
     for (float radius:{38.f,40.f}) {
-        Require(CanPopupDodgePath(0,1400.f,-850.f,100.f,-830.f,radius,120.f),
+        Require(CanPopupDodgePath(0,1400.f,-850.f,100.f,-830.f,radius,PopupSeat(0).WiggleRange),
             "safe forward low-platform dodge rejected");
-        Require(CanPopupDodgePath(0,1000.f,-850.f,2300.f,-880.f,radius,120.f),
+        Require(CanPopupDodgePath(0,1000.f,-850.f,2300.f,-880.f,radius,PopupSeat(0).WiggleRange),
             "safe backward low-platform dodge rejected");
-        Require(CanPopupDodgePath(0,1000.f,-850.f,3000.f,-1200.f,radius,120.f),
+        Require(CanPopupDodgePath(0,1000.f,-850.f,3000.f,-1200.f,radius,PopupSeat(0).WiggleRange),
             "backward dodge-slide cannot step off the one-unit platform onto clear floor");
-        Require(!CanPopupDodgePath(0,1400.f,-850.f,3200.f,-850.f,radius,120.f),
+        Require(!CanPopupDodgePath(0,1400.f,-850.f,3200.f,-850.f,radius,PopupSeat(0).WiggleRange),
             "backward dodge can reach the rear wall");
-        Require(!CanPopupDodgePath(0,1400.f,-850.f,100.f,-1700.f,radius,120.f),
+        Require(!CanPopupDodgePath(0,1400.f,-850.f,100.f,-1700.f,radius,PopupSeat(0).WiggleRange),
             "inherited lateral dodge momentum can reach the side wall");
-        Require(CanPopupDodgePath(4,-500.f,-1450.f,1000.f,-1470.f,radius,100.f),
+        Require(CanPopupDodgePath(4,-500.f,-1450.f,1000.f,-1470.f,radius,PopupSeat(4,0).WiggleRange),
             "safe backward dodge in the left ground corridor rejected");
-        Require(CanPopupDodgePath(4,1100.f,-1450.f,-400.f,-1470.f,radius,100.f),
+        Require(CanPopupDodgePath(4,1100.f,-1550.f,-400.f,-1470.f,radius,PopupSeat(4,2).WiggleRange),
             "safe forward dodge from deeper left seat rejected");
-        Require(!CanPopupDodgePath(4,-500.f,-1450.f,-1700.f,-1470.f,radius,100.f),
+        Require(!CanPopupDodgePath(4,-500.f,-1450.f,-1700.f,-1470.f,radius,PopupSeat(4,0).WiggleRange),
             "near-side dodge can cross the foreground dodger plane");
-        Require(!CanPopupDodgePath(4,-500.f,-1450.f,1000.f,-400.f,radius,100.f),
+        Require(!CanPopupDodgePath(4,-500.f,-1450.f,1000.f,-400.f,radius,PopupSeat(4,0).WiggleRange),
             "resumed strafe can clip central cover after landing");
-        Require(!CanPopupDodgePath(4,-500.f,1450.f,1000.f,1470.f,radius,100.f),
+        Require(!CanPopupDodgePath(4,-500.f,1450.f,1000.f,1470.f,radius,PopupSeat(4,0).WiggleRange),
             "far-right alternative unexpectedly enables the left-only dodge");
         for (int protectedSlot:{1,2,3,5}) {
-            Require(!CanPopupDodgePath(protectedSlot,1400.f,-850.f,100.f,-830.f,radius,120.f),
+            Require(!CanPopupDodgePath(protectedSlot,1400.f,-850.f,100.f,-830.f,radius,PopupSeat(0).WiggleRange),
                 "an excluded target can use the new angled dodge");
         }
     }
-    Require(!CanPopupDodgePath(0,std::numeric_limits<float>::quiet_NaN(),-850.f,100.f,-830.f,40.f,120.f),
+    Require(!CanPopupDodgePath(0,std::numeric_limits<float>::quiet_NaN(),-850.f,100.f,-830.f,40.f,PopupSeat(0).WiggleRange),
         "nonfinite native motion is accepted");
-    Require(!CanPopupDodgePath(0,1400.f,-850.f,100.f,-830.f,0.f,120.f),"empty capsule accepted");
+    Require(!CanPopupDodgePath(0,1400.f,-850.f,100.f,-830.f,0.f,PopupSeat(0).WiggleRange),"empty capsule accepted");
 }
 Point NativeDodgeEnd(Point start,float degrees,float xSign,float ySign,float lateralVelocity,bool chain) {
     // Real profile impulse/cap, gravity, landing reset and slide defaults.
@@ -577,24 +586,55 @@ void NativeAngledDodgeOpportunity() {
             for(float direction:{-1.f,1.f}) {
                 const Point start={1100.f,-850.f,1.f};
                 const Point end=NativeDodgeEnd(start,degrees,direction,-1.f,0.f,false);
-                Require(CanPopupDodgePath(0,start.X,start.Y,end.X,end.Y,radius,140.f),
+                Require(CanPopupDodgePath(0,start.X,start.Y,end.X,end.Y,radius,PopupSeat(0).WiggleRange),
                     "normal 12-28 degree forward/back dodge has no safe low-left opportunity");
                 const Point deep={1100.f,-1550.f,0.f};
                 const Point deepEnd=NativeDodgeEnd(deep,degrees,direction,1.f,0.f,false);
-                Require(CanPopupDodgePath(4,deep.X,deep.Y,deepEnd.X,deepEnd.Y,radius,100.f),
+                Require(CanPopupDodgePath(4,deep.X,deep.Y,deepEnd.X,deepEnd.Y,radius,PopupSeat(4,2).WiggleRange),
                     "normal forward/back angled dodge has no safe deep-left opportunity");
             }
         }
         for(Point start:std::vector<Point>{{900.f,-850.f,1.f},{-500.f,-1450.f,0.f}}) {
             const bool low=start.Z>0.f;
             const Point end=NativeDodgeEnd(start,12.f,1.f,low ? -1.f : 1.f,0.f,true);
-            Require(CanPopupDodgePath(low ? 0 : 4,start.X,start.Y,end.X,end.Y,radius,low ? 140.f : 100.f),
+            Require(CanPopupDodgePath(low ? 0 : 4,start.X,start.Y,end.X,end.Y,radius,PopupSeat(low ? 0 : 4).WiggleRange),
                 "native backward dodge-to-slide has no safe popup opportunity");
         }
         const Point start={1100.f,-850.f,1.f};
         const Point carried=NativeDodgeEnd(start,28.f,1.f,-1.f,-940.f,false);
-        Require(!CanPopupDodgePath(0,start.X,start.Y,carried.X,carried.Y,radius,140.f),
+        Require(!CanPopupDodgePath(0,start.X,start.Y,carried.X,carried.Y,radius,PopupSeat(0).WiggleRange),
             "full native perpendicular momentum is not guarded against side-wall contact");
+    }
+}
+void WiderLeftDodgeOpportunities() {
+    struct SeatChoice { int Slot,Variant; };
+    for(float radius:{38.f,40.f}) for(const auto choice:std::vector<SeatChoice>{{0,0},{4,0},{4,2}}) {
+        const FSeat seat=PopupSeat(choice.Slot,choice.Variant);
+        for(int action:{NCAimTrainerScenarioPolicy::PopupForwardDodge,NCAimTrainerScenarioPolicy::PopupBackwardDodge,
+                        NCAimTrainerScenarioPolicy::PopupDodgeSlide}) {
+            const bool forward=action==NCAimTrainerScenarioPolicy::PopupForwardDodge;
+            const bool chained=action==NCAimTrainerScenarioPolicy::PopupDodgeSlide;
+            int accepted=0,total=0;
+            // Sample the actual randomized angle range, spawn jitter, strafe
+            // position and native perpendicular velocity carried into a dodge.
+            for(float xFraction:{0.f,.5f,1.f}) for(float jitter:{-1.f,0.f,1.f})
+                for(float strafe:{-.75f,0.f,.75f}) for(float velocity:{-940.f,-470.f,0.f,470.f,940.f})
+                    for(float roll:{0.f,.25f,.5f,.75f,1.f}) for(float side:{-1.f,1.f}) {
+                        const Point start={seat.MinX+xFraction*(seat.MaxX-seat.MinX),
+                            seat.CenterY+jitter*seat.SpawnJitterY+strafe*seat.WiggleRange,seat.FloorZ};
+                        const Point end=NativeDodgeEnd(start,NCAimTrainerScenarioPolicy::PopupDodgeAngleDegrees(roll),
+                            forward?-1.f:1.f,side,velocity,chained);
+                        ++total;
+                        if(CanPopupDodgePath(choice.Slot,start.X,start.Y,end.X,end.Y,radius,seat.WiggleRange))++accepted;
+                    }
+            if(choice.Slot==4&&choice.Variant==0&&forward) {
+                Require(accepted==0,"near-left forward dodge crossed the reserved foreground target plane");
+            } else {
+                Require(accepted>0&&accepted<total,"wider left strafe removed legal dodges or stopped filtering unsafe paths");
+            }
+            std::cout<<"radius="<<radius<<" slot="<<choice.Slot<<" variant="<<choice.Variant
+                <<" action="<<action<<" accepted="<<accepted<<"/"<<total<<'\n';
+        }
     }
 }
 void AirborneGeometry() {
@@ -629,9 +669,13 @@ void AirborneGeometry() {
     }
     for(int index=0;index<5;++index) for(bool sidewall:{false,true}) {
         const FSeat seat=AirborneDropSeat(index,sidewall,rockets);
-        Require(AirborneTargetHeight(AirborneDropMinZ,rockets)>pad0.Height+2.f*TestHalfHeight()
-            &&AirborneTargetHeight(AirborneDropMaxZ,rockets)+TestHalfHeight()<2000.f,
+        const bool sideLane=sidewall&&(index==0||index==4);
+        Require(AirborneDropHeight(AirborneDropMinZ,rockets,sideLane)>pad0.Height+2.f*TestHalfHeight()
+            &&AirborneDropHeight(AirborneDropMaxZ,rockets,sideLane)+TestHalfHeight()<2000.f,
             "falling target spawn collides with floor or ceiling");
+        const float maxLaunch=300.f*AirborneLaunchScale(rockets);
+        Require(AirborneDropHeight(AirborneDropMaxZ,rockets,sideLane)+maxLaunch*maxLaunch/(2.f*980.f)
+            +TestHalfHeight()<2000.f,"full falling capsule can hit the ceiling at maximum native-gravity apex");
         Require(seat.FloorZ==hazard&&seat.MinX-TestRadius()>ledge.CenterX+ledge.SizeX*.5f
             &&seat.MaxX+TestRadius()<3200.f&&seat.CenterY-seat.SpawnJitterY-TestRadius()>-1800.f
             &&seat.CenterY+seat.SpawnJitterY+TestRadius()<1800.f,
@@ -662,13 +706,14 @@ void AirborneGeometry() {
     for(int scenario=0;scenario<11;++scenario)
         Require(PracticeLaneX(scenario)==(scenario==10?-800.f:-1800.f),"rocket firing distance leaked to another scenario");
 }
-void RequireHalfRocketDistance(Point before,Point compact,float rearOffset=0.f) {
+void RequireHalfRocketDistance(Point before,Point compact,float rearOffset=0.f,float rearRaise=0.f) {
     // Compare to the previous rocket player's real stationary eye, not the
     // normal hitscan player's farther firing ledge or a target's foot height.
     const Point eye={-800.f,0.f,511.f};
-    // Restore only the intentional extra rear-drop approach before comparing
-    // against the half-size baseline; side lanes and pads have no offset.
+    // Restore intentional rear-drop approach/height changes before comparing
+    // against the half-size baseline; side lanes and pads have no offsets.
     compact.X+=rearOffset;
+    compact.Z-=rearRaise;
     const float oldDistanceSquared=(before.X-eye.X)*(before.X-eye.X)+(before.Y-eye.Y)*(before.Y-eye.Y)
         +(before.Z-eye.Z)*(before.Z-eye.Z);
     const float compactDistanceSquared=(compact.X-eye.X)*(compact.X-eye.X)+(compact.Y-eye.Y)*(compact.Y-eye.Y)
@@ -684,6 +729,14 @@ void RocketHalfDistances() {
     Require(halfHeight==108.f&&AirborneFiringLedge(true).Height+halfHeight
         +NCAimTrainerCharacterProfile::TeamArena().StandingEyeHeight==511.f,
         "compact layout reference differs from the actual stationary rocket eye");
+    Require(std::abs(AirborneDropHeight(1350.f,true)-1297.1f)<.001f
+        &&std::abs(AirborneDropHeight(1750.f,true)-1617.1f)<.001f,
+        "rear rocket spawn range did not gain60% capsule-bottom clearance above goo");
+    for(float height:{1350.f,1550.f,1750.f}) {
+        Require(AirborneDropHeight(height,false)==height&&AirborneDropHeight(height,false,true)==height
+            &&AirborneDropHeight(height,true,true)==AirborneTargetHeight(height,true),
+            "rear rocket height change affected normal scenarios or the side-wall lanes");
+    }
     for(int index=0;index<2;++index) {
         const auto original=AirborneJumpPad(index),compact=AirborneJumpPad(index,true);
         RequireHalfRocketDistance({original.CenterX,original.CenterY,original.Height+halfHeight+2.f},
@@ -699,10 +752,11 @@ void RocketHalfDistances() {
                 const Point before={original.MinX+(original.MaxX-original.MinX)*position,
                     original.CenterY+jitter*original.SpawnJitterY,height};
                 const float compactHeight=height==AirborneHazardHeight(false)+halfHeight
-                    ?AirborneHazardHeight(true)+halfHeight:AirborneTargetHeight(height,true);
+                    ?AirborneHazardHeight(true)+halfHeight:AirborneDropHeight(height,true,sideLane);
+                const float rearRaise=sideLane?0.f:.6f*(AirborneTargetHeight(height,true)-319.5f);
                 const Point after={compact.MinX+(compact.MaxX-compact.MinX)*position,
                     compact.CenterY+jitter*compact.SpawnJitterY,compactHeight};
-                RequireHalfRocketDistance(before,after,rearOffset);
+                RequireHalfRocketDistance(before,after,rearOffset,rearRaise);
             }
     }
 }
@@ -712,6 +766,7 @@ int main(int argc,char**argv) {
     if(name=="preserved") { PreservedSeats(); return 0; }
     if(name=="dodge_paths") { AngledDodgePaths(); return 0; }
     if(name=="native_dodge") { NativeAngledDodgeOpportunity(); return 0; }
+    if(name=="wider_dodge") { WiderLeftDodgeOpportunities(); return 0; }
     if(name=="arena_replication") { ArenaScenarioReplication(); return 0; }
     if(name=="rocket_half_distance") { RocketHalfDistances(); return 0; }
     if(name=="arena_goo") { ArenaGooMaterial(); return 0; }
@@ -786,6 +841,7 @@ class AimTrainerLayoutTests(unittest.TestCase):
     def test_requested_platform_and_head_peek_seats_are_preserved(self): self.run_case("preserved")
     def test_angled_dodge_paths_keep_landing_strafe_and_capsules_clear(self): self.run_case("dodge_paths")
     def test_native_impulses_allow_forward_backward_and_landing_slide_opportunities(self): self.run_case("native_dodge")
+    def test_wider_left_strafes_retain_safe_randomized_native_dodge_opportunities(self): self.run_case("wider_dodge")
 
 
 if __name__ == "__main__":

@@ -42,12 +42,18 @@ namespace NCAimTrainerScenarioPolicy
         return Slot == 1 && Choice >= 0.5f ? 1 : 0;
     }
 
-    inline float PopupStrafeHoldSeconds(int Slot, float PatternRoll, float JitterRoll)
+    inline float PopupStrafeHoldSeconds(int Slot, float PatternRoll, float JitterRoll, int Variant = 0)
     {
         if (!HasVariedPopupMovement(Slot)) { return WiggleHoldSeconds(JitterRoll); }
         // Give acceleration time to produce a readable movement across the
         // lane. Mix shorter reversals with longer commitments each decision.
         const float Jitter = UnitRoll(JitterRoll);
+        if (Slot == 0 || (Slot == 4 && Variant != 1))
+        {
+            // Commit to longer runs on the left instead of mostly reversing
+            // before the wider lane has produced useful lateral travel.
+            return UnitRoll(PatternRoll) < 0.35f ? 0.35f + 0.20f * Jitter : 0.65f + 0.35f * Jitter;
+        }
         return UnitRoll(PatternRoll) < 0.6f ? 0.24f + 0.18f * Jitter : 0.45f + 0.30f * Jitter;
     }
 
@@ -92,8 +98,8 @@ namespace NCAimTrainerScenarioPolicy
     inline float CrouchDelaySeconds(float Roll) { return 1.5f + 2.f * UnitRoll(Roll); }
     inline float CrouchHoldSeconds(float Roll) { return 0.25f + 0.20f * UnitRoll(Roll); }
     inline float PopupSlideDelaySeconds(float Roll) { return 0.8f + 0.6f * UnitRoll(Roll); }
-    inline float PopupLongStrafeDelaySeconds(float Roll) { return 1.4f + 0.6f * UnitRoll(Roll); }
-    inline float PopupLongStrafeHoldSeconds(float Roll) { return 0.50f + 0.25f * UnitRoll(Roll); }
+    inline float PopupLongStrafeDelaySeconds(float Roll) { return 0.8f + 0.5f * UnitRoll(Roll); }
+    inline float PopupLongStrafeHoldSeconds(float Roll) { return 0.70f + 0.30f * UnitRoll(Roll); }
     inline float PopupLongStrafeDirection(float Offset, float Roll)
     {
         if (Offset > 20.f) { return -1.f; }

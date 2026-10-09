@@ -332,7 +332,7 @@ void ANCAimTrainerTarget::StartWiggle(float HalfWidth)
     if (Role != ROLE_Authority || !bTrainerVisible || bTrainerAirborne || !FMath::IsFinite(HalfWidth) || HalfWidth <= 0.f) { return; }
     bTrainerStrafe = true;
     bTrainerWiggle = true;
-    StrafeRange = FMath::Clamp(HalfWidth, 20.f, 140.f);
+    StrafeRange = FMath::Clamp(HalfWidth, 20.f, NCAimTrainerLayout::PopupLongStrafeRange);
     WiggleRange = StrafeRange;
     PopupLongStrafeEndTime = 0.f;
     GetCharacterMovement()->SetMovementMode(MOVE_Walking);
@@ -351,7 +351,7 @@ bool ANCAimTrainerTarget::StartPopupLongStrafe(float HalfWidth, float HoldSecond
     // use a fresh random direction. Native acceleration and braking still apply.
     StrafeDirection = NCAimTrainerScenarioPolicy::PopupLongStrafeDirection(
         GetActorLocation().Y - StrafeCenter.Y, DirectionRoll);
-    PopupLongStrafeEndTime = GetWorld()->GetTimeSeconds() + FMath::Clamp(HoldSeconds, 0.4f, 0.8f);
+    PopupLongStrafeEndTime = GetWorld()->GetTimeSeconds() + FMath::Clamp(HoldSeconds, 0.4f, 1.f);
     return true;
 }
 

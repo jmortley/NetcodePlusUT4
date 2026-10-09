@@ -360,10 +360,10 @@ int main(int argc,char**argv) {
         Require(target.bTrainerWiggle&&target.bTrainerStrafe&&target.StrafeRange==20.f
                 &&target.Move.MaxWalkSpeed==500.f&&target.Move.Mode==MOVE_Walking,"wiggle changed profile speed or movement mode");
         target.StartWiggle(1000.f);
-        Require(target.StrafeRange==140.f,"wiggle exceeded maximum range");
-        target.Position.Y=440.f; target.Tick(.016f);
+        Require(target.StrafeRange==220.f,"wiggle exceeded maximum range or clipped wider left lanes");
+        target.Position.Y=520.f; target.Tick(.016f);
         Require(target.LastInput.Y==-1.f,"wiggle did not reverse at right edge");
-        target.Position.Y=160.f; target.ReverseStrafe();
+        target.Position.Y=80.f; target.ReverseStrafe();
         Require(target.StrafeDirection==1.f,"wiggle reverse ignored local left edge");
         target.Tick(.016f); Require(target.LastInput.Y==1.f,"wiggle tick escaped local left edge");
         Require(!target.TryTrainerDodge(.8f)&&target.DodgeCalls==0,"headshot wiggle performed a dodge");
@@ -413,6 +413,15 @@ int main(int argc,char**argv) {
             Require(target.LastInput.Y==sign,"wide lane reversed while stopping room remained");
             target.Position.Y=target.StrafeCenter.Y+sign*710.f; target.Tick(.016f);
             Require(target.LastInput.Y==-sign,"wide lane waited until boundary to brake native speed");
+            for(float width:{150.f,180.f}) {
+                target.StartWiggle(width); target.StrafeDirection=sign;
+                target.Position.Y=target.StrafeCenter.Y+sign*30.f;
+                target.Tick(.016f);
+                Require(target.StrafeRange==width&&target.LastInput.Y==sign&&target.Move.MaxWalkSpeed==940.f
+                        &&target.Teleports==teleports,"wider left lane still reverses inside the old narrow range");
+                target.Position.Y=target.StrafeCenter.Y+sign*(width-30.f); target.Tick(.016f);
+                Require(target.LastInput.Y==-sign,"wider left lane failed to brake before its authored boundary");
+            }
         }
     } else if(name=="crouch_guards") {
         for(bool wiggle:{false,true}) for(int guard=0;guard<6;++guard) {
@@ -724,25 +733,25 @@ int main(int argc,char**argv) {
     } else if(name=="popup_long_motion") {
         for(float side:{-1.f,1.f}) {
             ANCAimTrainerTarget target;
-            target.ActivateTarget(FVector(1000.f,-850.f,103.f),false);target.StartWiggle(99.f);
-            target.Position.Y+=side*70.f;
-            Require(target.StartPopupLongStrafe(180.f,.6f,side<0.f?0.f:1.f),"valid long strafe rejected");
-            Require(target.StrafeDirection==-side&&target.StrafeRange==180.f
-                &&target.PopupLongStrafeEndTime==42.6f,"long strafe did not sweep across its current lane");
+            target.ActivateTarget(FVector(1000.f,-850.f,103.f),false);target.StartWiggle(180.f);
+            target.Position.Y+=side*150.f;
+            Require(target.StartPopupLongStrafe(220.f,.9f,side<0.f?0.f:1.f),"valid long strafe rejected");
+            Require(target.StrafeDirection==-side&&target.StrafeRange==220.f
+                &&target.PopupLongStrafeEndTime==42.9f,"long strafe did not sweep across its wider left lane");
             target.ReverseStrafe();target.Tick(.016f);
             Require(target.LastInput.Y==-side&&target.Teleports==1&&target.Move.MaxWalkSpeed==500.f,
                 "short wiggle interrupted long hold or motion was replaced with a speed cap/teleport");
-            Require(!target.StartPopupLongStrafe(180.f,.8f,0.f)&&!target.TryTrainerPopupSlide(0)
+            Require(!target.StartPopupLongStrafe(220.f,.9f,0.f)&&!target.TryTrainerPopupSlide(0)
                 &&!target.SetTrainerCrouched(true),"another scheduled action interrupted long native strafe");
-            target.Position.Y=target.StrafeCenter.Y-side*170.f;
+            target.Position.Y=target.StrafeCenter.Y-side*210.f;
             target.TheWorld.Time=target.PopupLongStrafeEndTime-.001f;target.Tick(.001f);
             Require(target.IsTrainerLongStrafing(),"long hold ended before deadline");
             target.TheWorld.Time=target.PopupLongStrafeEndTime;target.Tick(.001f);
-            Require(!target.IsTrainerLongStrafing()&&target.StrafeRange==99.f&&target.LastInput.Y==side
-                &&target.Position.Y==target.StrafeCenter.Y-side*170.f&&target.Teleports==1,
+            Require(!target.IsTrainerLongStrafing()&&target.StrafeRange==180.f&&target.LastInput.Y==side
+                &&target.Position.Y==target.StrafeCenter.Y-side*210.f&&target.Teleports==1,
                 "long strafe did not return inside original wiggle range with native motion");
-            Require(target.StartPopupLongStrafe(999.f,999.f,0.f)&&target.StrafeRange==180.f
-                &&target.PopupLongStrafeEndTime<=target.TheWorld.Time+.801f,"long move exceeded safe range or hold");
+            Require(target.StartPopupLongStrafe(999.f,999.f,0.f)&&target.StrafeRange==220.f
+                &&target.PopupLongStrafeEndTime==target.TheWorld.Time+1.f,"long move exceeded safe range or lost the one-second hold");
             target.HideTarget();
             Require(!target.IsTrainerLongStrafing()&&target.WiggleRange==0.f,"hidden appearance retained long hold");
             target.ActivateTarget(FVector(1200.f,-850.f,103.f),false);target.StartWiggle(99.f);
