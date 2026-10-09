@@ -4,6 +4,45 @@ An opt-in game mode with real animated UT character targets, six 60-second
 scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
 
+## Pop-up movement refresh (2026-10-09)
+
+The IG, Sniper/LG and SACTF pop-up presets now use fresh revision-12 boards.
+Link tracking, ordinary headshots and SACTF headshots continue to use their
+revision-11 boards. Old pop-up scores remain archived; they are not deleted or
+mixed into the tuned preset. Fixed/movement and local/approved-server results
+remain separate. Deploy the matching Django update before the new game build;
+this board change needs no database migration and adds no revision labels to
+the current leaderboard UI.
+
+- Ordinary pop-ups mix 0.24-0.42-second reversals with 0.45-0.75-second holds,
+  wider lateral movement and a random initial direction. The rear-center head
+  peek and high-right platform target keep their previous movement and seats.
+- The middle platform can use either of two side perches. The outer floor
+  target alternates between near-left, deep-left and far-right positions. The
+  right seat stays ahead of the tall platform so it remains visible. This
+  increases location variety while retaining five timed targets and the
+  separate permanent foreground dodger, with unchanged target IDs 0-5.
+- Left appearances randomly choose ordinary movement, a longer strafe, a
+  slide, an angled forward/backward dodge, or a backward dodge into a slide.
+  Only one special movement is scheduled per appearance; rejected attempts
+  are not retried on a fixed timer. Diagonal input angles vary from 12 to 28
+  degrees, and use the selected character's actual UT dodge physics.
+- The dodge guard accounts for existing perpendicular velocity, capsule
+  radius, landing/slide travel and the resumed strafe band. Unsafe routes or
+  actions too close to expiry are skipped. A dodge-to-slide uses UT's actual
+  slide input and `ProcessLanded` path, then resumes strafing at its endpoint.
+  Native slides/dodges can briefly cross another moving target's sightline.
+- Targets disappear after 4.5-5.4 firing intervals, down from 5.5-6.8:
+  IG 4.5-5.4 seconds, Sniper/LG 5.85-7.02, SACTF 3.15-3.78. Spawn cadence and
+  scoring stay the same; quick target selection now matters more. Full special
+  movements still reserve a legal rifle shot before expiry, so the shorter
+  SACTF exposure can skip some longer chains.
+
+Validation covers native scheduler/target methods, stock landing-to-slide
+transition, capsule/sightline geometry, and Django local/server board routing.
+Rebuild and playtest standalone plus a remote client to verify presentation and
+the final movement feel; the automated geometry envelope is not an engine run.
+
 ## Planned standalone map
 
 Owner direction, 2026-10-06: expand

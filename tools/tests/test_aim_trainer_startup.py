@@ -116,6 +116,7 @@ struct AUTWeapon {
     void StopFire(int) {}
 };
 struct AUTPlusSniper : AUTWeapon {
+    bool bTrackImpressive = true;
     int HeadshotDamageType = 11;
     static UClass* StaticClass() { return &SniperType; }
 };
@@ -126,6 +127,7 @@ struct SACTFSniper : AUTPlusSniper {
     SACTFSniper() { ShotsStatsName = 3; HeadshotDamageType = 33; BeamRefire = .7f; }
 };
 struct AUTPlusShockRifle : AUTWeapon {
+    bool bTrackImpressive = true;
     static UClass* StaticClass() { return &InstagibType; }
     bool HasSharedInstagibFireModes() const { return true; }
 };

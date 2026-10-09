@@ -58,6 +58,9 @@ ANCAimTrainerGame::ANCAimTrainerGame(const FObjectInitializer& ObjectInitializer
     NextWiggleTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     NextPopupSlideTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     NextPopupLongStrafeTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
+    NextPopupDodgeTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
+    PopupSpawnVariants.SetNumZeroed(NCAimTrainerLayout::TargetCount);
+    PopupDodgeActions.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     NextCrouchTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     CrouchEndTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
 }
@@ -344,6 +347,10 @@ bool ANCAimTrainerGame::ConfigurePawn()
     RunWeapon = Cast<AUTWeapon>(Pawn->CreateInventory(DesiredClass));
     if (RunWeapon)
     {
+        // Character contact can trigger Impressive even when a practice hit
+        // does not score. Suppress that reward only on trainer-owned rifles.
+        if (AUTPlusSniper* Rifle = Cast<AUTPlusSniper>(RunWeapon)) { Rifle->bTrackImpressive = false; }
+        if (AUTPlusShockRifle* Rifle = Cast<AUTPlusShockRifle>(RunWeapon)) { Rifle->bTrackImpressive = false; }
         RunWeapon->Ammo = RunWeapon->MaxAmmo;
         Pawn->SwitchWeapon(RunWeapon);
         if (Progress.Scenario == 2)
@@ -524,7 +531,8 @@ void ANCAimTrainerGame::BeginActiveRun()
         NextTargetTime[Index] = PhaseStartedAt + (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) ? 0.f : Index * 0.25f);
         TargetExpiry[Index] = 0.f;
         NextWiggleTime[Index] = PhaseStartedAt;
-        NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = 0.f;
+        NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = NextPopupDodgeTime[Index] = 0.f;
+        PopupSpawnVariants[Index] = PopupDodgeActions[Index] = 0;
         NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
     }
     if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario)) { UpdatePopupDodger(PhaseStartedAt); }
@@ -537,7 +545,8 @@ void ANCAimTrainerGame::HideAllTargets()
     for (int32 Index = 0; Index < NextCrouchTime.Num(); ++Index)
     {
         NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
-        NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = 0.f;
+        NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = NextPopupDodgeTime[Index] = 0.f;
+        PopupSpawnVariants[Index] = PopupDodgeActions[Index] = 0;
     }
     for (ANCAimTrainerTarget* Target : Targets)
     {
@@ -553,6 +562,8 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     const float StandingHeight = Targets[Index]->GetClass()->GetDefaultObject<ANCAimTrainerTarget>()
         ->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
     const bool bPopupDodger = NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && Index == NCAimTrainerLayout::PopupDodgerSlot;
+    const bool bTimedPopup = NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && !bPopupDodger;
+    PopupSpawnVariants[Index] = bTimedPopup ? NCAimTrainerScenarioPolicy::PopupSpawnVariant(Index, Schedule.FRand()) : 0;
     FVector Position;
     if (Progress.Scenario == 0)
     {
@@ -579,7 +590,7 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     }
     else
     {
-        const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::PopupSeat(Index);
+        const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::PopupSeat(Index, PopupSpawnVariants[Index]);
         Position = FVector(Schedule.FRandRange(Seat.MinX, Seat.MaxX),
             Seat.CenterY + Schedule.FRandRange(-Seat.SpawnJitterY, Seat.SpawnJitterY), StandingHeight + Seat.FloorZ);
         TargetExpiry[Index] = Now + NCAimTrainerScenarioPolicy::PopupExposure(PopupRefireSeconds, Schedule.FRand());
@@ -587,7 +598,8 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     Targets[Index]->ActivateTarget(ArenaOrigin + Position, Progress.Scenario == 0 || bPopupDodger);
     ++LocalAppearances[Index];
     NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
-    NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = 0.f;
+    NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = NextPopupDodgeTime[Index] = 0.f;
+    PopupDodgeActions[Index] = NCAimTrainerScenarioPolicy::PopupStrafe;
     if (Progress.Scenario == 0)
     {
         NextCrouchTime[Index] = Now + NCAimTrainerScenarioPolicy::TrackingCrouchDelaySeconds(Schedule.FRand());
@@ -595,22 +607,34 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     if (Progress.Scenario != 0 && !bPopupDodger)
     {
         const NCAimTrainerLayout::FSeat Seat = NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario)
-            ? NCAimTrainerLayout::HeadSeat(Index) : NCAimTrainerLayout::PopupSeat(Index);
+            ? NCAimTrainerLayout::HeadSeat(Index) : NCAimTrainerLayout::PopupSeat(Index, PopupSpawnVariants[Index]);
         Targets[Index]->StartWiggle(Seat.WiggleRange);
-        NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
+        if (bTimedPopup && NCAimTrainerScenarioPolicy::HasVariedPopupMovement(Index) && Schedule.FRand() < 0.5f)
+        {
+            Targets[Index]->ReverseStrafe();
+        }
+        NextWiggleTime[Index] = Now + (bTimedPopup
+            ? NCAimTrainerScenarioPolicy::PopupStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand())
+            : NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand()));
         if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario))
         {
-            // Left seats mix occasional slides and wider strafes with ordinary
-            // wiggles. The existing high-right slide remains guaranteed.
-            if (NCAimTrainerScenarioPolicy::ShouldPopupSlide(Index, Schedule.FRand()))
+            // Pick one special movement per appearance. Dodges do not repeat
+            // on the permanent foreground target's timer or compete with slides.
+            const int32 Action = NCAimTrainerScenarioPolicy::PopupAction(Index, PopupSpawnVariants[Index], Schedule.FRand());
+            if (Action == NCAimTrainerScenarioPolicy::PopupSlide)
             {
                 NextPopupSlideTime[Index] = Now + NCAimTrainerScenarioPolicy::PopupSlideDelaySeconds(Schedule.FRand());
             }
-            if (NCAimTrainerScenarioPolicy::ShouldPopupLongStrafe(Index, Schedule.FRand()))
+            if (Action == NCAimTrainerScenarioPolicy::PopupLongStrafe)
             {
                 NextPopupLongStrafeTime[Index] = Now + NCAimTrainerScenarioPolicy::PopupLongStrafeDelaySeconds(Schedule.FRand());
             }
-            if (NextPopupSlideTime[Index] == 0.f && NextPopupLongStrafeTime[Index] == 0.f
+            if (Action >= NCAimTrainerScenarioPolicy::PopupForwardDodge)
+            {
+                PopupDodgeActions[Index] = Action;
+                NextPopupDodgeTime[Index] = Now + NCAimTrainerScenarioPolicy::PopupDodgeDelaySecondsForAppearance(Schedule.FRand());
+            }
+            if (Action == NCAimTrainerScenarioPolicy::PopupStrafe
                 && NCAimTrainerScenarioPolicy::ShouldCrouch(Schedule.FRand()))
             {
                 NextCrouchTime[Index] = Now + NCAimTrainerScenarioPolicy::CrouchDelaySeconds(Schedule.FRand());
@@ -817,10 +841,29 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
         if (Progress.Scenario != 0 && Targets[Index]->IsAvailable() && Now >= NextWiggleTime[Index])
         {
             Targets[Index]->ReverseStrafe();
-            NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
+            NextWiggleTime[Index] = Now + (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario)
+                ? NCAimTrainerScenarioPolicy::PopupStrafeHoldSeconds(Index, Schedule.FRand(), Schedule.FRand())
+                : NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand()));
         }
         if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && Targets[Index]->IsAvailable())
         {
+            if (NextPopupDodgeTime[Index] > 0.f && Now >= NextPopupDodgeTime[Index])
+            {
+                NextPopupDodgeTime[Index] = 0.f;
+                const int32 Action = PopupDodgeActions[Index];
+                const bool bSlideOnLanding = Action == NCAimTrainerScenarioPolicy::PopupDodgeSlide;
+                // Allow the native jump/landing (and optional slide), then a
+                // full legal rifle shot. A missed opportunity never extends life.
+                const float RequiredTime = (bSlideOnLanding ? 2.05f : 1.05f) + PopupRefireSeconds;
+                if (TargetExpiry[Index] - Now >= RequiredTime && PhaseStartedAt + 60.f - Now >= RequiredTime)
+                {
+                    const float Angle = NCAimTrainerScenarioPolicy::PopupDodgeAngleDegrees(Schedule.FRand()) * (PI / 180.f);
+                    const float XSign = Action == NCAimTrainerScenarioPolicy::PopupForwardDodge ? -1.f : 1.f;
+                    const float YSign = Schedule.FRand() < 0.5f ? -1.f : 1.f;
+                    const FVector Direction(XSign * FMath::Cos(Angle), YSign * FMath::Sin(Angle), 0.f);
+                    Targets[Index]->TryTrainerPopupDodge(Index, Direction, ArenaOrigin, bSlideOnLanding);
+                }
+            }
             if (NextPopupSlideTime[Index] > 0.f && Now >= NextPopupSlideTime[Index])
             {
                 NextPopupSlideTime[Index] = 0.f; // One attempt per appearance, never a catch-up burst.
@@ -829,7 +872,7 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
                 const float RequiredTime = 1.f + PopupRefireSeconds;
                 if (TargetExpiry[Index] - Now >= RequiredTime && PhaseStartedAt + 60.f - Now >= RequiredTime)
                 {
-                    Targets[Index]->TryTrainerPopupSlide(Index);
+                    Targets[Index]->TryTrainerPopupSlide(Index, PopupSpawnVariants[Index]);
                 }
             }
             if (NextPopupLongStrafeTime[Index] > 0.f && Now >= NextPopupLongStrafeTime[Index])
@@ -956,7 +999,7 @@ void ANCAimTrainerGame::FinishRun()
     // Include standalone results so a score complaint can be distinguished
     // from a rejected hit or a weapon shot-counter problem in the game log.
     UE_LOG(LogTemp, Log, TEXT("NCP Aim Trainer result: scenario=%d revision=%d score=%d hits=%d shots=%d headshots=%d expired=%d tracked_ms=%d fired_ms=%d ranked=%d"),
-        int32(Progress.Scenario), int32(FNCAimTrainerOnline::PresetRevision), Progress.Score,
+        int32(Progress.Scenario), FNCAimTrainerOnline::PresetRevisionForScenario(Progress.Scenario), Progress.Score,
         Progress.Hits, Progress.Shots, Progress.Headshots, Progress.TargetsExpired,
         NCAimTrainerScoring::TrackingMilliseconds(TrackedSeconds), NCAimTrainerScoring::TrackingMilliseconds(FiredSeconds),
         int32(bRankedRun && Progress.Hits <= Progress.Shots));

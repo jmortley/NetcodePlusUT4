@@ -33,14 +33,19 @@ namespace NCAimTrainerLayout
         return { 1100.f, float(Index - 1) * 850.f, 2600.f, 580.f, Height };
     }
 
-    inline FSeat PopupSeat(int Index)
+    inline int PopupSeatVariantCount(int Index)
+    {
+        return Index == 4 ? 3 : Index == 1 ? 2 : 1;
+    }
+
+    inline FSeat PopupSeat(int Index, int Variant = 0)
     {
         switch (Index)
         {
         case 1:
             // Leave the middle sightline open to the floor target behind this
             // block; its head would otherwise be obscured by the elevated pawn.
-            return { 100.f, 2200.f, -175.f, 0.f, 44.f, PopupPlatform(1).Height };
+            return { 100.f, 2200.f, Variant == 1 ? 178.f : -178.f, 0.f, 47.f, PopupPlatform(1).Height };
         case 2:
             // Keep a runway toward the trainee for one native forward slide,
             // including its ending slowdown, before this appearance retires.
@@ -50,14 +55,42 @@ namespace NCAimTrainerLayout
             // behind the block's X=2400 rear face and moves along the floor.
             return { 2650.f, 2850.f, 0.f, 0.f, 60.5f, 0.f };
         case 4:
-            // Slide inward along +Y, ahead of the permanent dodger and wholly
-            // in front of platform X=-200, even with TeamArena's wider capsule.
-            return { -450.f, -300.f, -1450.f, 35.f, 82.5f, 0.f };
+            // The right alternative stays in front of the tall platform so
+            // the fixed-position trainee can actually see the whole target.
+            if (Variant == 1) { return { -600.f, -300.f, 1450.f, 50.f, 100.f, 0.f }; }
+            // The deep left corridor gives forward/backward dodges room while
+            // retaining clear separation from the foreground dodger's X plane.
+            if (Variant == 2) { return { 800.f, 1400.f, -1550.f, 25.f, 100.f, 0.f }; }
+            return { -600.f, -300.f, -1450.f, 50.f, 100.f, 0.f };
         default:
             // Forward slide runway and a wider occasional strafe share this
             // low platform. Tighter spawn jitter leaves room for the full capsule.
-            return { 1000.f, 2200.f, -850.f, 35.f, 99.f, PopupPlatform(0).Height };
+            return { 1000.f, 2200.f, -850.f, 50.f, 120.f, PopupPlatform(0).Height };
         }
+    }
+
+    inline bool CanPopupDodgePath(int Slot, float StartX, float StartY, float EndX, float EndY,
+        float CapsuleRadius, float ResumeHalfWidth)
+    {
+        // The caller predicts UT's actual dodge velocity, including preserved
+        // perpendicular momentum. Enclose its whole travel and the subsequent
+        // walking band, rather than testing only the starting capsule.
+        if (!(CapsuleRadius > 0.f) || !(ResumeHalfWidth >= 0.f)
+            || !(StartX > -3200.f && StartX < 3200.f && EndX > -3200.f && EndX < 3200.f)
+            || !(StartY > -1800.f && StartY < 1800.f && EndY > -1800.f && EndY < 1800.f)) { return false; }
+        const float MinX = StartX < EndX ? StartX : EndX;
+        const float MaxX = StartX > EndX ? StartX : EndX;
+        const float MinY = (StartY < EndY ? StartY : EndY) - ResumeHalfWidth - WiggleSafetyMargin;
+        const float MaxY = (StartY > EndY ? StartY : EndY) + ResumeHalfWidth + WiggleSafetyMargin;
+        if (Slot != 0 && Slot != 4) { return false; }
+        // Only the two left variants dodge. The near left appearance can head
+        // away from the trainee; a deeper appearance can choose either X sign.
+        // Reserve both capsules at the permanent dodger's X=-800 plane.
+        // The left platform is only one unit tall, so native movement can step
+        // onto the surrounding floor. Exclude the central 160-unit cover and
+        // right platform, rather than confining real dodges to that tiny step.
+        return MinX - 2.f * CapsuleRadius > -800.f && MaxX + CapsuleRadius < 3200.f
+            && MinY - CapsuleRadius > -1800.f && MaxY + CapsuleRadius < -290.f;
     }
 
     inline FSeat PopupDodgerSeat()

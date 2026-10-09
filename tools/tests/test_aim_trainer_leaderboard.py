@@ -43,6 +43,8 @@ struct FNCAimTrainerProgress { uint8 Scenario = 0, Phase = 0; bool bMovementPrac
 using Completion = std::function<void(bool, const TArray<FNCAimTrainerLeaderboardRow>&)>;
 struct Request { UWorld* World; int Scenario; bool Local, Movement; Completion Callback; };
 struct FNCAimTrainerOnline {
+    enum { PresetRevision = 11 };
+    static int32 PresetRevisionForScenario(int32 scenario);
     static std::vector<Request> Requests;
     static void Fetch(UWorld* world, int32 scenario, Completion callback, bool local, bool movement) {
         Requests.push_back({world, scenario, local, movement, callback});
@@ -199,6 +201,7 @@ void MovementBoards() {
 }
 void AllScenarioBoards() {
     ANCAimTrainerPlayerController pc;
+    const int revisions[] = {11, 11, 12, 12, 11, 12};
     for (int movement = 0; movement < 2; ++movement) {
         pc.TrainerProgress.bMovementPractice = movement != 0;
         for (int local = 0; local < 2; ++local) {
@@ -210,6 +213,8 @@ void AllScenarioBoards() {
                 const auto& req = FNCAimTrainerOnline::Requests[key];
                 Require(req.Scenario == scenario && req.Local == (local != 0)
                         && req.Movement == (movement != 0), "cache key decoded wrong request");
+                Require(FNCAimTrainerOnline::PresetRevisionForScenario(req.Scenario) == revisions[scenario],
+                        "pop-up reset changed an unrelated scenario or retained its old board");
             }
         }
     }
@@ -293,7 +298,9 @@ class AimTrainerLeaderboardTests(unittest.TestCase):
             "void ANCAimTrainerPlayerController::ClientTrainerLeaderboardSubmitted_Implementation",
         )
         source = directory / "trainer_leaderboard.cpp"
-        source.write_text("\n".join([ADAPTER] + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
+        online = (PLUGIN / "Source/Private/NCAimTrainerOnline.cpp").read_text(encoding="utf-8-sig")
+        revision = native_function(online, "int32 FNCAimTrainerOnline::PresetRevisionForScenario")
+        source.write_text("\n".join([ADAPTER, revision] + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_leaderboard.exe" if os.name == "nt" else "trainer_leaderboard")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),

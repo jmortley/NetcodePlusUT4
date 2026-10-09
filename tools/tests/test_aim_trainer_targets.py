@@ -37,7 +37,15 @@ struct FVector {
     float X, Y, Z;
     FVector(float x=0.f, float y=0.f, float z=0.f) : X(x), Y(y), Z(z) {}
     float Size2D() const { return std::sqrt(X*X+Y*Y); }
+    FVector GetSafeNormal2D() const { const float size=Size2D(); return size>0.f?FVector(X/size,Y/size,0.f):FVector(); }
     FVector operator*(float scale) const { return FVector(X*scale,Y*scale,Z*scale); }
+    FVector operator+(const FVector& other) const { return FVector(X+other.X,Y+other.Y,Z+other.Z); }
+    FVector operator-(const FVector& other) const { return FVector(X-other.X,Y-other.Y,Z-other.Z); }
+    FVector& operator*=(float scale) { X*=scale;Y*=scale;Z*=scale;return *this; }
+    bool IsNearlyZero() const { return std::abs(X)+std::abs(Y)+std::abs(Z)<.00001f; }
+    FVector GetClampedToMaxSize(float maximum) const {
+        const float size=std::sqrt(X*X+Y*Y+Z*Z);return size>maximum?*this*(maximum/size):*this;
+    }
     float operator|(const FVector& other) const { return X*other.X+Y*other.Y+Z*other.Z; }
     static const FVector ZeroVector;
 };
@@ -51,12 +59,14 @@ struct UCharacterMovementComponent {
     float Speed = 0.f, MaxWalkSpeed = 500.f, MaxWalkSpeedCrouched = 240.f, MaxAcceleration = 6000.f;
     int Stops = 0;
     bool IsMovingOnGround() const { return Mode == MOVE_Walking; }
+    bool IsFalling() const { return Mode == MOVE_Falling; }
     void StopMovementImmediately() { Speed = 0.f; ++Stops; }
     void SetMovementMode(MovementMode mode) { Mode = mode; }
     void DisableMovement() { Mode = MOVE_None; }
 };
 struct ATeamArenaCharacter;
 struct AUTCharacter;
+struct FHitResult { FVector ImpactNormal=FVector(0,0,1); };
 struct UUTCharacterMovement : UCharacterMovementComponent {
     ATeamArenaCharacter* Owner = nullptr;
     AUTCharacter* CharacterOwner = nullptr;
@@ -68,6 +78,12 @@ struct UUTCharacterMovement : UCharacterMovementComponent {
     bool bIsFloorSliding=false,bWasFloorSliding=false,bWantsFloorSlide=false,bPressedSlide=false,DodgeAllowed=true;
     float FloorSlideTapTime=0.f,FloorSlideEndTime=0.f,FloorSlideDuration=.7f,FloorSlideAcceleration=400.f;
     float MaxFloorSlideSpeed=900.f,MaxInitialFloorSlideSpeed=1350.f,FloorSlideSlopeBraking=2.7f,DodgeResetInterval=.35f;
+    float DodgeImpulseHorizontal=1500.f,DodgeImpulseVertical=500.f,DodgeMaxHorizontalVelocity=1700.f;
+    float DodgeLandingSpeedFactor=1.f,FloorSlideEndingSpeedFactor=.4f,Gravity=-2154.f;
+    float DodgeJumpResetInterval=.35f,DodgeJumpLandingSpeedFactor=1.f;
+    bool bIsAgainstWall=false,bFallingInWater=false,bCountWallSlides=false,bHasPlayedWallHitSound=false;
+    bool bJumpAssisted=false,bExplicitJump=false;
+    int CurrentMultiJumpCount=0,CurrentWallDodgeCount=0;
     int TimerResets=0;
     FVector Velocity,Acceleration;
     struct {
@@ -77,11 +93,18 @@ struct UUTCharacterMovement : UCharacterMovementComponent {
     } CurrentFloor;
     void ClearDodgeInput() { DodgeInput = false; bPressedSlide=false; }
     void ClearFloorSlideTap() { bWantsFloorSlide=false; }
+    void UpdateFloorSlide(bool wants) { bWantsFloorSlide=wants; }
+    float GetGravityZ() const { return Gravity; }
+    float GetMaxAcceleration() const { return MaxAcceleration; }
+    void ClearRestrictedJump() {}
+    void SetPostLandedPhysics(const FHitResult&) { Mode=MOVE_Walking; }
+    void StartNewPhysics(float,int32) {}
     void ResetTimers() { DodgeResetTime=FloorSlideTapTime=FloorSlideEndTime=0.f; ++TimerResets; }
     void ClearFallingStateFlags() { bIsDodging = false; FallingFlags = false; bIsFloorSliding=false; }
     float GetCurrentMovementTime() const { return MovementTime; }
     bool CanDodge() const { return DodgeAllowed&&!bIsFloorSliding&&MovementTime>=DodgeResetTime; }
     void PerformFloorSlide(const FVector&,const FVector&);
+    void ProcessLanded(const FHitResult&,float,int32);
     void Crouch(bool);
     void UnCrouch(bool);
 };
@@ -94,6 +117,9 @@ struct AUTCharacter {
     void SetBodyColorFlash(const void*, bool) {}
     int Role=ROLE_Authority,SlideEvents=0,EyeUpdates=0;
     bool bRepFloorSliding=false,bPressedJump=false,SlideAllowed=true;
+    bool bApplyWallSlide=false;
+    bool ShouldNotifyLanded(const FHitResult&) const { return false; }
+    void Landed(const FHitResult&) {}
     FVector SlideDirection;
     AUTPlayerState* PlayerState=nullptr;
     bool bIsCrouched = false, Dead = false;
@@ -111,6 +137,10 @@ struct AUTCharacter {
 struct ATeamArenaCharacter : AUTCharacter {
     int CapsuleHeadQueries = 0, SuperTicks = 0, DodgeCalls = 0, Teleports = 0, NetUpdates = 0, InputCalls = 0;
     bool DodgeAllowed = true, Hidden = false, Collision = true, HasPendingInput = false;
+    bool SimulateNativeDodge=false;
+    float MaxSpeedPctModifier=1.f;
+    struct Capsule { float Radius=38.f;float GetScaledCapsuleRadius() const { return Radius; } } CapsuleComponent;
+    Capsule* GetCapsuleComponent() { return &CapsuleComponent; }
     FVector Position, LastDodgeDirection, LastDodgeCross, LastInput;
     UUTCharacterMovement Move;
     World TheWorld;
@@ -123,7 +153,14 @@ struct ATeamArenaCharacter : AUTCharacter {
     void Tick(float) { ++SuperTicks; }
     bool Dodge(FVector direction, FVector cross) {
         ++DodgeCalls; LastDodgeDirection=direction; LastDodgeCross=cross;
-        return DodgeAllowed&&!bIsCrouched&&Move.CanDodge();
+        const bool success=DodgeAllowed&&!bIsCrouched&&Move.CanDodge();
+        if(success&&SimulateNativeDodge) {
+            Move.Mode=MOVE_Falling;Move.bIsDodging=true;
+            Move.Velocity=Move.DodgeImpulseHorizontal*direction+(Move.Velocity|cross)*cross;
+            const float speed=FMath::Min(Move.Velocity.Size2D(),Move.DodgeMaxHorizontalVelocity)*MaxSpeedPctModifier;
+            Move.Velocity=speed*Move.Velocity.GetSafeNormal2D();Move.Velocity.Z=Move.DodgeImpulseVertical;
+        }
+        return success;
     }
     FVector ConsumeMovementInputVector() { HasPendingInput=false; return FVector(); }
     void SetActorLocationAndRotation(FVector position, FRotator, bool, void*, ETeleportType) {
@@ -154,7 +191,7 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     bool bTrainerVisible=false, bTrainerStrafe=false, bTrainerWiggle=false;
     float StrafeDirection=1.f, StrafeRange=800.f, SpawnProtectionStartTime=0.f, AppearanceTime=0.f;
     float WiggleRange=0.f, PopupLongStrafeEndTime=0.f;
-    bool bRecenterWiggleAfterSlide=false;
+    bool bRecenterWiggleAfterSlide=false,bRecenterWiggleAfterDodge=false,bTrainerDodgeSlidePending=false;
     FVector StrafeCenter,TrainerSlideDirection;
     struct History { int Count=7; void Reset() { Count=0; } } SavedPositions, SavedCapsulePostures;
     void OnRep_TrainerVisible();
@@ -167,8 +204,9 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     void ResetTargetMovement();
     void ReverseStrafe();
     bool TryTrainerDodge(float);
+    bool TryTrainerPopupDodge(int32,const FVector&,const FVector&,bool=false);
     bool TryTrainerSlideForward();
-    bool TryTrainerPopupSlide(int32);
+    bool TryTrainerPopupSlide(int32,int32=0);
     bool TryTrainerTrackingSlide(float);
     bool StartTrainerSlide(const FVector&);
     bool IsTrainerSliding() const;
@@ -179,6 +217,11 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
 void Require(bool condition,const char* why) { if(!condition) { std::cerr<<why<<'\n'; std::exit(1); } }
 ANCAimTrainerTarget Active() {
     ANCAimTrainerTarget target; target.bTrainerVisible=true; target.bTrainerStrafe=true; return target;
+}
+ANCAimTrainerTarget ActivePopup() {
+    auto target=Active();target.StartWiggle(120.f);
+    target.Move.MaxWalkSpeed=940.f;target.Move.MaxAcceleration=5000.f;target.Move.MaxFloorSlideSpeed=1100.f;
+    target.StrafeCenter=target.Position=FVector(1200,-1045,103);return target;
 }
 '''
 
@@ -278,10 +321,10 @@ int main(int argc,char**argv) {
         Require(target.bTrainerWiggle&&target.bTrainerStrafe&&target.StrafeRange==20.f
                 &&target.Move.MaxWalkSpeed==500.f&&target.Move.Mode==MOVE_Walking,"wiggle changed profile speed or movement mode");
         target.StartWiggle(1000.f);
-        Require(target.StrafeRange==110.f,"wiggle exceeded maximum range");
-        target.Position.Y=410.f; target.Tick(.016f);
+        Require(target.StrafeRange==140.f,"wiggle exceeded maximum range");
+        target.Position.Y=440.f; target.Tick(.016f);
         Require(target.LastInput.Y==-1.f,"wiggle did not reverse at right edge");
-        target.Position.Y=190.f; target.ReverseStrafe();
+        target.Position.Y=160.f; target.ReverseStrafe();
         Require(target.StrafeDirection==1.f,"wiggle reverse ignored local left edge");
         target.Tick(.016f); Require(target.LastInput.Y==1.f,"wiggle tick escaped local left edge");
         Require(!target.TryTrainerDodge(.8f)&&target.DodgeCalls==0,"headshot wiggle performed a dodge");
@@ -666,22 +709,202 @@ int main(int argc,char**argv) {
             target.ActivateTarget(FVector(1200.f,-850.f,103.f),false);target.StartWiggle(99.f);
             Require(!target.IsTrainerLongStrafing()&&target.StrafeRange==99.f,"new appearance inherited long strafe");
         }
-    } else if(name=="popup_motion_policy") {
-        int slides[6]={},longs[6]={};
-        for(int slot=0;slot<6;++slot)for(int roll=0;roll<100;++roll) {
-            slides[slot]+=NCAimTrainerScenarioPolicy::ShouldPopupSlide(slot,roll/100.f)?1:0;
-            longs[slot]+=NCAimTrainerScenarioPolicy::ShouldPopupLongStrafe(slot,roll/100.f)?1:0;
+    } else if(name=="popup_dodge_guards") {
+        const FVector diagonal(.9797959f,.2f,0.f);
+        for(int guard=0;guard<11;++guard) {
+            auto target=ActivePopup();
+            if(guard==0)target.Role=1;
+            if(guard==1)target.bTrainerVisible=false;
+            if(guard==2)target.bTrainerWiggle=false;
+            if(guard==3)target.Dead=true;
+            if(guard==4)target.bIsCrouched=true;
+            if(guard==5)target.Move.bIsFloorSliding=true;
+            if(guard==6)target.PopupLongStrafeEndTime=43.f;
+            if(guard==7)target.bRecenterWiggleAfterDodge=true;
+            if(guard==8)target.Move.Mode=MOVE_Falling;
+            if(guard==9)target.Move.bIsDodging=true;
+            if(guard==10)target.Move.bIsDodgeLanding=true;
+            Require(!target.TryTrainerPopupDodge(0,diagonal,FVector::ZeroVector)&&target.DodgeCalls==0&&target.NetUpdates==0,
+                "invalid popup target reached native dodge or changed replication");
         }
-        Require(slides[0]==45&&slides[4]==45&&slides[2]==100&&slides[1]==0&&slides[3]==0&&slides[5]==0,
-            "random slide frequency or eligible lanes changed");
-        Require(longs[0]==65&&longs[1]+longs[2]+longs[3]+longs[4]+longs[5]==0,
-            "long strafe probability leaked outside rear-left target");
-        for(float roll:{-1.f,0.f,.5f,1.f,2.f}) {
-            const float slide=NCAimTrainerScenarioPolicy::PopupSlideDelaySeconds(roll);
-            const float delay=NCAimTrainerScenarioPolicy::PopupLongStrafeDelaySeconds(roll);
-            const float hold=NCAimTrainerScenarioPolicy::PopupLongStrafeHoldSeconds(roll);
-            Require(delay>slide+.8f&&hold>=.5f&&hold<=.75f,
-                "long strafe can coincide with initial slide or is not a perceptible long hold");
+        for(int reject=0;reject<3;++reject) {
+            auto target=ActivePopup();target.HasPendingInput=true;
+            if(reject==0)target.DodgeAllowed=false;
+            if(reject==1)target.Move.DodgeAllowed=false;
+            if(reject==2)target.Move.DodgeResetTime=100.f;
+            Require(!target.TryTrainerPopupDodge(0,diagonal,FVector::ZeroVector)&&target.DodgeCalls==1
+                &&!target.bRecenterWiggleAfterDodge&&target.StrafeDirection==1.f
+                &&target.HasPendingInput&&target.NetUpdates==0,
+                "native dodge rejection changed ordinary target movement or bypassed cooldown");
+        }
+    } else if(name=="popup_dodge_direction") {
+        const float nan=std::numeric_limits<float>::quiet_NaN();
+        const float inf=std::numeric_limits<float>::infinity();
+        for(const auto& direction : {FVector(),FVector(.1f,.1f,0.f),FVector(1.f,1.f,0.f),
+            FVector(1.f,0.f,.001f),FVector(nan,0.f,0.f),FVector(0.f,nan,0.f),FVector(1.f,0.f,nan),
+            FVector(inf,0.f,0.f),FVector(0.f,-inf,0.f),FVector(1.f,0.f,inf),FVector(1.e30f,1.e30f,0.f)}) {
+            auto target=ActivePopup();
+            Require(!target.TryTrainerPopupDodge(0,direction,FVector::ZeroVector)&&target.DodgeCalls==0&&!target.bRecenterWiggleAfterDodge,
+                "invalid direction reached native dodge");
+        }
+        for(float x : {-1.f,1.f}) for(float y : {-1.f,1.f}) {
+            auto target=ActivePopup();target.HasPendingInput=true;
+            const FVector direction(.9797959f*x,.2f*y,0.f);
+            Require(target.TryTrainerPopupDodge(0,direction,FVector::ZeroVector)&&target.DodgeCalls==1,
+                "valid front/back diagonal native dodge was rejected");
+            Require(std::abs(target.LastDodgeDirection.X-direction.X)<.00001f
+                &&std::abs(target.LastDodgeDirection.Y-direction.Y)<.00001f
+                &&std::abs(target.LastDodgeDirection|target.LastDodgeCross)<.00001f
+                &&std::abs(target.LastDodgeCross.Size2D()-1.f)<.00001f
+                &&target.LastDodgeDirection.Z==0.f&&target.LastDodgeCross.Z==0.f,
+                "popup dodge changed selected quadrant or did not use unit perpendicular directions");
+            Require(target.bRecenterWiggleAfterDodge&&!target.HasPendingInput&&target.StrafeDirection==y
+                &&target.NetUpdates==1&&target.Teleports==0&&target.InputCalls==0,
+                "popup dodge did not defer recentering or bypassed native impulse/replication");
+        }
+        auto target=ActivePopup();
+        Require(target.TryTrainerPopupDodge(0,FVector(.9798f,.2001f,0.f),FVector::ZeroVector)
+            &&std::abs(target.LastDodgeDirection.Size2D()-1.f)<.00001f,
+            "near-unit direction was not normalized before the native impulse");
+    } else if(name=="popup_dodge_recovery") {
+        auto target=ActivePopup();target.StrafeCenter=FVector(1200,-800,103);
+        target.Position=target.StrafeCenter;target.Move.MovementTime=10.f;
+        Require(target.TryTrainerPopupDodge(0,FVector(-.9797959f,-.2f,0.f),FVector::ZeroVector),"dodge recovery fixture failed");
+        target.Move.Mode=MOVE_Falling;target.Move.bIsDodging=true;
+        target.Position=FVector(600,-1250,250);target.Tick(.016f);
+        Require(target.bRecenterWiggleAfterDodge&&target.StrafeCenter.X==1200.f
+            &&target.StrafeCenter.Y==-800.f&&target.InputCalls==0,"airborne dodge recentered or countersteered");
+        // Native landing clears bIsDodging and sets its slowdown and cooldown.
+        target.Move.Mode=MOVE_Walking;target.Move.bIsDodging=false;target.Move.bIsDodgeLanding=true;
+        target.Move.DodgeResetTime=11.35f;target.Move.MovementTime=11.f;
+        target.Position=FVector(450,-1360,103);target.Tick(.016f);
+        target.ReverseStrafe();
+        Require(target.StrafeDirection==-1.f&&!target.StartPopupLongStrafe(180.f,.6f,0.f)
+            &&!target.TryTrainerPopupSlide(4)&&!target.TryTrainerPopupDodge(0,FVector(.9797959f,.2f,0.f),FVector::ZeroVector)
+            &&!target.SetTrainerCrouched(true)&&target.bRecenterWiggleAfterDodge&&target.InputCalls==0,
+            "a scheduled action interrupted native popup dodge landing");
+        target.Move.MovementTime=11.349f;target.Tick(.016f);
+        Require(!target.Move.bIsDodgeLanding&&target.bRecenterWiggleAfterDodge&&target.InputCalls==0,
+            "popup movement resumed before native cooldown or retained landing slowdown");
+        target.Move.MovementTime=11.35f;target.Tick(.016f);
+        Require(!target.bRecenterWiggleAfterDodge&&target.StrafeCenter.X==450.f&&target.StrafeCenter.Y==-1360.f
+            &&target.StrafeCenter.Z==103.f&&target.LastInput.Y==-1.f&&target.InputCalls==1
+            &&target.Teleports==0&&target.StrafeRange==120.f,"landing did not resume wiggle at the native endpoint");
+        target.ReverseStrafe();Require(target.StrafeDirection==1.f,"wiggle did not recover after landing");
+        Require(target.SetTrainerCrouched(true),"scheduled crouch did not recover after landing");
+    } else if(name=="popup_dodge_reuse") {
+        for(bool hide : {false,true}) {
+            auto target=ActivePopup();
+            Require(target.TryTrainerPopupDodge(0,FVector(-.9797959f,.2f,0.f),FVector::ZeroVector),"reuse fixture failed");
+            target.Move.Mode=MOVE_Falling;target.Move.bIsDodging=true;
+            target.Move.DodgeResetTime=999.f;target.HasPendingInput=true;
+            if(hide) {
+                target.HideTarget();
+                Require(!target.bRecenterWiggleAfterDodge&&!target.HasPendingInput
+                    &&!target.Move.bIsDodging&&target.Move.DodgeResetTime==0.f,"hide retained diagonal dodge state");
+            }
+            target.ActivateTarget(FVector(1200,-900,103),false);target.StartWiggle(99.f);target.Tick(.016f);
+            Require(!target.bRecenterWiggleAfterDodge&&!target.Move.bIsDodging&&target.Move.DodgeResetTime==0.f
+                &&target.StrafeCenter.X==1200.f&&target.StrafeCenter.Y==-900.f&&target.LastInput.Y==1.f,
+                "reused target inherited prior appearance dodge endpoint or blocked movement");
+        }
+        auto target=ActivePopup();target.bRecenterWiggleAfterDodge=true;
+        target.Role=1;target.Position=FVector(400,500,100);target.Tick(.016f);
+        Require(target.bRecenterWiggleAfterDodge&&target.StrafeCenter.X==1200.f&&target.StrafeCenter.Y==-1045.f,
+            "remote target overwrote authority dodge lifecycle");
+    } else if(name=="popup_dodge_geometry") {
+        for(int slot : {0,4}) for(float sign : {-1.f,1.f}) {
+            auto target=ActivePopup();target.Move.Velocity=FVector(0.f,sign*500.f,0.f);
+            const FVector origin(20000.f,-40000.f,50000.f);
+            target.Position=target.Position+origin;
+            Require(target.TryTrainerPopupDodge(slot,FVector(sign*.9797959f,-sign*.2f,0.f),origin),
+                "real-profile angled dodge was unavailable with perpendicular strafe momentum or translated arena");
+        }
+        for(int guard=0;guard<9;++guard) {
+            auto target=ActivePopup();FVector origin;
+            int slot=0;bool chain=false;FVector direction(.9797959f,.2f,0.f);
+            if(guard==0)target.Position.X=3000.f;
+            if(guard==1)target.Position.Y=-500.f;
+            if(guard==2)slot=2;
+            if(guard==3)slot=3;
+            if(guard==4)target.Move.Gravity=0.f;
+            if(guard==5)origin.X=std::numeric_limits<float>::quiet_NaN();
+            if(guard==6)target.Move.Velocity.Y=10000.f;
+            if(guard==7){chain=true;direction.X=-.9797959f;}
+            if(guard==8){chain=true;target.Position.X=2000.f;}
+            Require(!target.TryTrainerPopupDodge(slot,direction,origin,chain)&&target.DodgeCalls==0,
+                "unsafe world bounds, protected target, momentum or chain escaped prediction guard");
+        }
+    } else if(name=="popup_dodge_slide_chain") {
+        for(bool successfulSlide : {false,true}) {
+            auto target=ActivePopup();target.SimulateNativeDodge=true;
+            target.Position=target.StrafeCenter=FVector(-400.f,-1300.f,103.f);
+            const FVector direction(.9797959f,.2f,0.f);
+            Require(target.TryTrainerPopupDodge(4,direction,FVector::ZeroVector,true)
+                &&target.bTrainerDodgeSlidePending&&target.Move.bWantsFloorSlide
+                &&target.Move.IsFalling()&&target.Move.bIsDodging&&!target.bRepFloorSliding,
+                "backward angled dodge failed to arm the native landing-slide request");
+            const int inputs=target.InputCalls;target.Tick(.016f);
+            Require(target.InputCalls==inputs+1&&std::abs((target.LastInput|direction)-1.f)<.0001f,
+                "armed landing slide lost its native airborne movement intent");
+            target.Move.MovementTime=10.f;
+            // Native movement consumes the queued input before ProcessLanded.
+            target.Move.Acceleration=target.LastInput*target.Move.MaxAcceleration;
+            if(!successfulSlide)target.Move.Velocity=target.Move.Velocity.GetSafeNormal2D()*100.f;
+            target.Move.ProcessLanded(FHitResult(),0.f,0);
+            Require(!target.Move.bIsDodging&&target.Move.IsMovingOnGround(),"native landing fixture did not land");
+            target.Tick(.016f);
+            if(successfulSlide) {
+                Require(target.SlideEvents==1&&target.IsTrainerSliding()&&target.bRepFloorSliding&&target.bIsCrouched
+                    &&!target.bTrainerDodgeSlidePending&&!target.Move.bWantsFloorSlide
+                    &&std::abs((target.LastInput|direction)-1.f)<.0001f,
+                    "native ProcessLanded slide lacked movement event, replicated posture or direction");
+                Require(!target.SetTrainerCrouched(false)&&!target.StartPopupLongStrafe(180.f,.6f,0.f),
+                    "scheduled posture or strafe interrupted a native chained slide");
+                target.Position=FVector(1500.f,-900.f,target.Move.HalfHeight);
+                target.Move.bWasFloorSliding=true;
+                target.Move.MovementTime=target.Move.FloorSlideEndTime;target.Tick(.016f);
+                Require(!target.IsTrainerSliding()&&!target.bRepFloorSliding&&!target.bIsCrouched
+                    &&target.Move.bWasFloorSliding&&target.bRecenterWiggleAfterDodge,
+                    "chained slide did not keep native ending slowdown and dodge cooldown");
+            } else {
+                Require(target.SlideEvents==0&&!target.IsTrainerSliding()&&!target.bRepFloorSliding
+                    &&!target.bTrainerDodgeSlidePending&&!target.Move.bWantsFloorSlide
+                    &&target.bRecenterWiggleAfterDodge,"failed native landing slide left a future slide request armed");
+            }
+            target.Position=FVector(1510.f,-895.f,103.f);
+            target.Move.MovementTime=target.Move.DodgeResetTime+.001f;target.Tick(.016f);
+            Require(!target.bRecenterWiggleAfterDodge&&target.StrafeCenter.X==1510.f&&target.StrafeCenter.Y==-895.f
+                &&target.LastInput.X==0.f&&target.LastInput.Y==1.f&&target.Teleports==0,
+                "native dodge-slide chain did not resume bounded walking at its real endpoint");
+        }
+    } else if(name=="popup_dodge_slide_reuse") {
+        for(bool nativeSlide : {false,true}) {
+            auto target=ActivePopup();target.SimulateNativeDodge=true;
+            target.Position=target.StrafeCenter=FVector(-400.f,-1300.f,103.f);
+            Require(target.TryTrainerPopupDodge(4,FVector(.9797959f,.2f,0.f),FVector::ZeroVector,true),
+                "pending slide reset fixture failed");
+            if(nativeSlide) {
+                target.Move.Acceleration=target.LastInput*target.Move.MaxAcceleration;
+                target.Move.ProcessLanded(FHitResult(),0.f,0);target.Tick(.016f);
+            }
+            target.HideTarget();
+            Require(!target.bTrainerDodgeSlidePending&&!target.bRecenterWiggleAfterDodge
+                &&!target.Move.bWantsFloorSlide&&!target.Move.bIsDodging&&!target.IsTrainerSliding()
+                &&!target.bRepFloorSliding&&!target.bIsCrouched,"hidden appearance retained native chained slide state");
+            target.ActivateTarget(FVector(2000,-1000,103),false);target.StartWiggle(120.f);target.Tick(.016f);
+            Require(!target.bTrainerDodgeSlidePending&&!target.bRecenterWiggleAfterDodge
+                &&target.StrafeCenter.X==2000.f&&target.StrafeCenter.Y==-1000.f&&target.LastInput.Y==1.f,
+                "new appearance inherited native landing slide motion");
+        }
+    } else if(name=="popup_slide_variants") {
+        for(int variant : {0,1,2,3,-1}) {
+            auto target=ActivePopup();
+            const bool allowed=variant==0||variant==1;
+            Require(target.TryTrainerPopupSlide(4,variant)==allowed,"popup slide ignored the selected spawn variant");
+            if(allowed)Require(target.TrainerSlideDirection.Y==(variant==1?-1.f:1.f)
+                &&target.TrainerSlideDirection.X==0.f,"far-right slide did not turn inward away from arena wall");
+            else Require(target.SlideEvents==0,"deep-left or invalid variant crossed a raised platform");
         }
     } else if(name=="head_feedback") {
         ANCAimTrainerTarget target; AUTCharacter shooter;
@@ -717,6 +940,7 @@ class AimTrainerTargetTests(unittest.TestCase):
             "void ANCAimTrainerTarget::ResetTargetMovement",
             "void ANCAimTrainerTarget::ReverseStrafe",
             "bool ANCAimTrainerTarget::TryTrainerDodge",
+            "bool ANCAimTrainerTarget::TryTrainerPopupDodge",
             "bool ANCAimTrainerTarget::TryTrainerSlideForward",
             "bool ANCAimTrainerTarget::TryTrainerPopupSlide",
             "bool ANCAimTrainerTarget::TryTrainerTrackingSlide",
@@ -728,7 +952,8 @@ class AimTrainerTargetTests(unittest.TestCase):
         )
         source = directory / "trainer_targets.cpp"
         source.write_text("\n".join([ADAPTER, f'#include "{policy}"', f'#include "{layout}"']
-            + [native_function(movement,"void UUTCharacterMovement::PerformFloorSlide")]
+            + [native_function(movement,"void UUTCharacterMovement::PerformFloorSlide"),
+               native_function(movement,"void UUTCharacterMovement::ProcessLanded")]
             + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_targets.exe" if os.name == "nt" else "trainer_targets")
         if msvc:
@@ -770,7 +995,14 @@ class AimTrainerTargetTests(unittest.TestCase):
     def test_popup_slide_lanes_and_post_slide_center_are_native_and_reset(self): self.run_case("popup_slide_slots")
     def test_long_strafe_requires_valid_visible_standing_wiggle_target(self): self.run_case("popup_long_guards")
     def test_long_strafe_holds_direction_then_returns_to_wiggle_without_teleporting(self): self.run_case("popup_long_motion")
-    def test_popup_slide_and_long_strafe_frequency_and_sequencing(self): self.run_case("popup_motion_policy")
+    def test_popup_dodge_guards_and_native_rejection(self): self.run_case("popup_dodge_guards")
+    def test_popup_dodge_validates_horizontal_direction_and_native_perpendicular(self): self.run_case("popup_dodge_direction")
+    def test_popup_dodge_preserves_native_landing_and_recenters_without_teleport(self): self.run_case("popup_dodge_recovery")
+    def test_popup_dodge_state_cannot_leak_into_reused_targets_or_client_tick(self): self.run_case("popup_dodge_reuse")
+    def test_popup_dodge_checks_actual_profile_momentum_and_world_lane(self): self.run_case("popup_dodge_geometry")
+    def test_popup_dodge_slide_runs_native_landing_physics_and_recovery(self): self.run_case("popup_dodge_slide_chain")
+    def test_popup_dodge_slide_request_clears_when_hidden_or_reused(self): self.run_case("popup_dodge_slide_reuse")
+    def test_popup_slide_variants_turn_inward_and_reject_deep_lane(self): self.run_case("popup_slide_variants")
 
 
 if __name__ == "__main__":

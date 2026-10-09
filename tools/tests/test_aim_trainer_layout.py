@@ -18,10 +18,13 @@ CASES = r'''
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 using namespace NCAimTrainerLayout;
 bool InstagibGeometry = true;
+int PopupVariant = 0;
+FSeat TestPopupSeat(int index) { return PopupSeat(index, PopupVariant); }
 NCAimTrainerCharacterProfile::FProfile Profile() {
     return InstagibGeometry ? NCAimTrainerCharacterProfile::Instagib() : NCAimTrainerCharacterProfile::TeamArena();
 }
@@ -41,21 +44,21 @@ float SliderMaximumTravel() {
     return slideSpeed*(duration+2.f/30.f)+exitSpeed/30.f+exitSpeed/groundFriction;
 }
 FSeat PopupMovementSeat(int index) {
-    FSeat seat=PopupSeat(index);
+    FSeat seat=TestPopupSeat(index);
     if (index==PopupSliderSlot || index==0) seat.MinX-=SliderMaximumTravel();
     if (index==0) seat.WiggleRange=PopupLongStrafeRange;
-    if (index==4) {
+    if (index==4 && PopupVariant!=2) {
         // A slide starts anywhere inside the initial wiggle, then preserves
         // that Y endpoint as the new wiggle center. Bound both appearances.
         const float extra=SliderMaximumTravel()+seat.WiggleRange+WiggleSafetyMargin;
-        seat.CenterY+=extra*.5f; seat.WiggleRange+=extra*.5f;
+        seat.CenterY+=(PopupVariant==1 ? -1.f : 1.f)*extra*.5f; seat.WiggleRange+=extra*.5f;
     }
     return seat;
 }
 FSeat PopupOcclusionSeat(int index) {
     // The inward-sliding near target may deliberately cross rear sightlines.
     // Its initial seat and the stationary/platform seats remain separated.
-    return index==4 ? PopupSeat(index) : PopupMovementSeat(index);
+    return index==4 ? TestPopupSeat(index) : PopupMovementSeat(index);
 }
 std::vector<Point> Endpoints(const FSeat& seat) {
     const float reach = seat.SpawnJitterY + seat.WiggleRange + WiggleSafetyMargin;
@@ -135,7 +138,9 @@ void PopupSightlines() {
                     Require(!HitsBlock(head,PopupPlatform(p)), "platform blocks a standing target head center");
                 }
             }
-            if (slot==3) {
+            // This preserved block was authored for the shorter IG profile.
+            // TeamArena exposes more shoulder above it, as before this change.
+            if (slot==3 && InstagibGeometry) {
                 Require(HitsBlock({point.X,point.Y,TestHeadHeight(170.f)},PopupPlatform(1)),
                         "rear target exposes its upper body instead of peeking over cover");
             }
@@ -166,13 +171,22 @@ void OtherTargetOcclusion() {
         for (Point point:Endpoints(PopupMovementSeat(slot))) {
             for (int other=0;other<PopupSlotCount;++other) {
                 if (other==slot) continue;
-                for (Point obstacle:Endpoints(PopupOcclusionSeat(other))) {
+                // The deep-left spawn is initially clear. A different left
+                // target may subsequently slide/dodge across its sightline,
+                // just as the existing foreground dodger can cross rear heads.
+                const FSeat obstacleSeat=PopupVariant==2&&slot==4&&other==0
+                    ? TestPopupSeat(other) : PopupOcclusionSeat(other);
+                for (Point obstacle:Endpoints(obstacleSeat)) {
                     for (float headHeight:{184.f,212.f}) {
-                        Require(!SegmentHitsBox({point.X,point.Y,point.Z+TestHeadHeight(headHeight)},
+                        const bool obscured=SegmentHitsBox({point.X,point.Y,point.Z+TestHeadHeight(headHeight)},
                             obstacle.X-TestRadius(),obstacle.X+TestRadius(),
                             obstacle.Y-TestRadius(),obstacle.Y+TestRadius(),
-                            obstacle.Z,obstacle.Z+2.f*TestHalfHeight()),
-                            "another target capsule can cover this target's head center");
+                            obstacle.Z,obstacle.Z+2.f*TestHalfHeight());
+                        if(obscured) {
+                            std::cerr<<"variant="<<PopupVariant<<" slot="<<slot<<" other="<<other
+                                <<" point="<<point.X<<","<<point.Y<<" obstacle="<<obstacle.X<<","<<obstacle.Y<<'\n';
+                        }
+                        Require(!obscured,"another target capsule can cover this target's head center");
                     }
                 }
             }
@@ -181,7 +195,7 @@ void OtherTargetOcclusion() {
 }
 void SliderRunway() {
     Require(PopupSliderSlot==2, "slide lane must use the elevated right platform");
-    const FSeat seat=PopupSeat(PopupSliderSlot);
+    const FSeat seat=TestPopupSeat(PopupSliderSlot);
     const FBlock platform=PopupPlatform(PopupSliderSlot);
     Require(seat.MinX==1000.f && seat.MaxX==2200.f && seat.FloorZ==320.f,
         "upper-right spawn runway no longer matches the native slide preset");
@@ -210,7 +224,7 @@ void LeftMotionLanes() {
         PlatformSupport();
         const FSeat rear=PopupMovementSeat(0),near=PopupMovementSeat(4);
         const FBlock support=PopupPlatform(0);
-        Require(PopupSeat(0).MinX>=1000.f&&PopupSeat(0).SpawnJitterY<=35.f
+        Require(TestPopupSeat(0).MinX>=1000.f&&TestPopupSeat(0).SpawnJitterY<=50.f
             &&rear.WiggleRange==180.f,"rear-left long strafe lost its required runway or safe lateral extent");
         for(Point point:Endpoints(rear)) {
             Require(point.Y-TestRadius()>support.CenterY-support.SizeY*.5f
@@ -220,8 +234,13 @@ void LeftMotionLanes() {
         for(Point point:Endpoints(near)) {
             Require(point.X-TestRadius()>PopupDodgerSeat().MaxX+TestRadius(),
                 "near-left slide overlaps persistent dodger's X plane");
-            Require(point.X+TestRadius()<PopupPlatform(0).CenterX-PopupPlatform(0).SizeX*.5f,
-                "near-left inward slide clips the front of a platform");
+            if (PopupVariant!=2) {
+                Require(point.X+TestRadius()<PopupPlatform(0).CenterX-PopupPlatform(0).SizeX*.5f,
+                    "near-side inward slide clips the front of a platform");
+            } else {
+                Require(point.Y+TestRadius()<PopupPlatform(0).CenterY-PopupPlatform(0).SizeY*.5f,
+                    "deep-left corridor clips the side of the low platform");
+            }
             Require(point.X-TestRadius()>-1800.f+TestRadius(),
                 "near-left slide can cross trainee's movement plane");
             Require(point.Y-TestRadius()>-1800.f&&point.Y+TestRadius()<1800.f,
@@ -344,8 +363,103 @@ void TrackingSlideLane() {
         }
     }
 }
+void PreservedSeats() {
+    for (int slot:{2,3}) {
+        const FSeat original=PopupSeat(slot);
+        for (int variant:{0,1,2}) {
+            const FSeat seat=PopupSeat(slot,variant);
+            Require(seat.MinX==original.MinX&&seat.MaxX==original.MaxX&&seat.CenterY==original.CenterY
+                &&seat.SpawnJitterY==original.SpawnJitterY&&seat.WiggleRange==original.WiggleRange
+                &&seat.FloorZ==original.FloorZ,"protected platform or head-peek target changed with variation");
+        }
+    }
+    Require(PopupSeat(2).MinX==1000.f&&PopupSeat(2).MaxX==2200.f&&PopupSeat(2).CenterY==850.f
+        &&PopupSeat(2).SpawnJitterY==85.f&&PopupSeat(2).WiggleRange==99.f&&PopupSeat(2).FloorZ==320.f,
+        "high-right target no longer has its original movement envelope");
+    Require(PopupSeat(3).MinX==2650.f&&PopupSeat(3).MaxX==2850.f&&PopupSeat(3).CenterY==0.f
+        &&PopupSeat(3).SpawnJitterY==0.f&&PopupSeat(3).WiggleRange==60.5f&&PopupSeat(3).FloorZ==0.f,
+        "rear-center head-peek no longer has its original movement envelope");
+    Require(PopupSeatVariantCount(4)==3&&PopupSeatVariantCount(1)==2
+        &&PopupSeatVariantCount(2)==1&&PopupSeatVariantCount(3)==1,"seat variation pool changed");
+}
+void AngledDodgePaths() {
+    for (float radius:{38.f,40.f}) {
+        Require(CanPopupDodgePath(0,1400.f,-850.f,100.f,-830.f,radius,120.f),
+            "safe forward low-platform dodge rejected");
+        Require(CanPopupDodgePath(0,1000.f,-850.f,2300.f,-880.f,radius,120.f),
+            "safe backward low-platform dodge rejected");
+        Require(CanPopupDodgePath(0,1000.f,-850.f,3000.f,-1200.f,radius,120.f),
+            "backward dodge-slide cannot step off the one-unit platform onto clear floor");
+        Require(!CanPopupDodgePath(0,1400.f,-850.f,3200.f,-850.f,radius,120.f),
+            "backward dodge can reach the rear wall");
+        Require(!CanPopupDodgePath(0,1400.f,-850.f,100.f,-1700.f,radius,120.f),
+            "inherited lateral dodge momentum can reach the side wall");
+        Require(CanPopupDodgePath(4,-500.f,-1450.f,1000.f,-1470.f,radius,100.f),
+            "safe backward dodge in the left ground corridor rejected");
+        Require(CanPopupDodgePath(4,1100.f,-1450.f,-400.f,-1470.f,radius,100.f),
+            "safe forward dodge from deeper left seat rejected");
+        Require(!CanPopupDodgePath(4,-500.f,-1450.f,-1700.f,-1470.f,radius,100.f),
+            "near-side dodge can cross the foreground dodger plane");
+        Require(!CanPopupDodgePath(4,-500.f,-1450.f,1000.f,-400.f,radius,100.f),
+            "resumed strafe can clip central cover after landing");
+        Require(!CanPopupDodgePath(4,-500.f,1450.f,1000.f,1470.f,radius,100.f),
+            "far-right alternative unexpectedly enables the left-only dodge");
+        for (int protectedSlot:{1,2,3,5}) {
+            Require(!CanPopupDodgePath(protectedSlot,1400.f,-850.f,100.f,-830.f,radius,120.f),
+                "an excluded target can use the new angled dodge");
+        }
+    }
+    Require(!CanPopupDodgePath(0,std::numeric_limits<float>::quiet_NaN(),-850.f,100.f,-830.f,40.f,120.f),
+        "nonfinite native motion is accepted");
+    Require(!CanPopupDodgePath(0,1400.f,-850.f,100.f,-830.f,0.f,120.f),"empty capsule accepted");
+}
+Point NativeDodgeEnd(Point start,float degrees,float xSign,float ySign,float lateralVelocity,bool chain) {
+    // Real profile impulse/cap, gravity, landing reset and slide defaults.
+    // Include UT's perpendicular velocity carry, not merely the input angle.
+    const float radians=degrees*3.14159265358979323846f/180.f;
+    const float dx=xSign*std::cos(radians),dy=ySign*std::sin(radians);
+    const float crossX=-dy,crossY=dx,carry=lateralVelocity*crossY;
+    const float vx=1500.f*dx+carry*crossX,vy=1500.f*dy+carry*crossY;
+    const float magnitude=std::sqrt(vx*vx+vy*vy),speed=std::min(magnitude,1700.f);
+    float travel=speed*(2.f*500.f/2154.f+.06f);
+    travel+=chain ? 1350.f*(.7f+.1f+.4f*(.35f+.1f)) : speed*(.35f+.1f);
+    return {start.X+vx/magnitude*travel,start.Y+vy/magnitude*travel,0.f};
+}
+void NativeAngledDodgeOpportunity() {
+    for(float radius:{38.f,40.f}) {
+        for(float degrees:{12.f,20.f,28.f}) {
+            for(float direction:{-1.f,1.f}) {
+                const Point start={1100.f,-850.f,1.f};
+                const Point end=NativeDodgeEnd(start,degrees,direction,-1.f,0.f,false);
+                Require(CanPopupDodgePath(0,start.X,start.Y,end.X,end.Y,radius,140.f),
+                    "normal 12-28 degree forward/back dodge has no safe low-left opportunity");
+                const Point deep={1100.f,-1550.f,0.f};
+                const Point deepEnd=NativeDodgeEnd(deep,degrees,direction,1.f,0.f,false);
+                Require(CanPopupDodgePath(4,deep.X,deep.Y,deepEnd.X,deepEnd.Y,radius,100.f),
+                    "normal forward/back angled dodge has no safe deep-left opportunity");
+            }
+        }
+        for(Point start:std::vector<Point>{{900.f,-850.f,1.f},{-500.f,-1450.f,0.f}}) {
+            const bool low=start.Z>0.f;
+            const Point end=NativeDodgeEnd(start,12.f,1.f,low ? -1.f : 1.f,0.f,true);
+            Require(CanPopupDodgePath(low ? 0 : 4,start.X,start.Y,end.X,end.Y,radius,low ? 140.f : 100.f),
+                "native backward dodge-to-slide has no safe popup opportunity");
+        }
+        const Point start={1100.f,-850.f,1.f};
+        const Point carried=NativeDodgeEnd(start,28.f,1.f,-1.f,-940.f,false);
+        Require(!CanPopupDodgePath(0,start.X,start.Y,carried.X,carried.Y,radius,140.f),
+            "full native perpendicular momentum is not guarded against side-wall contact");
+    }
+}
 int main(int argc,char**argv) {
     Require(argc==2,"choose a case"); const std::string name=argv[1];
+    if(name=="preserved") { PreservedSeats(); return 0; }
+    if(name=="dodge_paths") { AngledDodgePaths(); return 0; }
+    if(name=="native_dodge") { NativeAngledDodgeOpportunity(); return 0; }
+    for(bool instagib:{true,false}) {
+    for(int variant:{0,1,2}) {
+    InstagibGeometry=instagib;
+    PopupVariant=variant;
     if(name=="support") PlatformSupport();
     else if(name=="popup") PopupSightlines();
     else if(name=="heads") HeadCoverSightlines();
@@ -356,6 +470,8 @@ int main(int argc,char**argv) {
     else if(name=="tracking_slide") TrackingSlideLane();
     else if(name=="left_motion") LeftMotionLanes();
     else Require(false,"unknown case");
+    }
+    }
 }
 '''
 
@@ -397,6 +513,9 @@ class AimTrainerLayoutTests(unittest.TestCase):
     def test_permanent_dodger_remains_visible_across_its_lane(self): self.run_case("dodger_sightlines")
     def test_tracking_slide_stays_in_lane_and_within_fixed_player_beam_range(self): self.run_case("tracking_slide")
     def test_both_left_slide_lanes_and_long_strafe_remain_clear_with_both_capsule_profiles(self): self.run_case("left_motion")
+    def test_requested_platform_and_head_peek_seats_are_preserved(self): self.run_case("preserved")
+    def test_angled_dodge_paths_keep_landing_strafe_and_capsules_clear(self): self.run_case("dodge_paths")
+    def test_native_impulses_allow_forward_backward_and_landing_slide_opportunities(self): self.run_case("native_dodge")
 
 
 if __name__ == "__main__":

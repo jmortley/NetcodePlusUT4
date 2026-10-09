@@ -1,6 +1,6 @@
 #pragma once
 
-// Timing and direction rules for the revision-11 trainer preset. The authority
+// Timing and direction rules for the trainer presets. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {
@@ -24,6 +24,49 @@ namespace NCAimTrainerScenarioPolicy
         return 0.12f + 0.16f * UnitRoll(Roll);
     }
 
+    inline bool HasVariedPopupMovement(int Slot) { return Slot == 0 || Slot == 1 || Slot == 4; }
+
+    inline int PopupSpawnVariant(int Slot, float Roll)
+    {
+        // Reuse the same timed actor across different seats, not extra targets
+        // that would outpace the rifle or change the checkpoint target IDs.
+        const float Choice = UnitRoll(Roll);
+        if (Slot == 4) { return Choice < 0.4f ? 0 : Choice < 0.7f ? 1 : 2; }
+        return Slot == 1 && Choice >= 0.5f ? 1 : 0;
+    }
+
+    inline float PopupStrafeHoldSeconds(int Slot, float PatternRoll, float JitterRoll)
+    {
+        if (!HasVariedPopupMovement(Slot)) { return WiggleHoldSeconds(JitterRoll); }
+        // Give acceleration time to produce a readable movement across the
+        // lane. Mix shorter reversals with longer commitments each decision.
+        const float Jitter = UnitRoll(JitterRoll);
+        return UnitRoll(PatternRoll) < 0.6f ? 0.24f + 0.18f * Jitter : 0.45f + 0.30f * Jitter;
+    }
+
+    enum EPopupAction { PopupStrafe, PopupSlide, PopupLongStrafe, PopupForwardDodge, PopupBackwardDodge, PopupDodgeSlide };
+
+    inline int PopupAction(int Slot, int Variant, float Roll)
+    {
+        if (Slot == 2) { return PopupSlide; }
+        const float Choice = UnitRoll(Roll);
+        if (Slot == 0 || (Slot == 4 && Variant != 1))
+        {
+            if (Choice < 0.15f) { return PopupForwardDodge; }
+            if (Choice < 0.30f) { return PopupBackwardDodge; }
+            if (Choice < 0.40f) { return PopupDodgeSlide; }
+            // Deep left seats have a narrow outer corridor. Use their checked
+            // angled dodge/slide path instead of the foreground lateral slide.
+            if (Choice < 0.60f && !(Slot == 4 && Variant == 2)) { return PopupSlide; }
+            if (Choice < 0.80f && Slot == 0) { return PopupLongStrafe; }
+        }
+        else if (Slot == 4 && Choice < 0.45f) { return PopupSlide; }
+        return PopupStrafe;
+    }
+
+    inline float PopupDodgeDelaySecondsForAppearance(float Roll) { return 0.65f + 0.70f * UnitRoll(Roll); }
+    inline float PopupDodgeAngleDegrees(float Roll) { return 12.f + 16.f * UnitRoll(Roll); }
+
     inline float BoundedStrafeDirection(float Offset, float Velocity, float Acceleration,
         float Range, float RequestedDirection, float DeltaSeconds)
     {
@@ -42,15 +85,7 @@ namespace NCAimTrainerScenarioPolicy
     inline float CrouchDelaySeconds(float Roll) { return 1.5f + 2.f * UnitRoll(Roll); }
     inline float CrouchHoldSeconds(float Roll) { return 0.25f + 0.20f * UnitRoll(Roll); }
     inline float PopupSlideDelaySeconds(float Roll) { return 0.8f + 0.6f * UnitRoll(Roll); }
-    inline bool ShouldPopupSlide(int Slot, float Roll)
-    {
-        return Slot == 2 || ((Slot == 0 || Slot == 4) && UnitRoll(Roll) < 0.45f);
-    }
-    inline bool ShouldPopupLongStrafe(int Slot, float Roll)
-    {
-        return Slot == 0 && UnitRoll(Roll) < 0.65f;
-    }
-    inline float PopupLongStrafeDelaySeconds(float Roll) { return 2.3f + 0.6f * UnitRoll(Roll); }
+    inline float PopupLongStrafeDelaySeconds(float Roll) { return 1.4f + 0.6f * UnitRoll(Roll); }
     inline float PopupLongStrafeHoldSeconds(float Roll) { return 0.50f + 0.25f * UnitRoll(Roll); }
     inline float PopupLongStrafeDirection(float Offset, float Roll)
     {
@@ -118,8 +153,8 @@ namespace NCAimTrainerScenarioPolicy
 
     inline float PopupExposure(float RefireSeconds, float Roll)
     {
-        // Five targets can overlap. A new target at the back of a full queue
-        // gets five refire intervals plus at least half an interval to aim.
-        return PopupRefireSeconds(RefireSeconds) * (5.5f + 1.3f * UnitRoll(Roll));
+        // Prioritize fresh targets instead of banking a full five-shot queue.
+        // Even the shortest exposure retains several legal rifle opportunities.
+        return PopupRefireSeconds(RefireSeconds) * (4.5f + 0.9f * UnitRoll(Roll));
     }
 }

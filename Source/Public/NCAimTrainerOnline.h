@@ -11,6 +11,7 @@ class NETCODEPLUS_API FNCAimTrainerOnline
 public:
 	// Preset revisions isolate scoring, movement and weapon-specific leaderboards.
 	enum { PresetRevision = 11 };
+	static int32 PresetRevisionForScenario(int32 Scenario);
 	static const TCHAR* ScenarioSlug(int32 Scenario);
 	static void Submit(UWorld* World, const FNCAimTrainerResult& Result,
 		TFunction<void(bool, const FString&)> Completion);

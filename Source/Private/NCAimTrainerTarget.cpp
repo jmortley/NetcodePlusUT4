@@ -158,7 +158,7 @@ void ANCAimTrainerTarget::StartWiggle(float HalfWidth)
     if (Role != ROLE_Authority || !bTrainerVisible || !FMath::IsFinite(HalfWidth) || HalfWidth <= 0.f) { return; }
     bTrainerStrafe = true;
     bTrainerWiggle = true;
-    StrafeRange = FMath::Clamp(HalfWidth, 20.f, 110.f);
+    StrafeRange = FMath::Clamp(HalfWidth, 20.f, 140.f);
     WiggleRange = StrafeRange;
     PopupLongStrafeEndTime = 0.f;
     GetCharacterMovement()->SetMovementMode(MOVE_Walking);
@@ -167,7 +167,7 @@ void ANCAimTrainerTarget::StartWiggle(float HalfWidth)
 bool ANCAimTrainerTarget::StartPopupLongStrafe(float HalfWidth, float HoldSeconds, float DirectionRoll)
 {
     if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerWiggle || IsDead()
-        || bIsCrouched || IsTrainerSliding() || IsTrainerLongStrafing()
+        || bIsCrouched || IsTrainerSliding() || IsTrainerLongStrafing() || bRecenterWiggleAfterDodge
         || !GetCharacterMovement()->IsMovingOnGround()
         || !FMath::IsFinite(HalfWidth) || !FMath::IsFinite(HoldSeconds)
         || HalfWidth <= WiggleRange || HoldSeconds <= 0.f) { return false; }
@@ -200,6 +200,8 @@ void ANCAimTrainerTarget::ResetTargetMovement()
     PopupLongStrafeEndTime = 0.f;
     WiggleRange = 0.f;
     bRecenterWiggleAfterSlide = false;
+    bRecenterWiggleAfterDodge = false;
+    bTrainerDodgeSlidePending = false;
     SetTrainerCrouched(false);
 }
 
@@ -208,7 +210,7 @@ bool ANCAimTrainerTarget::SetTrainerCrouched(bool bCrouch)
     if (Role != ROLE_Authority) { return false; }
     UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
     if (!Movement || Movement->bIsFloorSliding
-        || (bCrouch && (!bTrainerVisible || !bTrainerStrafe || IsDead() || IsTrainerLongStrafing()
+        || (bCrouch && (!bTrainerVisible || !bTrainerStrafe || IsDead() || IsTrainerLongStrafing() || bRecenterWiggleAfterDodge
             || !Movement->IsMovingOnGround())))
     {
         return false;
@@ -227,7 +229,7 @@ bool ANCAimTrainerTarget::SetTrainerCrouched(bool bCrouch)
 void ANCAimTrainerTarget::ReverseStrafe()
 {
     if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || IsTrainerSliding() || IsTrainerLongStrafing()
-        || !GetCharacterMovement()->IsMovingOnGround()) { return; }
+        || bRecenterWiggleAfterDodge || !GetCharacterMovement()->IsMovingOnGround()) { return; }
     const float Offset = GetActorLocation().Y - StrafeCenter.Y;
     StrafeDirection = Offset >= StrafeRange ? -1.f : Offset <= -StrafeRange ? 1.f : -StrafeDirection;
 }
@@ -243,6 +245,73 @@ bool ANCAimTrainerTarget::TryTrainerDodge(float DirectionRoll)
     return true;
 }
 
+bool ANCAimTrainerTarget::TryTrainerPopupDodge(int32 Slot, const FVector& Direction, const FVector& ArenaOrigin, bool bSlideOnLanding)
+{
+    UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
+    const float HorizontalSizeSquared = Direction.X * Direction.X + Direction.Y * Direction.Y;
+    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerWiggle || IsDead()
+        || bIsCrouched || IsTrainerSliding() || IsTrainerLongStrafing() || bRecenterWiggleAfterDodge
+        || !Movement || !Movement->IsMovingOnGround() || !Movement->CurrentFloor.IsWalkableFloor()
+        || Movement->bIsDodging || Movement->bIsDodgeLanding
+        || !FMath::IsFinite(Direction.X) || !FMath::IsFinite(Direction.Y) || !FMath::IsFinite(Direction.Z)
+        || Direction.Z != 0.f || HorizontalSizeSquared < 0.999f || HorizontalSizeSquared > 1.001f
+        || (bSlideOnLanding && Direction.X <= 0.f))
+    {
+        return false;
+    }
+    const FVector DodgeDirection = Direction.GetSafeNormal2D();
+    const FVector DodgeCross(-DodgeDirection.Y, DodgeDirection.X, 0.f);
+    // Native dodges retain perpendicular velocity. Predict that full impulse,
+    // airtime and ending drift before choosing a lane, including the longer
+    // distance when this appearance requests a native slide on landing.
+    const float Gravity = -Movement->GetGravityZ();
+    if (!FMath::IsFinite(Gravity) || Gravity <= 0.f || !FMath::IsFinite(MaxSpeedPctModifier)
+        || MaxSpeedPctModifier <= 0.f || !FMath::IsFinite(Movement->DodgeImpulseVertical)
+        || Movement->DodgeImpulseVertical <= 0.f) { return false; }
+    FVector LaunchVelocity = Movement->DodgeImpulseHorizontal * DodgeDirection
+        + (Movement->Velocity | DodgeCross) * DodgeCross;
+    const float LaunchSpeed = FMath::Min(LaunchVelocity.Size2D(), Movement->DodgeMaxHorizontalVelocity) * MaxSpeedPctModifier;
+    const FVector TravelDirection = LaunchVelocity.GetSafeNormal2D();
+    const float FlightTime = 2.f * Movement->DodgeImpulseVertical / Gravity + 0.06f;
+    float TravelDistance = LaunchSpeed * FlightTime;
+    if (bSlideOnLanding)
+    {
+        const float SlideSpeed = FMath::Max(Movement->MaxFloorSlideSpeed,
+            FMath::Min(LaunchSpeed, Movement->MaxInitialFloorSlideSpeed));
+        TravelDistance += SlideSpeed * (Movement->FloorSlideDuration + 0.1f
+            + Movement->FloorSlideEndingSpeedFactor * (Movement->DodgeResetInterval + 0.1f));
+    }
+    else
+    {
+        TravelDistance += LaunchSpeed * Movement->DodgeLandingSpeedFactor * (Movement->DodgeResetInterval + 0.1f);
+    }
+    const FVector Start = GetActorLocation() - ArenaOrigin;
+    const FVector End = Start + TravelDirection * TravelDistance;
+    const float Radius = GetCapsuleComponent()->GetScaledCapsuleRadius();
+    if (!FMath::IsFinite(Start.X) || !FMath::IsFinite(Start.Y) || !FMath::IsFinite(End.X) || !FMath::IsFinite(End.Y)
+        || !FMath::IsFinite(TravelDistance) || TravelDistance <= 0.f
+        || !NCAimTrainerLayout::CanPopupDodgePath(Slot, Start.X, Start.Y, End.X, End.Y, Radius, WiggleRange))
+    {
+        return false;
+    }
+    if (!Dodge(DodgeDirection, DodgeCross)) { return false; }
+    // Native UT owns impulse, airborne motion, cooldown and its movement event.
+    // Resume short strafes at the landing position instead of rushing back to
+    // the old spawn anchor or countersteering the diagonal while it lands.
+    ConsumeMovementInputVector();
+    bRecenterWiggleAfterDodge = true;
+    bTrainerDodgeSlidePending = bSlideOnLanding;
+    if (bSlideOnLanding)
+    {
+        TrainerSlideDirection = Movement->Velocity.GetSafeNormal2D();
+        Movement->UpdateFloorSlide(true);
+        AddMovementInput(TrainerSlideDirection, 1.f, true);
+    }
+    StrafeDirection = DodgeDirection.Y < 0.f ? -1.f : 1.f;
+    ForceNetUpdate();
+    return true;
+}
+
 bool ANCAimTrainerTarget::IsTrainerSliding() const
 {
     const UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
@@ -255,12 +324,13 @@ bool ANCAimTrainerTarget::TryTrainerSlideForward()
     return StartTrainerSlide(FVector(-1.f, 0.f, 0.f));
 }
 
-bool ANCAimTrainerTarget::TryTrainerPopupSlide(int32 Slot)
+bool ANCAimTrainerTarget::TryTrainerPopupSlide(int32 Slot, int32 Variant)
 {
     if (!bTrainerWiggle) { return false; }
     if (Slot == 0 || Slot == NCAimTrainerLayout::PopupSliderSlot) { return TryTrainerSlideForward(); }
-    if (Slot != 4 || !StartTrainerSlide(FVector(0.f, 1.f, 0.f))) { return false; }
-    // The near-left target slides into its open lateral lane. Retain the new
+    if (Slot != 4 || (Variant != 0 && Variant != 1)
+        || !StartTrainerSlide(FVector(0.f, Variant == 1 ? -1.f : 1.f, 0.f))) { return false; }
+    // Each near-floor target slides into its open lateral lane. Retain the new
     // endpoint instead of walking all the way back to its original appearance.
     bRecenterWiggleAfterSlide = true;
     return true;
@@ -281,7 +351,7 @@ bool ANCAimTrainerTarget::StartTrainerSlide(const FVector& Direction)
     UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
     if (Role != ROLE_Authority || !bTrainerVisible || IsDead()
         || !Movement || !Movement->IsMovingOnGround() || !Movement->CurrentFloor.IsWalkableFloor()
-        || IsTrainerLongStrafing() || !CanSlide() || !Movement->CanDodge()) { return false; }
+        || IsTrainerLongStrafing() || bRecenterWiggleAfterDodge || !CanSlide() || !Movement->CanDodge()) { return false; }
     ConsumeMovementInputVector();
     Movement->bWantsToCrouch = false;
     // This invokes UT's real impulse, movement event, timing and slide posture.
@@ -310,6 +380,35 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
         // Stock CheckJumpInput retires this flag only on locally controlled
         // pawns. These targets have no controller or client saved moves.
         UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
+        if (bTrainerDodgeSlidePending && Movement)
+        {
+            if (Movement->bIsFloorSliding)
+            {
+                // ProcessLanded has already applied the real UT floor-slide
+                // impulse. Controllerless authority pawns need its posture and
+                // replicated flag mirrored just like our explicit floor slides.
+                bTrainerDodgeSlidePending = false;
+                Movement->ClearFloorSlideTap();
+                TrainerSlideDirection = Movement->Velocity.GetSafeNormal2D();
+                bRecenterWiggleAfterSlide = true;
+                bRepFloorSliding = true;
+                Movement->Crouch(false);
+                ForceNetUpdate();
+            }
+            else if (Movement->IsFalling())
+            {
+                // Native ProcessLanded requires movement intent to turn the
+                // held slide input into a slide. Keep it along the actual dodge
+                // velocity so ordinary wiggle decisions cannot redirect it.
+                AddMovementInput(TrainerSlideDirection, 1.f, true);
+            }
+            else if (Movement->IsMovingOnGround() && !Movement->bIsDodging)
+            {
+                bTrainerDodgeSlidePending = false;
+                Movement->ClearFloorSlideTap();
+                TrainerSlideDirection = FVector::ZeroVector;
+            }
+        }
         if (Movement && Movement->bIsFloorSliding
             && Movement->GetCurrentMovementTime() >= Movement->FloorSlideEndTime)
         {
@@ -332,8 +431,18 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
         {
             Movement->bIsDodgeLanding = false;
         }
+        if (bRecenterWiggleAfterDodge && Movement && Movement->IsMovingOnGround()
+            && !Movement->bIsDodging && !Movement->bIsDodgeLanding
+            && Movement->GetCurrentMovementTime() >= Movement->DodgeResetTime)
+        {
+            StrafeCenter.X = GetActorLocation().X;
+            StrafeCenter.Y = GetActorLocation().Y;
+            bRecenterWiggleAfterDodge = false;
+            ConsumeMovementInputVector();
+        }
     }
-    if (Role == ROLE_Authority && bTrainerVisible && bTrainerStrafe && GetCharacterMovement()->IsMovingOnGround())
+    if (Role == ROLE_Authority && bTrainerVisible && bTrainerStrafe && (!bRecenterWiggleAfterDodge || IsTrainerSliding())
+        && GetCharacterMovement()->IsMovingOnGround())
     {
         if (IsTrainerSliding())
         {

@@ -34,10 +34,12 @@ public:
     bool HasCharacterAssets() const;
     void ReverseStrafe();
     bool TryTrainerDodge(float DirectionRoll);
+    /** Guarded native diagonal dodge, optionally holding slide through a backward landing. */
+    bool TryTrainerPopupDodge(int32 Slot, const FVector& Direction, const FVector& ArenaOrigin, bool bSlideOnLanding = false);
     /** Uses UT's floor-slide physics toward the trainee, along world -X. */
     bool TryTrainerSlideForward();
-    /** Platform targets slide forward; the near-left floor lane slides inward. */
-    bool TryTrainerPopupSlide(int32 Slot);
+    /** Platform targets slide forward; near floor variants slide inward. */
+    bool TryTrainerPopupSlide(int32 Slot, int32 Variant = 0);
     /** Native lateral slide for the tracking target; turns inward near lane edges. */
     bool TryTrainerTrackingSlide(float DirectionRoll);
     bool IsTrainerSliding() const;
@@ -53,6 +55,8 @@ private:
     float WiggleRange = 0.f;
     float PopupLongStrafeEndTime = 0.f;
     bool bRecenterWiggleAfterSlide = false;
+    bool bRecenterWiggleAfterDodge = false;
+    bool bTrainerDodgeSlidePending = false;
     FVector StrafeCenter = FVector::ZeroVector;
     FVector TrainerSlideDirection = FVector::ZeroVector;
     float AppearanceTime = 0.f;

@@ -114,7 +114,7 @@ void FNCAimTrainerLocalSession::BuildStartBody(int32 Scenario)
 	TSharedRef<FJsonObject> Json = MakeShareable(new FJsonObject);
 	Json->SetStringField(TEXT("request_id"), RunId);
 	Json->SetStringField(TEXT("scenario"), FNCAimTrainerOnline::ScenarioSlug(Scenario));
-	Json->SetNumberField(TEXT("revision"), FNCAimTrainerOnline::PresetRevision);
+	Json->SetNumberField(TEXT("revision"), FNCAimTrainerOnline::PresetRevisionForScenario(Scenario));
 	Json->SetBoolField(TEXT("movement"), bMovementPractice);
 	FJsonSerializer::Serialize(Json, TJsonWriterFactory<>::Create(&StartBody));
 }

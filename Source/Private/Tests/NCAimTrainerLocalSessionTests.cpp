@@ -129,7 +129,7 @@ bool FNCAimTrainerLocalSessionTest::RunTest(const FString& Parameters)
 		};
 		return Session;
 	};
-	// Exercise the actual v11 start encoder and decoder without an online
+	// Exercise the actual start encoder and decoder without an online
 	// account or live provider, including the movement-board identity.
 	TSharedPtr<FNCAimTrainerLocalSession> StartSession = NewSession();
 	StartSession->bStarting = true;
@@ -141,7 +141,7 @@ bool FNCAimTrainerLocalSessionTest::RunTest(const FString& Parameters)
 	if (StartJson.IsValid())
 	{
 		TestEqual(TEXT("Precision popup has an independent scenario"), StartJson->GetStringField(TEXT("scenario")), FString(TEXT("precision_popup")));
-		TestEqual(TEXT("New runs use preset revision 11"), StartJson->GetNumberField(TEXT("revision")), 11.0);
+		TestEqual(TEXT("Retuned pop-ups use preset revision 12"), StartJson->GetNumberField(TEXT("revision")), 12.0);
 		TestTrue(TEXT("Start payload includes movement mode"), StartJson->GetBoolField(TEXT("movement")));
 	}
 	const TCHAR* SactfSlugs[] = { TEXT("sactf_headshots"), TEXT("sactf_popup") };
@@ -153,7 +153,7 @@ bool FNCAimTrainerLocalSessionTest::RunTest(const FString& Parameters)
 		if (SactfJson.IsValid())
 		{
 			TestEqual(TEXT("SACTF scenarios submit independent slugs"), SactfJson->GetStringField(TEXT("scenario")), FString(SactfSlugs[Scenario - 4]));
-			TestEqual(TEXT("SACTF uses revision 11"), SactfJson->GetNumberField(TEXT("revision")), 11.0);
+			TestEqual(TEXT("Only SACTF pop-ups start a fresh board"), SactfJson->GetNumberField(TEXT("revision")), Scenario == 5 ? 12.0 : 11.0);
 			TestTrue(TEXT("SACTF preserves movement board identity"), SactfJson->GetBoolField(TEXT("movement")));
 		}
 	}

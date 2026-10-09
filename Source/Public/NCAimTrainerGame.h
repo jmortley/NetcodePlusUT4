@@ -79,6 +79,9 @@ private:
     TArray<float> NextWiggleTime;
     TArray<float> NextPopupSlideTime;
     TArray<float> NextPopupLongStrafeTime;
+    TArray<float> NextPopupDodgeTime;
+    TArray<int32> PopupSpawnVariants;
+    TArray<int32> PopupDodgeActions;
     TArray<float> NextCrouchTime;
     TArray<float> CrouchEndTime;
 

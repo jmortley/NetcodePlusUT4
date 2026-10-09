@@ -114,7 +114,7 @@ namespace
 			&& FGuid::Parse(Expected.RunId, ExpectedId) && ReturnedId == ExpectedId
 			&& Ack->TryGetStringField(TEXT("scenario"), Scenario)
 			&& Scenario == FNCAimTrainerOnline::ScenarioSlug(Expected.Scenario)
-			&& Ack->TryGetNumberField(TEXT("revision"), Revision) && Revision == FNCAimTrainerOnline::PresetRevision
+			&& Ack->TryGetNumberField(TEXT("revision"), Revision) && Revision == FNCAimTrainerOnline::PresetRevisionForScenario(Expected.Scenario)
 			&& Ack->TryGetNumberField(TEXT("score"), Score) && Score == Expected.Score;
 	}
 
@@ -159,6 +159,12 @@ namespace
 	}
 }
 
+int32 FNCAimTrainerOnline::PresetRevisionForScenario(int32 Scenario)
+{
+	// Only the retuned pop-ups start fresh boards. Tracking and headshots retain their scores.
+	return Scenario == 2 || Scenario == 3 || Scenario == 5 ? 12 : PresetRevision;
+}
+
 const TCHAR* FNCAimTrainerOnline::ScenarioSlug(int32 Scenario)
 {
 	switch (Scenario)
@@ -193,7 +199,7 @@ void FNCAimTrainerOnline::Submit(UWorld* World, const FNCAimTrainerResult& Resul
 	Json->SetStringField(TEXT("player_id"), Result.PlayerId);
 	Json->SetStringField(TEXT("display_name"), Result.DisplayName.Left(64));
 	Json->SetStringField(TEXT("scenario"), ScenarioSlug(Result.Scenario));
-	Json->SetNumberField(TEXT("revision"), PresetRevision);
+	Json->SetNumberField(TEXT("revision"), PresetRevisionForScenario(Result.Scenario));
 	Json->SetBoolField(TEXT("movement"), Result.bMovementPractice);
 	Json->SetNumberField(TEXT("score"), Result.Score);
 	Json->SetNumberField(TEXT("shots"), Result.Shots);
@@ -222,7 +228,7 @@ void FNCAimTrainerOnline::Fetch(UWorld* World, int32 Scenario,
 		return;
 	}
 	FString Url = Config.BaseUrl + FString::Printf(
-		TEXT("/aimtrainer_leaderboard/?scenario=%s&revision=%d&limit=10&movement=%d"), ScenarioSlug(Scenario), int32(PresetRevision), int32(bMovementPractice));
+		TEXT("/aimtrainer_leaderboard/?scenario=%s&revision=%d&limit=10&movement=%d"), ScenarioSlug(Scenario), PresetRevisionForScenario(Scenario), int32(bMovementPractice));
 	if (bLocal) Url += TEXT("&scope=local_checkpoints");
 	Send(World, Url, FString(), FString(),
 		[Scenario, Completion, bLocal, bMovementPractice](int32 Code, const FString& Body)
@@ -239,7 +245,7 @@ void FNCAimTrainerOnline::Fetch(UWorld* World, int32 Scenario,
 			|| !Json->TryGetStringField(TEXT("scope"), Scope)
 			|| Scope != (bLocal ? TEXT("local_checkpoints") : TEXT("approved_servers"))
 			|| !Json->TryGetBoolField(TEXT("movement"), bReturnedMovement) || bReturnedMovement != bMovementPractice
-			|| !ReadBoundedNumber(Json, TEXT("revision"), PresetRevision, PresetRevision, Revision)
+			|| !ReadBoundedNumber(Json, TEXT("revision"), PresetRevisionForScenario(Scenario), PresetRevisionForScenario(Scenario), Revision)
 			|| !Json->TryGetArrayField(TEXT("rows"), JsonRows) || JsonRows->Num() > 10)
 		{
 			Completion(false, Rows);
