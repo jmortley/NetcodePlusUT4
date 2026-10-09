@@ -1,6 +1,6 @@
 // ElimPlusScoreboard — flag-row scoreboard for ElimPlus (TeamArena).
 // Mirrors UWipeoutScoreboard structure but with the ElimPlus column set:
-//   Name | Kills | Deaths | Damage | PPR(Cur) | PPR(Ovr) | ELO | LG_Acc | BestWpn | Ping
+//   Name | Kills | Deaths | Damage | PPR(Cur) | ELO | LG_Acc | Ping
 // Reads stats from AElimPlusStatsReplicator (replicated AInfo).
 #pragma once
 #include "NetcodePlus.h"
@@ -22,7 +22,7 @@ public:
 	/** Release rooted transient artwork during a live module unload. */
 	static void ReleaseAbsoluteTextures();
 
-	// Column header texts (CH_Kills, CH_Deaths, CH_PlayerName, CH_Score, CH_Skill,
+	// Column header texts (CH_Kills, CH_Deaths, CH_PlayerName, CH_Score,
 	// CH_Ping are inherited from UUTScoreboard — set their values in the ctor.)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	FText CH_Damage;
@@ -77,6 +77,9 @@ protected:
 	void DrawAbsolutePlayerScores(float RenderDelta, float& YOffset);
 	void DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 TeamIndex,
 		float XOffset, float YOffset, float AbsoluteScale);
+	/** Center the complete rating group; return its left edge for name fitting. */
+	float DrawAbsoluteRating(int32 Elo, float PPR, int32 EloDelta,
+		float CenterX, float CenterY, float AbsoluteScale);
 
 private:
 	struct FCachedRosterEntry

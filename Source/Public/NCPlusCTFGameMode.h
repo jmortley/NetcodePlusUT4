@@ -564,14 +564,18 @@ protected:
 	bool bAdvantageFlagEligible[2] = { false, false };
 
 	// ── Recent Spawn Tracking (IG+ style) ───────────────────────────
-	// The rollback selector tracks the last 3 successful spawns per player.
-	// NewCTF's default path instead prevents reuse with the team-wide queue tail.
+	// The rollback selector uses the last 3 successful spawns per player.
+	// NewCTF excludes the player's last start/location in addition to the team queue tail.
 
 	struct FRecentSpawns
 	{
 		TWeakObjectPtr<APlayerStart> Last;
 		TWeakObjectPtr<APlayerStart> SecondLast;
 		TWeakObjectPtr<APlayerStart> ThirdLast;
+		// Snapshot the start location on success: an expired/moved start must not
+		// let a different actor at the old location bypass repeat protection.
+		FVector LastLocation = FVector::ZeroVector;
+		bool bHasLastLocation = false;
 	};
 
 	TMap<TWeakObjectPtr<AController>, FRecentSpawns> PlayerRecentSpawns;
@@ -645,7 +649,8 @@ protected:
 	/** Predict remote pawn movement by half RTT for spawn distance/vision checks. */
 	bool bSpawnExtrapolateMovement = true;
 
-	/** Use the weighted-distance secondary pass when every primary candidate fails. */
+	/** Use weighted-distance secondary scoring when primary fails. When disabled,
+	 *  use stock ratings within the filtered team candidates. */
 	bool bSpawnSecondaryEnabled = true;
 
 	/** Per-player distance contribution cap in the secondary pass. */

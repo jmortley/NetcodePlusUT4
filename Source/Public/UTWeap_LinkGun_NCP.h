@@ -214,7 +214,7 @@ public:
 	USoundBase* PullFailed;
 
 	/** Whether releasing a charged beam may perform the stock Link pull. */
-	virtual bool SupportsLinkPull() const { return true; }
+	virtual bool SupportsLinkPull() const;
 
 	virtual void StartLinkPull();
 	virtual void Tick(float DeltaTime) override;

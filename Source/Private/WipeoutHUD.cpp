@@ -13,12 +13,37 @@
 #include "NCClutchOverlay.h"
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads)
 #include "UTHUDWidget_Spectator.h"
+#include "NCPlusSpectatorSlideOut.h"
 #include "WipeoutDamageReplicator.h"
 #include "ClutchHUD.h"
 #include "NCLeagueDuelHUD.h"
 #include "NCShaftArenaHUD.h"
 #include "ShockDomHUD.h"
 #include "EngineUtils.h"
+
+void AWipeoutHUD::AddSpectatorWidgets()
+{
+	Super::AddSpectatorWidgets();
+	// Respect an explicitly configured third-party slideout.
+	if (SpectatorSlideOutWidget && SpectatorSlideOutWidget->GetClass() != UUTHUDWidget_SpectatorSlideOut::StaticClass()
+		&& !Cast<UNCPlusSpectatorSlideOut>(SpectatorSlideOutWidget)) { return; }
+	if (SpectatorSlideOutWidget && SpectatorSlideOutWidget->GetClass() == UUTHUDWidget_SpectatorSlideOut::StaticClass())
+	{
+		HudWidgets.Remove(SpectatorSlideOutWidget);
+		SpectatorSlideOutWidget = nullptr;
+	}
+	UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(FindHudWidgetByClass(UNCPlusSpectatorSlideOut::StaticClass()));
+	if (!SlideOut)
+	{
+		SlideOut = Cast<UNCPlusSpectatorSlideOut>(AddHudWidget(UNCPlusSpectatorSlideOut::StaticClass()));
+	}
+	if (SlideOut)
+	{
+		SpectatorSlideOutWidget = SlideOut;
+		SlideOut->WeaponListMode = ENCSlideOutWeaponMode::ElimLoadout;
+		SlideOut->MatchOverlayMode = ENCSlideOutMatchMode::Wipeout;
+	}
+}
 
 namespace
 {
@@ -152,7 +177,7 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	}
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"));
-	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidgetAnnouncements"));   // stock + opt-in kill-name collapse
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Spectator"));
 	// Optional opt-in accuracy widget — registered on every NetcodePlus HUD
@@ -801,6 +826,10 @@ void AWipeoutHUD::DrawHUD()
 			float NameWidth = 0.f;
 			float NameHeight = 0.f;
 			float Opacity = 1.f;
+			float InkMinX = 0.f;
+			float InkMaxX = 0.f;
+			float InkMinY = 0.f;
+			float InkMaxY = 0.f;
 			bool bNextToSpawn = false;
 			bool bJoinAnimating = false;
 		};
@@ -915,31 +944,30 @@ void AWipeoutHUD::DrawHUD()
 		bool bCanBatch = GetClass() == AWipeoutHUD::StaticClass()
 			|| GetClass() == ANCShaftArenaHUD::StaticClass();
 		for (const FWipeoutStripDraw& Draw : PortraitDraws) bCanBatch &= !Draw.bJoinAnimating;
+		if (bCanBatch && PortraitDraws.Num() > 1)
+		{
+			// Reuse each card's current-frame ink bounds across all pair comparisons.
+			for (FWipeoutStripDraw& Draw : PortraitDraws)
+			{
+				const float NameX = Draw.X + 0.5f * (Draw.PipSize - Draw.NameWidth * Draw.NameScale);
+				const float NameY = Draw.Y + Draw.PipSize * WipeoutPortraitAspect + 2.f;
+				const float TextPadding = 2.f;
+				Draw.InkMinX = FMath::Min(Draw.X, NameX - TextPadding);
+				Draw.InkMaxX = FMath::Max(Draw.X + Draw.PipSize,
+					NameX + Draw.NameWidth * Draw.NameScale + TextPadding);
+				Draw.InkMinY = FMath::Min(Draw.Y, NameY - TextPadding);
+				Draw.InkMaxY = FMath::Max(Draw.Y + Draw.PipSize * WipeoutPortraitAspect,
+					NameY + Draw.NameHeight * Draw.NameScale + TextPadding);
+			}
+		}
 		for (int32 A = 0; bCanBatch && A < PortraitDraws.Num(); ++A)
 		{
 			const FWipeoutStripDraw& DA = PortraitDraws[A];
 			for (int32 B = A + 1; B < PortraitDraws.Num(); ++B)
 			{
 				const FWipeoutStripDraw& DB = PortraitDraws[B];
-				const float DANameX = DA.X + 0.5f * (DA.PipSize - DA.NameWidth * DA.NameScale);
-				const float DBNameX = DB.X + 0.5f * (DB.PipSize - DB.NameWidth * DB.NameScale);
-				const float DANameY = DA.Y + DA.PipSize * WipeoutPortraitAspect + 2.f;
-				const float DBNameY = DB.Y + DB.PipSize * WipeoutPortraitAspect + 2.f;
-				const float TextPadding = 2.f;
-				const float DAMinX = FMath::Min(DA.X, DANameX - TextPadding);
-				const float DBMinX = FMath::Min(DB.X, DBNameX - TextPadding);
-				const float DAMaxX = FMath::Max(DA.X + DA.PipSize,
-					DANameX + DA.NameWidth * DA.NameScale + TextPadding);
-				const float DBMaxX = FMath::Max(DB.X + DB.PipSize,
-					DBNameX + DB.NameWidth * DB.NameScale + TextPadding);
-				const float DAMinY = FMath::Min(DA.Y, DANameY - TextPadding);
-				const float DBMinY = FMath::Min(DB.Y, DBNameY - TextPadding);
-				const float DAMaxY = FMath::Max(DA.Y + DA.PipSize * WipeoutPortraitAspect,
-					DANameY + DA.NameHeight * DA.NameScale + TextPadding);
-				const float DBMaxY = FMath::Max(DB.Y + DB.PipSize * WipeoutPortraitAspect,
-					DBNameY + DB.NameHeight * DB.NameScale + TextPadding);
-				const bool bOverlap = DAMinX < DBMaxX && DBMinX < DAMaxX
-					&& DAMinY < DBMaxY && DBMinY < DAMaxY;
+				const bool bOverlap = DA.InkMinX < DB.InkMaxX && DB.InkMinX < DA.InkMaxX
+					&& DA.InkMinY < DB.InkMaxY && DB.InkMinY < DA.InkMaxY;
 				if (bOverlap) { bCanBatch = false; break; }
 			}
 		}

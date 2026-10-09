@@ -1,4 +1,6 @@
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
+#include "NCClientFireTiming.h"
+#include "NCFireDiagnostics.h"
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTWeaponFix.h"
 #include "UTGameState.h"
@@ -49,6 +51,16 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ClearAllTimers()
 
 void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeaponState* PrevState)
 {
+    RocketLauncher = Cast<AUTPlusWeap_RocketLauncher>(GetOuterAUTWeapon());
+    if (!RocketLauncher || !RocketLauncher->BeginLoadedVolleyState())
+    {
+        if (GetUTOwner()) GetUTOwner()->SetPendingFire(1, false);
+        if (GetOuterAUTWeapon()) GetOuterAUTWeapon()->GotoActiveState();
+        return;
+    }
+    StateVolleyId = RocketLauncher->GetLoadedVolleyId();
+    StateVolleyEpoch = RocketLauncher->GetLoadedVolleyEpoch();
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=BeginState"), TEXT("stream"));
 	// State objects are reused. RefireCheckTimer can begin the next charge without
 	// EndState(), so release idempotency must be reset here, not only in EndState().
 	bReleaseRequested = false;
@@ -81,6 +93,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
     if (W && W->LastFireTime.IsValidIndex(GetFireMode()))
     {
         W->LastFireTime[GetFireMode()] = GetWorld()->GetTimeSeconds();
+        NCClientFireTiming::Record(W, GetFireMode());
     }
     // 2. Safety checks
     if (GetUTOwner() == nullptr || GetOuterAUTWeapon()->GetCurrentState() != this)
@@ -145,10 +158,15 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
     // We wait for the player to release the button or for the grace timer to fire.
 
     // NOTE: We do NOT set RefireCheckHandle here - charging doesn't use refire timing.
+    if (RocketLauncher->IsLoadedVolleyReleasePending()) RocketLauncher->EndFiringSequence(GetFireMode());
 }
 
 void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
 {
+    if (RocketLauncher && RocketLauncher->GetLoadedVolleyId() == StateVolleyId
+        && RocketLauncher->GetLoadedVolleyEpoch() == StateVolleyEpoch)
+        RocketLauncher->CompleteLoadedVolley(true);
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=EndState"), TEXT("stream"));
 	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
 	{
 		AUTWeapon* W = GetOuterAUTWeapon();
@@ -207,6 +225,8 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
         GetOuterAUTWeapon()->GetUTOwner()->ClearFiringInfo();
     }
 
+    NCFireDiagnostics::ChargeEnded(GetOuterAUTWeapon(), 1);
+
 }
 
 void UUTWeaponStateFiringChargedRocket_Transactional::Tick(float DeltaTime)
@@ -234,6 +254,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::Tick(float DeltaTime)
 
 void UUTWeaponStateFiringChargedRocket_Transactional::LoadTimer()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=LoadTimer"), TEXT("stream"));
     AUTWeapon* Weapon = GetOuterAUTWeapon();
     if (!Weapon)
     {
@@ -284,7 +305,9 @@ void UUTWeaponStateFiringChargedRocket_Transactional::LoadTimer()
     // may latch release intent, but CommitRelease waits until this mutation ends.
     {
         TGuardValue<bool> CompletingLoadGuard(bCompletingLoadTimer, true);
+        const int32 AmmoBeforeLoad = RocketLauncher->Ammo;
         RocketLauncher->EndLoadRocket();
+        RocketLauncher->NoteLoadedRocketAmmoSpent(AmmoBeforeLoad - RocketLauncher->Ammo);
     }
 
     if (RocketPrimaryChargedDiag(Weapon))
@@ -324,7 +347,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::LoadTimer()
         // intentional auto-release in this state.
         if (GetUTOwner() && !GetUTOwner()->IsLocallyControlled() && GetWorld()->GetNetMode() != NM_Client)
         {
-            RocketLauncher->ClientAbortLoad();
+            RocketLauncher->ClientAbortLoad(RocketLauncher->GetLoadedVolleyEpoch(), RocketLauncher->GetLoadedVolleyId());
         }
 
         if (!TimerManager.IsTimerActive(GraceTimerHandle))
@@ -370,6 +393,18 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ExitToActiveAndAttemptBuff
         || Weapon->GetCurrentState() != this)
     {
         return;
+    }
+
+    if (AUTWeaponFix* Fix = Cast<AUTWeaponFix>(Weapon))
+    {
+        if (Fix->CompleteAcceptedDeferredFire(this)) return;
+        if (Fix->RequiresTransactionalRequest())
+        {
+            // Remote held bits cannot manufacture primary. GotoState filters
+            // transactional auto-entry and still permits stock-managed modes.
+            Weapon->GotoActiveState();
+            return;
+        }
     }
 
     TWeakObjectPtr<AUTWeapon> WeakWeapon = Weapon;
@@ -431,6 +466,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ExitToActiveAndAttemptBuff
 
 void UUTWeaponStateFiringChargedRocket_Transactional::CommitRelease()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=CommitRelease"), TEXT("stream"));
     if (bReleaseCommitted || bCompletingLoadTimer)
     {
         return;
@@ -468,6 +504,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::CommitRelease()
     // One or more completed rockets form the release snapshot. A partly loaded
     // next rocket is cancelled, not promoted, regardless of ping.
     bReleaseCommitted = true;
+    NCFireDiagnostics::ChargeCommitted(Weapon, 1, LoadedRockets);
     const float CancelledLoadRemaining = TimerManager.GetTimerRemaining(LoadTimerHandle);
     TimerManager.ClearTimer(LoadTimerHandle);
     TimerManager.ClearTimer(GraceTimerHandle);
@@ -516,6 +553,12 @@ void UUTWeaponStateFiringChargedRocket_Transactional::CommitRelease()
         return;
     }
 
+    if (!RocketLauncher->CommitLoadedVolley())
+    {
+        ExitToActiveAndAttemptBufferedPrimary();
+        return;
+    }
+
     // FireLoadedRocket owns the burst and then arms this charged state's refire
     // timer. Generic Stop-RPC cleanup must not clear or race those timers.
     FireLoadedRocket();
@@ -525,6 +568,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::CommitRelease()
 
 void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 FireModeNum)
 {
+    if (RocketLauncher && FireModeNum == 1) RocketLauncher->NotifyLoadedVolleyRelease();
 	if (FireModeNum != GetFireMode())
 	{
 		return;
@@ -602,6 +646,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
 
 void UUTWeaponStateFiringChargedRocket_Transactional::RecoverWedgedRelease()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=RecoverWedgedRelease"), TEXT("stream"));
     AUTWeapon* Weapon = GetOuterAUTWeapon();
     if (!Weapon || Weapon->GetCurrentState() != this || !GetUTOwner()
         || bCompletingLoadTimer)
@@ -637,6 +682,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RecoverWedgedRelease()
 
 void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=FireLoadedRocket"), TEXT("stream"));
 	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
 	{
 		AUTWeapon* W = GetOuterAUTWeapon();
@@ -652,12 +698,14 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 
     if (!RocketLauncher || RocketLauncher->NumLoadedRockets <= 0)
     {
+        if (RocketLauncher) RocketLauncher->CompleteLoadedVolley(false);
         // Done firing - cleanup
         ChargeTime = 0.0f;
         AUTWeaponFix* W = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
         if (W && W->LastFireTime.IsValidIndex(GetFireMode()))
         {
             W->LastFireTime[GetFireMode()] = GetWorld()->GetTimeSeconds();
+            NCClientFireTiming::Record(W, GetFireMode());
         }
 
         GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(GraceTimerHandle);
@@ -746,6 +794,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 
 
     // All rockets fired
+    RocketLauncher->CompleteLoadedVolley(false);
     ChargeTime = 0.0f;
     GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(GraceTimerHandle);
     GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(LoadTimerHandle);
@@ -753,6 +802,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
     if (W && W->LastFireTime.IsValidIndex(GetFireMode()))
     {
         W->LastFireTime[GetFireMode()] = GetWorld()->GetTimeSeconds();
+        NCClientFireTiming::Record(W, GetFireMode());
     }
 
     if (GetOuterAUTWeapon()->GetCurrentState() == this)
@@ -850,6 +900,25 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
         return;
     }
 
+    // An accepted numbered primary owns completion before a held-alt restart.
+    // This also commits a released primary with its original aim and event.
+    if (AUTWeaponFix* Fix = Cast<AUTWeaponFix>(Weapon))
+    {
+        if (Fix->CompleteAcceptedDeferredFire(this)) return;
+    }
+
+    // A new numbered Begin may arrive while the previous volley's refire timer
+    // still owns this state. Start it at this legal boundary, never by resetting
+    // the old timer or by inventing a new server-side identity from a held bit.
+    if (RocketLauncher && RocketLauncher->HasLoadedVolley()
+        && !RocketLauncher->IsLoadedVolleyCommitted())
+    {
+        Owner->SetPendingFire(1, false);
+        Weapon->GotoActiveState();
+        if (RocketLauncher) RocketLauncher->TryBeginLoadedVolley();
+        return;
+    }
+
     // HandleContinuedFiring() transitions to ActiveState when it returns false.
     // Only call it after proving that charged fire can continue, then revalidate
     // after its Blueprint/event hooks before beginning the next charge cycle.
@@ -870,8 +939,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
             return;
         }
 
-        bCharging = true;
-        BeginState(this);
+        if (RocketLauncher) RocketLauncher->ContinueLoadedVolley();
         return;
     }
 
@@ -1013,7 +1081,8 @@ void UUTWeaponStateFiringChargedRocket_Transactional::PutDown()
 			}
 		}
 
-		GetOuterAUTWeapon()->UnEquip();
+        RocketLauncher->CompleteLoadedVolley(false);
+        GetOuterAUTWeapon()->UnEquip();
 		return;
 	}
 

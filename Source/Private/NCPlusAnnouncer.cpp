@@ -88,6 +88,12 @@ namespace
 			TEXT("Sexy"),
 			TEXT("/Game/NetcodePlusOptional/Announcers/UT2004/BP_NCPAnnouncer_Sexy"),
 			TEXT("/Game/NetcodePlusOptional/Announcers/UT2004/BP_NCPAnnouncer_Sexy.BP_NCPAnnouncer_Sexy_C")
+		},
+		{
+			TEXT("UT3"),
+			TEXT("UT3"),
+			TEXT("/Game/NetcodePlusOptional/Announcers/UT3/BP_NCPAnnouncer_UT3"),
+			TEXT("/Game/NetcodePlusOptional/Announcers/UT3/BP_NCPAnnouncer_UT3.BP_NCPAnnouncer_UT3_C")
 		}
 	};
 

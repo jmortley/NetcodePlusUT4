@@ -248,9 +248,11 @@ namespace
 					DepthMesh->IsVisible() ? 1 : 0, DepthMesh->bHiddenInGame ? 1 : 0,
 					(uint32)DepthMesh->CustomDepthStencilValue, *DepthMesh->GetComponentLocation().ToString());
 				DepthLog += FString::Printf(
-					TEXT(" attachParent=%s masterPose=%s"),
+					TEXT(" attachParent=%s masterPose=%s castShadow=%d masterPoseCastShadow=%d"),
 					AttachParent ? *AttachParent->GetPathName() : TEXT("none"),
-					MasterPose ? *MasterPose->GetPathName() : TEXT("none"));
+					MasterPose ? *MasterPose->GetPathName() : TEXT("none"),
+					DepthMesh->CastShadow ? 1 : 0,
+					(MasterPose && MasterPose->CastShadow) ? 1 : 0);
 				UE_LOG(LogNCPPawnDbg, Warning, TEXT("%s"), *DepthLog);
 			}
 		}

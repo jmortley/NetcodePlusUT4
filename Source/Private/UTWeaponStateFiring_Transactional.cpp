@@ -1,4 +1,6 @@
 #include "UTWeaponStateFiring_Transactional.h"
+#include "NCFireDiagnostics.h"
+#include "NCClientFireTiming.h"
 #include "UTWeaponFix.h"
 #include "UTGameState.h"
 #include "UTPlayerController.h"
@@ -160,6 +162,7 @@ void UUTWeaponStateFiring_Transactional::EndState()
 
 void UUTWeaponStateFiring_Transactional::PutDown()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("PUTDOWN_CALLBACK"), GetOuterAUTWeapon()->GetCurrentFireMode(), INDEX_NONE, 0, FString(), TEXT("state"));
 	// Ensure any delayed logic (like pending replicated shots) is processed first
 	HandleDelayedShot();
 
@@ -170,20 +173,16 @@ void UUTWeaponStateFiring_Transactional::PutDown()
 		return;
 	}
 
-	// 1. Calculate cooldown using timestamps (Works on Server & Client)
-	float TimeRemaining = 0.f;
-	uint8 Mode = GetOuterAUTWeapon()->GetCurrentFireMode();
-
-	// Check LastFireTime to determine when the weapon is actually ready
-	if (W->LastFireTime.IsValidIndex(Mode) && W->LastFireTime[Mode] > 0.f)
-	{
-		float ReadyTime = W->LastFireTime[Mode] + GetOuterAUTWeapon()->GetRefireTime(Mode);
-		TimeRemaining = FMath::Max(0.f, ReadyTime - GetWorld()->GetTimeSeconds());
-	}
+    // Use the same client clock as refire/re-click readiness; authority falls back
+    // to its original world timestamp rate validation.
+    const uint8 Mode = GetOuterAUTWeapon()->GetCurrentFireMode();
+    const float TimeRemaining = FMath::Max(0.f, NCClientFireTiming::Remaining(W, Mode));
 
 	// 2. Calculate the penalty overlap
 	// (If the cooldown is longer than the PutDown animation, we must wait)
 	float TimeTillPutDown = TimeRemaining * GetOuterAUTWeapon()->RefirePutDownTimePercent;
+    if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("PUTDOWN_TIMING"), GetOuterAUTWeapon()->GetCurrentFireMode(), INDEX_NONE, 0,
+        FString::Printf(TEXT("cooldown=%.6f tillPutDown=%.6f animation=%.6f"), TimeRemaining, TimeTillPutDown, GetOuterAUTWeapon()->GetPutDownTime()), TEXT("state"));
 
 	if (TimeTillPutDown <= GetOuterAUTWeapon()->GetPutDownTime())
 	{

@@ -22,11 +22,13 @@
 #include "Engine/SkeletalMesh.h"      // SyncFlagColours: swap to dc's FlagMesh
 #include "Engine/WindDirectionalSource.h"            // TickFlagWind: cloth wind (ports dc's FlagWind)
 #include "Components/WindDirectionalSourceComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "UnrealEngine.h"                             // GetCachedScalabilityCVars().DetailMode (flag cloth)
 #include "GameFramework/PlayerState.h" // GetPlayerName
 #include "EngineUtils.h"              // TActorIterator
 #include "Engine/Canvas.h"            // DrawHeadDebug: Canvas->Project / K2_DrawLine
 #include "UObject/UObjectIterator.h" // reap registered outline duplicates whose owning lineup actor is gone
+#include "UObject/UnrealType.h"     // read protected character-content team materials without engine changes
 
 namespace
 {
@@ -39,6 +41,13 @@ namespace
 	// Saved real TeamColor per team, captured before the first HUD-recolour overwrite so it can be
 	// restored when HUD recolour is turned off. Weak keys so teams from a previous map drop out.
 	TMap<TWeakObjectPtr<AUTTeamInfo>, FLinearColor> GHudOrigColours;
+
+	struct FFlagColourOverride
+	{
+		FLinearColor Original;
+		FLinearColor Applied;
+	};
+	TMap<TWeakObjectPtr<UMaterialInstanceDynamic>, FFlagColourOverride> GFlagColourOverrides;
 
 	// Flag carriers we've forced bForceNoOutline on, so we can restore them when they drop the flag
 	// (or the suppression is turned off). Weak keys so GC'd pawns drop out.
@@ -200,6 +209,8 @@ void NCPlusForceModels::Reload()
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("HUD"),          C.bHUD,          Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Armour"),       C.bArmour,       Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Flags"),        C.bFlags,        Path);
+	GConfig->GetFloat(TEXT("ForceModels"), TEXT("FlagBrightness"), C.FlagBrightness, Path);
+	C.FlagBrightness = FMath::IsFinite(C.FlagBrightness) ? FMath::Clamp(C.FlagBrightness, 1.f, 5.f) : 2.f;
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("DarkenBodies"), C.bDarkenBodies, Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    C.bCosmetics,    Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Outline"),      C.bOutline,      Path);
@@ -212,9 +223,8 @@ void NCPlusForceModels::Reload()
 	ReadSide(TEXT("Blue"),  C.Blue);
 
 	// NB: no Red/Blue colour seeding here — the Red/Blue style forces its colours wholesale at
-	// resolve time (GetModelSettings), so those sides' H/S/V in config are inert by design (the F5
-	// rows only expose Glow + Armour for them). This replaced a short-lived Reload() seeding pass
-	// (2026-07-01): user decision = Red/Blue is zero-config, nobody picks colours.
+	// resolve time (GetModelSettings), so those sides' H/S/V in config are inert by design. F5 hides
+	// those colour controls but exposes each side's model, tint, glow and armour settings.
 
 	// Optional recolour-param override (comma-separated; names may contain spaces).
 	// Lets you tune which params get team-coloured (e.g. armour-only, leave body/face).
@@ -296,6 +306,8 @@ void NCPlusForceModels::Save()
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("HUD"),          C.bHUD,          Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Armour"),       C.bArmour,       Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Flags"),        C.bFlags,        Path);
+	GConfig->SetFloat(TEXT("ForceModels"), TEXT("FlagBrightness"),
+		FMath::IsFinite(C.FlagBrightness) ? FMath::Clamp(C.FlagBrightness, 1.f, 5.f) : 2.f, Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("DarkenBodies"), C.bDarkenBodies, Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    C.bCosmetics,    Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Outline"),      C.bOutline,      Path);
@@ -407,12 +419,23 @@ void NCPlusForceModels::SyncHudTeamColours(UWorld* World)
 	if (!GS) { return; }
 
 	const FNCPlusForceModelsConfig& C = Get();
-	const bool bWant = C.bEnabled && C.bHUD;
+	// Four-team matches keep the authoritative palette. Personal friend/enemy HUD colours would
+	// merge three opponents into one colour, and a listen host must not replicate that preference.
+	const bool bFourTeamGame = IsFourTeamGame(World);
+	const bool bWant = C.bEnabled && C.bHUD && !bFourTeamGame;
 	const int32 ViewerTeam = GetViewerTeam(World);   // spectator -> red is "ours"
 
 	for (AUTTeamInfo* Team : GS->Teams)
 	{
 		if (!Team) { continue; }
+		if (bFourTeamGame)
+		{
+			// A client may have briefly seen only the first two replicated teams and saved a personal
+			// override before the other two arrived. Repair that here without retaining a stale palette.
+			Team->TeamColor = GetFourTeamColour(Team->GetTeamNum());
+			GHudOrigColours.Remove(Team);
+			continue;
+		}
 		const bool bFriendly = ((int32)Team->GetTeamNum() == ViewerTeam);
 		// Enemy-Only leaves teammates untouched; every other style recolours both teams.
 		const bool bApply = bWant && !(C.Style == ENCPlusSkinStyle::EnemyOnly && bFriendly);
@@ -451,6 +474,21 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 	const bool bWant = C.bEnabled && C.bFlags;
 	const int32 ViewerTeam = GetViewerTeam(World);   // spectator -> red is "ours"
 	static const FName NAME_FlagColor(TEXT("FlagColor"));
+	for (auto It = GFlagColourOverrides.CreateIterator(); It; ++It)
+	{
+		UMaterialInstanceDynamic* MID = It.Key().Get();
+		if (!MID) { It.RemoveCurrent(); }
+		else if (!bWant)
+		{
+			// Yield if another renderer changed this parameter since our last write.
+			FLinearColor Current;
+			if (MID->GetVectorParameterValue(NAME_FlagColor, Current) && Current.Equals(It.Value().Applied))
+			{
+				MID->SetVectorParameterValue(NAME_FlagColor, It.Value().Original);
+			}
+			It.RemoveCurrent();
+		}
+	}
 
 	// Flag-visibility debug (ncp.FlagDebug): dump per-base flag state ~every 1.5s. Logs even when a
 	// base/flag/mesh is missing — exactly the "map maker did something funny" case (a map with no
@@ -503,12 +541,30 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 			// collapses. Element 0 is already a stock MID (Flag->MeshMID) so we just retint it; any slot
 			// without a FlagColor param no-ops harmlessly. Re-asserted each slow tick (viewer-relative).
 			const bool bFriendly = ((int32)Team == ViewerTeam);
-			const FLinearColor Colour = GetSkinColour(GetModelSettings(Team, bFriendly));
+			FLinearColor Colour = GetSkinColour(GetModelSettings(Team, bFriendly));
+			// The stock master connects FlagColor to both albedo and emissive.
+			// Its EmissiveNear/Far parameters are on a disconnected graph branch.
+			const float Brightness = FMath::IsFinite(C.FlagBrightness) ? FMath::Clamp(C.FlagBrightness, 1.f, 5.f) : 2.f;
+			Colour.R *= Brightness; Colour.G *= Brightness; Colour.B *= Brightness;
 			for (int32 i = 0; i < Mesh->GetNumMaterials(); ++i)
 			{
-				UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(i));
+				UMaterialInterface* Material = Mesh->GetMaterial(i);
+				FLinearColor Original;
+				// Skip non-flag slots instead of creating inert MIDs for the pole.
+				if (!Material || !Material->GetVectorParameterValue(NAME_FlagColor, Original)) { continue; }
+				UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Material);
 				if (!MID) { MID = Mesh->CreateAndSetMaterialInstanceDynamic(i); }
-				if (MID) { MID->SetVectorParameterValue(NAME_FlagColor, Colour); }
+				if (MID)
+				{
+					const TWeakObjectPtr<UMaterialInstanceDynamic> Key(MID);
+					if (!GFlagColourOverrides.Contains(Key))
+					{
+						FFlagColourOverride Saved; Saved.Original = Original; Saved.Applied = Colour;
+						GFlagColourOverrides.Add(Key, Saved);
+					}
+					GFlagColourOverrides.FindChecked(Key).Applied = Colour;
+					MID->SetVectorParameterValue(NAME_FlagColor, Colour);
+				}
 			}
 		}
 	}
@@ -618,7 +674,7 @@ bool NCPlusForceModels::OutlineModeActive(UWorld* World)
 	// push the host's occlusion state to every connected client and clobber their own outline flags.
 	// Also keys the TeamArenaCharacter tint-gating, so a host with the flag on keeps the normal
 	// super-tint (neutral bodies with no outline would be strictly worse).
-	if (!World) { return false; }
+	if (!World || IsFourTeamGame(World)) { return false; }
 	const FNCPlusForceModelsConfig& C = Get();
 	if (!C.bEnabled || !C.bOutline) { return false; }
 	const ENetMode NM = World->GetNetMode();
@@ -865,6 +921,24 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	GOutlined = MoveTemp(Current);
 }
 
+bool NCPlusForceModels::IsFourTeamGame(UWorld* World)
+{
+	const AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+	return GS && GS->Teams.Num() == 4;
+}
+
+FLinearColor NCPlusForceModels::GetFourTeamColour(int32 TeamIndex)
+{
+	switch (TeamIndex)
+	{
+	case 0: return FLinearColor::Red;
+	case 1: return FLinearColor(.2f, .5f, 1.f);
+	case 2: return FLinearColor::Green;
+	case 3: return FLinearColor::Yellow;
+	default: return FLinearColor::White;
+	}
+}
+
 int32 NCPlusForceModels::GetViewerTeam(UWorld* World)
 {
 	if (World)
@@ -872,7 +946,7 @@ int32 NCPlusForceModels::GetViewerTeam(UWorld* World)
 		if (AUTPlayerController* PC = Cast<AUTPlayerController>(World->GetFirstPlayerController()))
 		{
 			const uint8 T = PC->GetTeamNum();
-			if (T == 0 || T == 1) { return (int32)T; }
+			if (T != 255) { return (int32)T; }
 		}
 	}
 	return 0;   // spectator / no team -> red is "our" team, blue is enemy
@@ -880,36 +954,57 @@ int32 NCPlusForceModels::GetViewerTeam(UWorld* World)
 
 FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly)
 {
+	return GetModelSettings(TheirTeamIndex, bIsFriendly, nullptr);
+}
+
+FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly, UWorld* World)
+{
 	static const FNCPlusModelSettings EmptySide;   // empty ContentPath -> applier skips this pawn
 	const FNCPlusForceModelsConfig& C = Get();
+	FNCPlusModelSettings Out;
 	switch (C.Style)
 	{
 	case ENCPlusSkinStyle::RedBlue:
 	{
-		// Red/Blue is ABSOLUTE + ZERO-CONFIG (user decision 2026-07-01): team 0 renders red and
-		// team 1 blue whichever side the viewer is on, with the COLOUR fully plugin-fixed — no user
-		// colour input; the F5 Red/Blue rows expose only Glow + Armour mode. Blue runs S=0.9
-		// (≈ stock BLUEHUDCOLOR) so both sides read at comparable luminance. Glow/armour honour the
-		// side config; the model falls back to Team-then-Enemy so a style switch keeps a model.
-		FNCPlusModelSettings Out = (TheirTeamIndex == 0) ? C.Red : C.Blue;
-		Out.H = (TheirTeamIndex == 0) ? 0.f : 240.f;
-		Out.S = (TheirTeamIndex == 0) ? 1.f : 0.9f;
+		// Red/Blue uses absolute team colours: team 0 renders red and team 1 blue whichever side
+		// the viewer is on. F5 exposes a model picker for each side while keeping H/S/V fixed.
+		// Blue runs S=0.9 (≈ stock BLUEHUDCOLOR) so both sides read at comparable luminance.
+		// Glow/armour honour the side config; the model falls back to Team-then-Enemy so a style
+		// switch keeps a model.
+		Out = (TheirTeamIndex == 0) ? C.Red : (TheirTeamIndex == 1) ? C.Blue
+			: bIsFriendly ? C.Team : C.Enemy;
+		// Preserve the existing two-team Red/Blue hue; the four-team override below owns its palette.
+		const FLinearColor HSV = (TheirTeamIndex == 1 ? FLinearColor::Blue : GetFourTeamColour(TheirTeamIndex)).LinearRGBToHSV();
+		Out.H = HSV.R;
+		Out.S = (TheirTeamIndex == 1) ? 0.9f : 1.f;
 		Out.V = 1.f;
 		// Model fallback: a Red/Blue side with no model of its own borrows the Team (then Enemy) model,
 		// so switching to Red/Blue from a Team/Enemy-only setup still forces a model instead of nothing.
-		// UNLESS the side opted into tint-only ("Tint skin"): that checkbox promises real models tinted
-		// red/blue, and the Red/Blue rows have no model picker — with the silent borrow, the checkbox
-		// was a no-op for anyone who had a Team/Enemy model configured.
+		// UNLESS the side opted into tint-only ("Tint skin"): with no explicit model selected,
+		// that checkbox keeps players' real models tinted red/blue instead of borrowing another model.
 		if (Out.ContentPath.IsEmpty() && !Out.bTint)
 		{
 			Out.ContentPath = !C.Team.ContentPath.IsEmpty() ? C.Team.ContentPath : C.Enemy.ContentPath;
 		}
-		return Out;
+		break;
 	}
-	case ENCPlusSkinStyle::EnemyOnly: return bIsFriendly ? EmptySide : C.Enemy;
+	case ENCPlusSkinStyle::EnemyOnly: Out = bIsFriendly ? EmptySide : C.Enemy; break;
 	case ENCPlusSkinStyle::TeamEnemy:
-	default:                          return bIsFriendly ? C.Team : C.Enemy;
+	default: Out = bIsFriendly ? C.Team : C.Enemy; break;
 	}
+	if (IsFourTeamGame(World) && TheirTeamIndex >= 0 && TheirTeamIndex < 4)
+	{
+		// Keep model, brightness and cosmetic preferences, but never collapse the three enemy teams
+		// into one personal hue. EnemyOnly still leaves the friendly model unchanged.
+		const FLinearColor HSV = GetFourTeamColour(TheirTeamIndex).LinearRGBToHSV();
+		Out.H = HSV.R;
+		Out.S = HSV.G;
+		Out.V = HSV.B;
+		Out.bTint = true;
+		Out.bComplimentary = false;
+		Out.ArmourMode = ENCPlusArmourMode::MatchSkin;
+	}
+	return Out;
 }
 
 FLinearColor NCPlusForceModels::GetSkinColour(const FNCPlusModelSettings& Side)
@@ -1351,17 +1446,56 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 
 bool NCPlusForceModels::IsRecolorSkippedMaterial(const FString& MaterialName)
 {
+	return IsRecolorSkippedMaterial(MaterialName, true);
+}
+
+bool NCPlusForceModels::IsRecolorSkippedMaterial(const FString& MaterialName, bool bUseConfiguredOverrides)
+{
 	static const TArray<FString> DefaultSkip = {
 		TEXT("head"), TEXT("face"), TEXT("eye"), TEXT("hair"),
 		TEXT("teeth"), TEXT("tongue"), TEXT("mouth"), TEXT("brow"),
 	};
 	const FNCPlusForceModelsConfig& C = Get();
-	const TArray<FString>& Skip = (C.SkipMaterialSubstrings.Num() > 0) ? C.SkipMaterialSubstrings : DefaultSkip;
+	const TArray<FString>& Skip = (bUseConfiguredOverrides && C.SkipMaterialSubstrings.Num() > 0)
+		? C.SkipMaterialSubstrings : DefaultSkip;
 	for (const FString& Sub : Skip)
 	{
 		if (MaterialName.Contains(Sub, ESearchCase::IgnoreCase)) { return true; }
 	}
 	return false;
+}
+
+bool NCPlusForceModels::CanTintBodyContent(TSubclassOf<AUTCharacterContent> Content)
+{
+	const AUTCharacterContent* Data = Content.GetDefaultObject();
+	const USkeletalMeshComponent* Mesh = Data ? Data->GetMesh() : nullptr;
+	if (!Mesh || !Mesh->SkeletalMesh) { return false; }
+	// TeamMaterials is protected in UT4; only AUTCharacter is a friend. Read its existing reflected
+	// object array, validating the schema before touching storage. No CDO or material is modified.
+	UArrayProperty* TeamMaterialsProperty = FindField<UArrayProperty>(Data->GetClass(), TEXT("TeamMaterials"));
+	UObjectProperty* MaterialProperty = TeamMaterialsProperty ? Cast<UObjectProperty>(TeamMaterialsProperty->Inner) : nullptr;
+	if (!MaterialProperty || !MaterialProperty->PropertyClass
+		|| !MaterialProperty->PropertyClass->IsChildOf(UMaterialInterface::StaticClass())) { return false; }
+	FScriptArrayHelper TeamMaterials(TeamMaterialsProperty, TeamMaterialsProperty->ContainerPtrToValuePtr<void>(Data));
+	bool bHasBodyColour = false;
+	for (int32 Index = 0; Index < Mesh->GetNumMaterials(); ++Index)
+	{
+		UMaterialInterface* Material = Index < TeamMaterials.Num()
+			? Cast<UMaterialInterface>(MaterialProperty->GetObjectPropertyValue(TeamMaterials.GetRawPtr(Index))) : nullptr;
+		if (!Material) { Material = Mesh->GetMaterial(Index); }
+		if (!Material || IsRecolorSkippedMaterial(Material->GetName(), false)) { continue; }
+		if (IsBakedMaterial(Material->GetName())) { return false; }
+		FLinearColor UnusedColour;
+		for (const FName& Param : TeamColourParamNames(false))
+		{
+			if (Material->GetVectorParameterValue(Param, UnusedColour))
+			{
+				bHasBodyColour = true;
+				break;
+			}
+		}
+	}
+	return bHasBodyColour;
 }
 
 bool NCPlusForceModels::IsBakedMaterial(const FString& MaterialName)
@@ -1378,9 +1512,14 @@ bool NCPlusForceModels::IsBakedMaterial(const FString& MaterialName)
 
 const TArray<FName>& NCPlusForceModels::TeamColourParamNames()
 {
+	return TeamColourParamNames(true);
+}
+
+const TArray<FName>& NCPlusForceModels::TeamColourParamNames(bool bUseConfiguredOverrides)
+{
 	// Mod.ini override wins if set ([ForceModels] RecolorParams=Name1,Name2,...).
 	const FNCPlusForceModelsConfig& C = Get();
-	if (C.RecolorParams.Num() > 0) { return C.RecolorParams; }
+	if (bUseConfiguredOverrides && C.RecolorParams.Num() > 0) { return C.RecolorParams; }
 
 	// Default: known UT character team-colour params MINUS the head/face params
 	// (so faces stay natural). NOTE: the broad "...Team Color" / "TeamColor" params

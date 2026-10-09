@@ -1,5 +1,8 @@
 // NetcodePlus.cpp
 #include "NetcodePlus.h"
+#include "NCClientFireTiming.h"
+#include "NCFireAnchor.h"
+#include "NCAimTrainerLocalHttp.h"
 #include "Modules/ModuleManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Engine/DemoNetDriver.h"
@@ -9,10 +12,12 @@
 #include "Engine/World.h"
 #include "UObject/UObjectBase.h"      // UObjectInitialized (late module-shutdown guard)
 #include "UObject/UObjectGlobals.h"   // FCoreUObjectDelegates::PreLoadMap
+#include "UObject/UnrealType.h"      // runtime property offsets for retail UT compatibility
 #include "UTPlayerController.h"
 #include "UTPlayerInput.h"
 #include "UTProfileSettings.h"
 #include "UTLocalPlayer.h"
+#include "UTMenuGameMode.h"
 #include "UTGameState.h"
 #include "UTCharacter.h"
 #include "UTWeapon.h"
@@ -28,9 +33,11 @@
 #include "ElimPlusScoreboard.h"
 #include "WipeoutHUD.h"
 #include "NCPlusCTFHUD.h"
+#include "NCPlusXTDMHUD.h"
 #include "ShockDomHUD.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"
+#include "NCPlusDisplaySettings.h"
 #include "NCPlusVersionGate.h"        // hub advisor registration (whisper-mode version gate)
 #include "NCConcedeVote.h"            // gg concede vote: client command routing + bind seeding
 #include "NCHighPollingMouseInput.h"  // optional captured-gameplay WM_INPUT coalescing
@@ -64,6 +71,7 @@ static TWeakPtr<SNCPlusHUDDragOverlay> ActiveDragOverlay;
  *  owned by another plugin if the generic `ready` name was already occupied. */
 static IConsoleObject* GReadyConsoleCommand = nullptr;
 static IConsoleObject* GNCPReadyConsoleCommand = nullptr;
+static IConsoleObject* GAimTrainConsoleCommand = nullptr;
 
 /** PreLoadMap delegate handle — self-heals the menu input state across level loads. */
 static FDelegateHandle GNCPPreLoadMapHandle;
@@ -486,6 +494,7 @@ static void HandleHUDDragOverlay(const TArray<FString>& Args)
 		Cast<AElimPlusHUD>(RawHUD) != nullptr ||
 		Cast<AWipeoutHUD>(RawHUD)  != nullptr ||
 		Cast<ANCPlusCTFHUD>(RawHUD)!= nullptr ||
+		Cast<ANCPlusXTDMHUD>(RawHUD)!= nullptr ||
 		Cast<AShockDomHUD>(RawHUD) != nullptr;
 	if (!bIsNCPHUD)
 	{
@@ -594,6 +603,18 @@ static FDelegateHandle GNcpConnectTickerHandle;
 static FString         GNcpConnectURL;
 static float           GNcpConnectElapsed = 0.0f;
 
+/** -ncpaimtrain, the launcher's Aim trainer button, rides this same ticker and wait.
+ *  GNcpConnectURL stays empty; when the gate opens, TickNcpConnect runs the `aimtrain`
+ *  console command's travel instead of joining a server. */
+static bool GNcpAimTrainPending = false;
+
+/** Extra seconds past the readiness budget to wait for the front-end menu itself: the
+ *  gate only needs *a* game world, but aimtrain needs UT-Entry's AUTMenuGameMode and its
+ *  local PlayerController. Caps the wait on a front end that never finishes loading. */
+static const float GNcpAimTrainMenuGraceSeconds = 60.0f;
+
+static bool OpenAimTrainFromMenu(UWorld* World, const TArray<FString>& Args);
+
 /** Rising-edge latch for the MCP cloud reads. The ticker is registered in
  *  StartupModule(), long before the local player signs in, so we always observe the
  *  profile read GO pending before it goes not-pending. Without this latch,
@@ -644,7 +665,17 @@ static FString RedactConnectURL(const FString& URL)
 	return URL;
 }
 
-/** Core-ticker callback: wait for the menu + sign-in, then ClientTravel once. */
+static bool HasNcpProgressionStorage(UUTLocalPlayer* LocalPlayer)
+{
+	if (!LocalPlayer) { return false; }
+	// Retail UT's GetProgressionStorage vtable slot and inline field offset differ
+	// from these headers. Read the reflected property using the loaded class layout.
+	const UObjectProperty* Property = FindField<UObjectProperty>(LocalPlayer->GetClass(), TEXT("CurrentProgression"));
+	return Property && *Property->ContainerPtrToValuePtr<UObject*>(LocalPlayer) != nullptr;
+}
+
+/** Core-ticker callback: wait for the menu + sign-in, then ClientTravel once - or, for
+ *  -ncpaimtrain, open aim practice once. */
 static bool TickNcpConnect(float DeltaTime)
 {
 	GNcpConnectElapsed += DeltaTime;
@@ -701,6 +732,28 @@ static bool TickNcpConnect(float DeltaTime)
 		return true; // front-end map not up yet
 	}
 
+	// -ncpaimtrain belongs to the front end the game started on. Watch for the player
+	// leaving it on EVERY tick, not only when the readiness gate below opens: a player who
+	// joins a server or starts a match during sign-in and is back at the menu before the
+	// gate opens must not be dropped into practice afterwards. A world with no game mode
+	// yet is the front end still loading, not a departure.
+	if (GNcpAimTrainPending)
+	{
+		const FWorldContext* LeaveContext = GEngine->GetWorldContextFromWorld(GameWorld);
+		const bool bTravelling = (LeaveContext && (LeaveContext->PendingNetGame || !LeaveContext->TravelURL.IsEmpty()))
+			|| !GameWorld->NextURL.IsEmpty();
+		const bool bOtherGame = GameWorld->GetAuthGameMode() != nullptr
+			&& GameWorld->GetAuthGameMode<AUTMenuGameMode>() == nullptr;
+		if (GameWorld->GetNetMode() != NM_Standalone || bTravelling || bOtherGame)
+		{
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: -ncpaimtrain cancelled after %.1fs; the player left the main menu"),
+				GNcpConnectElapsed);
+			GNcpAimTrainPending = false;
+			GNcpConnectTickerHandle.Reset();
+			return false; // single shot — unregister
+		}
+	}
+
 	// Wait for MCP sign-in AND the cloud profile (keybinds) to finish downloading before
 	// we travel. IsLoggedIn() alone only means OSS auth is done; the profile cloud read
 	// lands asynchronously AFTER that, so travelling on login alone races it - a fast
@@ -747,8 +800,8 @@ static bool TickNcpConnect(float DeltaTime)
 	// the read go pending first; and OnReadProfileComplete always REPLACES the profile
 	// object, so a changed pointer is positive proof the cloud copy landed.
 
-	// The two getters stay defensive null-COMPARES only (never dereferenced), and the
-	// weak pointer is only ever compared, never dereferenced either.
+	// Profile and progression objects are only null-checked, never dereferenced;
+	// the weak profile pointer is only compared with the current profile pointer.
 	const bool bProfileSwapped = (UTLP
 		&& UTLP->GetProfileSettings() != nullptr
 		&& UTLP->GetProfileSettings() != GNcpConnectFirstProfile.Get());
@@ -757,7 +810,7 @@ static bool TickNcpConnect(float DeltaTime)
 		&& GNcpConnectSawMcpRead
 		&& !UTLP->IsPendingMCPLoad()
 		&& bProfileSwapped
-		&& UTLP->GetProgressionStorage() != nullptr);
+		&& HasNcpProgressionStorage(UTLP));
 	// Pick the budget by whether login ever got as far as issuing a read (see the
 	// two-tier note on the timeouts above). A read that arms the latch late simply
 	// promotes us to the longer budget from that moment on.
@@ -766,6 +819,48 @@ static bool TickNcpConnect(float DeltaTime)
 	if (!bReady && !bTimedOut)
 	{
 		return true; // keep waiting for sign-in + the profile download
+	}
+
+	if (GNcpAimTrainPending)
+	{
+		// aimtrain runs only from the standalone front end, and the gate above waited for
+		// *a* game world, not the menu. Three cases: the menu is up (open practice); the
+		// front end is still loading - no game mode yet, or the menu's PlayerController not
+		// spawned yet (keep waiting, capped); or the player already moved on - a match, a
+		// server, a pending travel - and stays where they are instead of being yanked away.
+		const FWorldContext* Context = GEngine->GetWorldContextFromWorld(GameWorld);
+		const bool bTravelPending = !Context || Context->PendingNetGame
+			|| !Context->TravelURL.IsEmpty() || !GameWorld->NextURL.IsEmpty();
+		const bool bStandalone = (GameWorld->GetNetMode() == NM_Standalone);
+		const bool bMenuGame = bStandalone && GameWorld->GetAuthGameMode<AUTMenuGameMode>() != nullptr;
+		const bool bHasLocalPC = (GEngine->GetFirstLocalPlayerController(GameWorld) != nullptr);
+		const bool bFrontEndLoading = !bTravelPending && bStandalone
+			&& (GameWorld->GetAuthGameMode() == nullptr || (bMenuGame && !bHasLocalPC));
+		if (bFrontEndLoading && GNcpConnectElapsed < Budget + GNcpAimTrainMenuGraceSeconds)
+		{
+			return true; // front end still loading
+		}
+
+		// OpenAimTrainFromMenu re-checks the menu and pending travel and also needs the stock
+		// DM-DeckTest map; when it refuses, it tells the player why in the console.
+		const bool bAtMenu = bMenuGame && bHasLocalPC && !bTravelPending;
+		const bool bOpened = bAtMenu && OpenAimTrainFromMenu(GameWorld, TArray<FString>());
+		const TCHAR* Outcome = bOpened ? TEXT("opening aim practice")
+			: bAtMenu ? TEXT("aimtrain refused; staying on the main menu")
+			: bFrontEndLoading ? TEXT("front end never finished loading; skipped")
+			: TEXT("player already left the main menu; skipped");
+		UE_LOG(LogLoad, Warning, TEXT("netcodeplus: -ncpaimtrain -> %s (waited=%.1fs/%.0fs sawRead=%d pending=%d swapped=%d)%s"),
+			Outcome,
+			GNcpConnectElapsed,
+			Budget,
+			GNcpConnectSawMcpRead ? 1 : 0,
+			(UTLP && UTLP->IsPendingMCPLoad()) ? 1 : 0,
+			bProfileSwapped ? 1 : 0,
+			bReady ? TEXT("") : TEXT(" (profile not ready; timed out)"));
+
+		GNcpAimTrainPending = false;
+		GNcpConnectTickerHandle.Reset();
+		return false; // single shot — unregister
 	}
 
 	// Warning verbosity survives Shipping (Log/Verbose are stripped there). The three
@@ -890,6 +985,57 @@ static void TickInstantReplayJoinGuard()
 	}
 }
 
+// The stock sliders read the Game.ini-backed controller defaults, but profile
+// application overwrites the live controller's bob values. Restore the saved
+// local settings during play. Read the config cache (no disk I/O), so a
+// settings-dialog OK is picked up through its normal SaveConfig path.
+//
+// Deliberately do not mutate or save the profile here: it may still be the
+// provisional local profile while an asynchronous cloud read is pending. Saving
+// it would upload unrelated defaults/binds too. Game.ini already persists these
+// values; the stock dialog remains responsible for explicit profile saves.
+// Do not modify the base controller CDO: inherited SaveConfig can then elide
+// matching INI keys. Repairing that stock Blueprint-dialog behavior is separate.
+static void ReconcileLocalBobFromGameIni(UWorld* World)
+{
+	if (World == nullptr || GEngine == nullptr || GConfig == nullptr
+		|| World->GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	const TCHAR* const Section = TEXT("/Script/UnrealTournament.UTPlayerController");
+	float ViewBob = 0.f;
+	float WeaponBob = 0.f;
+	const bool bHasViewBob = GConfig->GetFloat(Section, TEXT("EyeOffsetGlobalScaling"), ViewBob, GGameIni)
+		&& FMath::IsFinite(ViewBob);
+	const bool bHasWeaponBob = GConfig->GetFloat(Section, TEXT("WeaponBobGlobalScaling"), WeaponBob, GGameIni)
+		&& FMath::IsFinite(WeaponBob);
+	if (!bHasViewBob && !bHasWeaponBob)
+	{
+		return;
+	}
+
+	for (FLocalPlayerIterator It(GEngine, World); It; ++It)
+	{
+		AUTPlayerController* const PC = Cast<AUTPlayerController>(It->PlayerController);
+		if (PC == nullptr || !PC->IsLocalController() || PC->GetWorld() != World)
+		{
+			continue;
+		}
+		// Exact comparison preserves a configured zero even for very small stale
+		// profile values; fractional settings and custom weapon scaling are retained.
+		if (bHasViewBob && PC->EyeOffsetGlobalScaling != ViewBob)
+		{
+			PC->EyeOffsetGlobalScaling = ViewBob;
+		}
+		if (bHasWeaponBob && PC->WeaponBobGlobalScaling != WeaponBob)
+		{
+			PC->WeaponBobGlobalScaling = WeaponBob;
+		}
+	}
+}
+
 static bool TickHudTeamColours(float DeltaTime)
 {
 	// Flag-cloth wind needs a per-frame update (smooth gusting/direction); the colour/outline work is
@@ -901,6 +1047,18 @@ static bool TickHudTeamColours(float DeltaTime)
 
 	if (GEngine)
 	{
+		// Visit every playable world for bob (including PIE). The HUD work below
+		// intentionally stops at the first game world.
+		if (bSlowTick)
+		{
+			for (const FWorldContext& Context : GEngine->GetWorldContexts())
+			{
+				if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
+				{
+					ReconcileLocalBobFromGameIni(Context.World());
+				}
+			}
+		}
 		for (const FWorldContext& Context : GEngine->GetWorldContexts())
 		{
 			if (Context.WorldType == EWorldType::Game && Context.World())
@@ -1136,28 +1294,77 @@ static void HandleConcedeCancel(const TArray<FString>& /*Args*/)  { ConcedeComma
 // Same path as F5 -> Ready in SUTNCPlusMenu: AUTPlayerController::Mutate uses
 // UT4's existing reliable ServerMutate RPC, and ANCReadyUpMutator consumes
 // `nc_ready` authoritatively. No new RPC or replicated state is introduced.
-static void HandleReady(const TArray<FString>& /*Args*/)
+static void HandleReady(const TArray<FString>& /*Args*/, UWorld* World)
 {
-	UWorld* World = nullptr;
-	if (GEngine)
+	// Use the invoking client's world: the first PIE world may be a dedicated
+	// server, or a different local player's world in single-process PIE.
+	if (World == nullptr || (World->WorldType != EWorldType::Game && World->WorldType != EWorldType::PIE))
 	{
-		for (const FWorldContext& Context : GEngine->GetWorldContexts())
-		{
-			if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
-			{
-				World = Context.World();
-				break;
-			}
-		}
+		return;
 	}
-	AUTPlayerController* PC = World
-		? Cast<AUTPlayerController>(World->GetFirstPlayerController()) : nullptr;
+	AUTPlayerController* PC = Cast<AUTPlayerController>(World->GetFirstPlayerController());
 	// Dedicated console/RCON must never ready whichever remote PC happens to be first.
 	if (PC == nullptr || !PC->IsLocalController())
 	{
 		return;
 	}
 	PC->Mutate(TEXT("nc_ready"));
+}
+
+/** Travel the local player from the standalone front end into aim practice. Shared by the
+ *  `aimtrain` console command and the launcher's -ncpaimtrain switch (TickNcpConnect).
+ *  Returns true once the travel is queued; once a local player exists, every refusal
+ *  tells the player why in the console. */
+static bool OpenAimTrainFromMenu(UWorld* World, const TArray<FString>& Args)
+{
+	if (!GEngine || !World || IsRunningDedicatedServer() ||
+		(World->WorldType != EWorldType::Game && World->WorldType != EWorldType::PIE))
+	{
+		return false;
+	}
+	// Never select a different PIE world or act on a dedicated server's remote PC.
+	APlayerController* PC = GEngine->GetFirstLocalPlayerController(World);
+	UUTLocalPlayer* LocalPlayer = PC ? Cast<UUTLocalPlayer>(PC->GetLocalPlayer()) : nullptr;
+	if (!LocalPlayer) { return false; }
+	if (Args.Num() != 0)
+	{
+		PC->ClientMessage(TEXT("Usage: aimtrain (from the main menu)"));
+		return false;
+	}
+	// IsMenuGame() also returns true for bNoMidGameMenu during some gameplay.
+	// Require the actual standalone front end so this never leaves a live match.
+	if (World->GetNetMode() != NM_Standalone || World->GetAuthGameMode<AUTMenuGameMode>() == nullptr)
+	{
+		PC->ClientMessage(TEXT("Return to the main menu, then enter aimtrain to open local practice."));
+		return false;
+	}
+	const FWorldContext* Context = GEngine->GetWorldContextFromWorld(World);
+	if (!Context || Context->PendingNetGame || !Context->TravelURL.IsEmpty() || !World->NextURL.IsEmpty())
+	{
+		PC->ClientMessage(TEXT("A map or server is already loading. Try aimtrain when you are back at the main menu."));
+		return false;
+	}
+	FString Map = TEXT("/Game/RestrictedAssets/Maps/WIP/DM-DeckTest");
+	if (!GEngine->MakeSureMapNameIsValid(Map))
+	{
+		PC->ClientMessage(TEXT("Cannot open aim training: the stock DM-DeckTest map is not installed."));
+		return false;
+	}
+	const FString URL = Map + TEXT("?game=/Script/NetcodePlus.NCAimTrainerGame?Bots=0?ForceNoBots=1?SpectatorOnly=0?mutator=");
+	// UT's `open` command uses partial travel. Absolute travel deliberately drops
+	// old listen/spectator/game options without changing the player's saved config.
+	// Retail UT4's local-player vtable differs from these source headers: virtual
+	// dispatch here reaches VerifyGameSession instead. Call the exported base
+	// implementation directly so both console and launcher travel use safe cleanup.
+	LocalPlayer->UUTLocalPlayer::CloseAllUI(false);
+	GEngine->SetClientTravel(World, *URL, TRAVEL_Absolute);
+	return true;
+}
+
+/** Open the local practice picker from the invoking client's front end. */
+static void HandleAimTrain(const TArray<FString>& Args, UWorld* World)
+{
+	OpenAimTrainFromMenu(World, Args);
 }
 
 void FNetcodePlus::StartupModule()
@@ -1169,6 +1376,8 @@ void FNetcodePlus::StartupModule()
 	{
 		return;
 	}
+    NCClientFireTiming::Startup();
+    NCFireAnchor::Startup();
 
 	// First: hand the launcher's login credential from the environment back onto
 	// the command line, before any consumer reads it (see ApplyLauncherAuthHandoff).
@@ -1178,6 +1387,20 @@ void FNetcodePlus::StartupModule()
 	{
 		NCPlusAnnouncerPacks::Install();
 		RegisterNCHighPollingMouseInput();
+		// Opt-in HUD display toggles: read once here so render paths only see cached bools.
+		NCPlusDisplaySettings::Reload();
+		if (IConsoleManager::Get().FindConsoleObject(TEXT("aimtrain")) == nullptr)
+		{
+			GAimTrainConsoleCommand = IConsoleManager::Get().RegisterConsoleCommand(
+				TEXT("aimtrain"),
+				TEXT("Open local NetcodePlus aim practice from the main menu."),
+				FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&HandleAimTrain),
+				ECVF_Default);
+		}
+		else
+		{
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: console command 'aimtrain' already exists; leaving it unchanged"));
+		}
 	}
 
 	IConsoleManager::Get().RegisterConsoleCommand(
@@ -1246,7 +1469,7 @@ void FNetcodePlus::StartupModule()
 	GNCPReadyConsoleCommand = IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("ncpready"),
 		TEXT("Mark the local player ready (same action as F5 -> Ready)"),
-		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleReady),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&HandleReady),
 		ECVF_Default
 	);
 	if (IConsoleManager::Get().FindConsoleObject(TEXT("ready")) == nullptr)
@@ -1254,7 +1477,7 @@ void FNetcodePlus::StartupModule()
 		GReadyConsoleCommand = IConsoleManager::Get().RegisterConsoleCommand(
 			TEXT("ready"),
 			TEXT("Mark the local player ready (same action as F5 -> Ready)"),
-			FConsoleCommandWithArgsDelegate::CreateStatic(&HandleReady),
+			FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&HandleReady),
 			ECVF_Default
 		);
 	}
@@ -1372,15 +1595,25 @@ void FNetcodePlus::StartupModule()
 	}
 
 	// -ncpconnect=IP:port?Password=pw — launcher direct-connect (real clients only).
-	// Register the ticker ONLY when the arg is present, so there is zero overhead
+	// -ncpaimtrain — the launcher's Aim trainer button: the same sign-in/profile wait,
+	// then the `aimtrain` travel (see TickNcpConnect). A join wins if both are passed.
+	// Register the ticker ONLY when one is present, so there is zero overhead
 	// on normal launches. bShouldStopOnComma=false keeps a comma in the password.
 	if (!IsRunningDedicatedServer() && !GIsEditor)
 	{
 		FString ConnectURL;
-		if (FParse::Value(FCommandLine::Get(), TEXT("ncpconnect="), ConnectURL, /*bShouldStopOnComma=*/ false)
-			&& !ConnectURL.IsEmpty())
+		// UE 4.15's FParse::Value skips whitespace after '=', so a bare "-ncpconnect=" reads
+		// the NEXT switch (-ncpaimtrain, an -AUTH_ argument) as the address. A server address
+		// never starts with '-' or '/'.
+		const bool bConnect = FParse::Value(FCommandLine::Get(), TEXT("ncpconnect="), ConnectURL, /*bShouldStopOnComma=*/ false)
+			&& !ConnectURL.IsEmpty()
+			&& !ConnectURL.StartsWith(TEXT("-"))
+			&& !ConnectURL.StartsWith(TEXT("/"));
+		const bool bAimTrain = !bConnect && FParse::Param(FCommandLine::Get(), TEXT("ncpaimtrain"));
+		if (bConnect || bAimTrain)
 		{
-			GNcpConnectURL = ConnectURL;
+			GNcpConnectURL = bConnect ? ConnectURL : FString();
+			GNcpAimTrainPending = bAimTrain;
 			GNcpConnectElapsed = 0.0f;
 
 			// Mod.ini overrides for the two readiness budgets. [NetcodePlus] lives in
@@ -1445,6 +1678,18 @@ void FNetcodePlus::StartupModule()
 
 void FNetcodePlus::ShutdownModule()
 {
+    // Stop private credential-bearing requests before the module/UObjects go away.
+    if (!ShutdownNCAimTrainerLocalHttp())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("Aim trainer HTTP shutdown is still draining native callbacks."));
+    }
+    NCClientFireTiming::Shutdown();
+    NCFireAnchor::Shutdown();
+	if (GAimTrainConsoleCommand)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(GAimTrainConsoleCommand, false);
+		GAimTrainConsoleCommand = nullptr;
+	}
 	// This object is referenced by Slate rather than CoreUObject. Release it even
 	// during late process teardown so Slate never retains code from an unloaded DLL.
 	if (!IsRunningCommandlet())
@@ -1463,7 +1708,7 @@ void FNetcodePlus::ShutdownModule()
 
 	NCPlusAnnouncerPacks::Uninstall();
 
-	// Stop the -ncpconnect ticker if it never fired.
+	// Stop the -ncpconnect / -ncpaimtrain ticker if it never fired.
 	if (GNcpConnectTickerHandle.IsValid())
 	{
 		FTicker::GetCoreTicker().RemoveTicker(GNcpConnectTickerHandle);

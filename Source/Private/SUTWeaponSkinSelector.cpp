@@ -771,8 +771,8 @@ void SUTWeaponSkinSelector::SaveAndApply()
 	if (UTChar && UTChar->GetWeapon())
 	{
 		AUTWeapon* CurWeap = UTChar->GetWeapon();
-		bool* bHidden = AUTWeaponFix::HiddenWeaponsByTag.Find(FName(*CurWeap->GetClass()->GetName()));
-		AUTWeaponFix::ApplyWeaponHideState(CurWeap, UTChar, bHidden && *bHidden);
+		AUTWeaponFix::ApplyWeaponHideState(CurWeap, UTChar,
+			AUTWeaponFix::IsWeaponHiddenBySettings(CurWeap, UTChar));
 		if (ATeamArenaCharacter* TeamChar = Cast<ATeamArenaCharacter>(UTChar))
 		{
 			if (AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(CurWeap))

@@ -15,6 +15,14 @@ NetcodePlus replaces stock UT4's hit registration and projectile prediction with
 
 ## Features
 
+### Aim Trainer (329 development)
+
+An optional game mode with real UT character targets: strafe tracking, covered
+headshots, and varied instagib pop-ups. Includes 60-second runs, an in-game
+scenario picker/results HUD, and a UT4Stats top 10 per scenario. See
+[Aim Trainer setup and scoring](Docs/AimTrainer329.md) for the NCWepMut content
+requirement, server approval, launch command and validation limits.
+
 ### Netcode
 
 - **Server-side capsule rewind for hit validation** — every shot is validated against rewound target capsules at the time of fire, scaled by ping. Players at 100ms ping get the same shot effectiveness as players at 20ms.
@@ -106,6 +114,7 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
   - Hidden-while-respawning portrait visuals + last-man-standing pulse.
   - Optional **anti-camp** watch (server-tunable, default on) — flags a player who holds a tight box too long; detection is C++, the warn/response is Blueprint. Retune or disable via `[NetcodePlus] ElimEnableAntiCamp` / `ElimCampThreshold` / `ElimCampCheckInterval` / `ElimCampWarnCooldown` (SERVER-ADMINS §5).
 - **Wipeout** — Team elimination with respawn waves, portrait-strip HUD, side-by-side scoreboard with player portraits, K/D + B/A tracking, sudden death OT, alternating-team-first round spawning. Same carry-aware Glicko blend as ElimPlus.
+  - **Reconnect life-state repair:** after an allowed spawn, verify live possession before clearing stale eliminated/respawn flags and restoring the player's input and camera through existing controller RPCs. This prevents a restored PlayerState from leaving an alive crash-rejoining player in spectator UI. A bounded check in the existing one-second spectator sweep recovers the same contradiction, and delayed spectate callbacks cannot take a live pawn away. Actual spectators, queued respawns, eliminated players and end-of-round cameras keep their existing handling. Server plugin update only; no Blueprint controller replacement or 328 protocol change.
 - **ShockDom** — 4v4 Shock-Domination (3 control points). Includes match clock HUD, opposing-side cluster spawning at match start, configurable scoring tick.
 
 ### Spawn System (Wipeout + ElimPlus)
@@ -121,12 +130,16 @@ Both team-elimination modes share the same spawn picker:
 
 NetcodePlus ships an in-game HUD layout editor (`SNCPlusHUDEditor`) with a live-preview JSON layout system that's not present in any official UT release.
 
+- **Expanded spectator slideout for CTF/iCTF and Wipeout** — mode-specific match-stat columns alongside live health/armor and Wipeout respawn status. Uses the normal slideout controls; true spectators only. Toggle in F5 → Home → Spectator & Caster.
+- **Independent flag brightness** — F5 → Force Models → Flag brightness, 1–5 (default 2; 1 is the original intensity). Adjusts recoloured CTF flags without changing player-model glow or flag meshes. [Details and verification checklist](docs/spectator-slideout-and-flag-brightness.md).
+- **Red/Blue forced models** — F5 → Force Models exposes separate Model pickers under Red team and Blue team. With Red / Blue style selected, each team's chosen model keeps its fixed team colour. Selecting `(none)` retains the Team-then-Enemy model fallback; enable Tint skin to keep players' own models instead. Save applies the choices live; this menu change needs only a client DLL update.
+
 - **9-anchor grid** (TopLeft / TopCenter / TopRight / CenterLeft / Center / CenterRight / BottomLeft / BottomCenter / BottomRight) plus per-element offset, scale, opacity, color overrides.
 - **In-viewport repositioning** — `nchud_drag` preview overlay lets you see element bounds in-place rather than picking through text fields blind.
 - **Per-element font picker + FontSz slider** — Tier A (engine built-ins: Tiny / Small / Medium / Large / Huge / Number / Chat) and Tier B (lazy-loaded UT4 fonts: Exo2 Bold, Lato, Ambex, Positec, Extreme) on every text-rendering alias. `FontSz` is a separate multiplier (0.5–2.0 slider, 0.25–4.0 hard cap) so you can dial in apparent text size at 4K without re-importing the UFont at a different `LegacyFontSize`. Lives on scorebar / score_kda today; portraits get it for HP/Armor numbers + respawn timers; the CTF banners get it too.
 - **Five HP/Armor visual styles** (MinimalTypography / SegmentedBars / RadialArcs / HexChevrons / VerticalPills), per-element via the `style` extra. The font picker on `hp_armor` covers both the numbers and the HEALTH / ARMOR labels.
 - **Custom split WeaponBar** — left/right columns with per-weapon picker (decide which weapons live in which column; remaining weapons hide entirely).
-- **CTF flag-status indicators and banners** — legacy alias `ctf_carrier_indicator` is shown as "CTF World Indicators" and its Hide box controls both the carrier and missing-base icons (scale/offset/opacity remain carrier-only). `ctf_you_have_flag`, `ctf_enemy_has_flag`, and `ctf_flag_status` remain independent draw-call aliases.
+- **CTF flag-status indicators and banners** — flag silhouettes, world indicators, and both flag-status banners are enabled in the Stock preset and after resetting their rows. Each still appears only when its game-state conditions apply; the crosshair grab flash remains opt-in. Existing saved Hide choices are honored; uncheck Hide in the CTF section and Save to update an existing layout. Legacy alias `ctf_carrier_indicator` is shown as "CTF World Indicators" and its Hide box controls both the carrier and missing-base icons (scale/offset/opacity remain carrier-only). `ctf_you_have_flag`, `ctf_enemy_has_flag`, and `ctf_flag_status` remain independent draw-call aliases.
 - **Beta tactical ribbon** — opt-in fourth team-display style for Wipeout and ElimPlus, with connected portrait cards and a compact score/clock core. It is stored as `[NetcodePlus] BetaTopBar`; disabling it restores the previously selected portrait, stock-roster, or Absolute Elim layout.
 - **Optional opt-in overlays** (default OFF; appear in the editor with the Hide box pre-checked):
   - `damage_flash` — full-screen tint when you take damage. Tunable color, intensity (via opacity), and `flash_duration` (default 0.30s, linear fade).
@@ -150,6 +163,12 @@ Open the editor in-game with the `nchud` console command. Layout persists to `Sa
 - **AWarmupRoamMutator** — auto-added by NCPlusCTF (incl. iCTF). Powers the `mutate warmup` console command: warmup-only invuln + firing-disable so players can learn the map. Stripped from everyone at match start via `NotifyMatchStateChange`; can never carry into live play.
 
 ### Utilities
+
+- **Explicit client shot height** — NCP's fixed fire requests now encode the client's actual eye height relative to its pawn even when it matches the normal standing height. The existing 328 byte remains quantized to one unit and represents -126 through 128 units when explicit; zero remains a fallback for missing/invalid view data. Retries reuse the height captured for the original request. This avoids relying on the server's baseline eye height when the client omits an offset, and retains landing/crouch camera offsets through the existing decoder. It does not transmit the pawn's world position or add rewind. No server update or RPC change is required. `ncp.AlwaysSendFireZ 0` restores the previous omission within one unit of `BaseEyeHeight`.
+
+- **Movement flush before precision fire** — on a local NCP pawn, a Shock/Instagib/Sniper hitscan shot submits any still-current, unsent movement from the same frame before its initial fire request. Normal shots already flush through UT's shot prediction; this covers eligible timer/buffered dispatches that would otherwise leave movement in the 11–25 ms batch. It uses the existing shot flag and saved rotation without changing timestamps, simulating another move, or adding target rewind. Stale/corrected/teleported frames and already-sent moves are skipped. This is compatible with existing 328 servers; it does not guarantee network arrival order or repair delayed/lost fire packets. `ncp.FireDebug 1` logs successful flushes as `[NCFireMoveFlush]`.
+
+- **View/weapon bob settings consistency** — the local controller follows the finite `EyeOffsetGlobalScaling` and `WeaponBobGlobalScaling` values in Game.ini's `[/Script/UnrealTournament.UTPlayerController]` section, correcting profile overrides during play. Zero stays off and fractional values are preserved, including on Blueprint-derived controllers. The existing client ticker reconciles cached configuration about four times per second after profile application or travel; this is not a guarantee before the first frame/shot. Missing keys keep the stock behavior. This repair never edits or saves the profile automatically. The stock dialog and its persistence remain unchanged, including the separate Blueprint-controller stale-default/key-elision quirk. No server update or protocol change is required for this fix.
 
 - **`weaponskins` console command** — opens Slate UI for per-weapon hide/show, skin selection, hitscan choice (Sniper / LG), **beam colors** (Sniper/LG via `LGColor`, Shock via `ShockBeam` — FSE-safe color picker, format matches the BP defaults' `Convert String to Linear Color` parser so the weapon BPs read the new color at spawn without parser changes), and **hidden-weapon beam origin** (`Back` / `Down` spinners — the tracer/beam spawn point relative to the camera when the weapon is hidden; defaults 10 / 35 reproduce stomach-height; try 10 / 20 for chest or 10 / 60 for hip-fire feel).
 - **`weaponhand [right|left|center|hidden]`** — direct console command (writes to ProfileSettings).
@@ -190,8 +209,15 @@ cheat-gated.
 | `ncp.UnclaimedRenderGate` | 1 | Server-side. Reject hits the shooter's client never claimed (the "gifted shots" fix). Leave on; widen `ncp.UnclaimedRenderSlack` (default 40) instead of disabling. |
 | `ncp.SlideGraceMs` | 250 | Server-side. Grace window after a slide starts where validation accepts the standing capsule, covering the replication + anim-blend delay on the shooter's screen. 0 = pre-328 behaviour. |
 | `ncp.HitscanSlideSearchExtraMs` | 15 | Server-side. One extra hitscan time-search rung (ms, clamped 0-15, zero padding) granted only when server posture history proves the target was mid-slide at that epoch. 0 = standard ±45ms search only. |
+| `ncp.ProjectileOriginRewind` | 0 | Server-side, experimental. Spawn projectiles from the shooter's rewound historical position instead of the stock origin. 0 = stock origin (default, recommended). |
+| `ncp.FireProvenance` | 0 | Server-side diagnostics for the Hotfix 12 firing-authority gate: logs the `[NCFireAuth]` decision trail (SYNC / ACCEPT / BLOCK / SHOT / SPAWN / STOP). 0 = off (default); high volume when on. |
+| `ncp.ShotOriginDebug` | 0 | Server. Log precision-shot origins and the stock delayed movement marker with event/route, age, position and fallback details. Logging only, compatible with 328 clients. See [shot-origin diagnostics](SHOT-ORIGIN-DIAGNOSTICS.md). |
+| `ncp.FlushMoveBeforePrecisionFire` | 1 | Client. Submit a fresh queued move before Shock/Instagib/Sniper hitscan fire on NCP pawns, using existing 328 movement messages. 0 disables the extra flush; no effect on server rewind or projectile modes. |
+| `ncp.AlwaysSendFireZ` | 1 | Client. Always send explicit eye height in the existing fixed-fire Z byte, including at normal standing height. 0 restores legacy omission near `BaseEyeHeight`. Compatible with existing 328 servers. |
+| `ncp.RemoteAnimationURO` | 0 | Client, experimental. Above 240 fps, distant peripheral player bodies may animate every other frame (never the viewed, aimed-at or nearby ones). Requires `a.URO.Enable 1`. 0 = authored settings (default). |
 | `ncp.KillcamAudioGuard` | 1 | Client. Pause looping audio owned by the *hidden* killcam world (the phantom weapon/ambient loop fix). 0 = stock behavior. |
 | `ncp.FriendlyTargetProbeHz` | 240 | Client. Rate cap on the crosshair friendly/name trace (stock traced every rendered frame). Camera cuts / view-target changes / big pose jumps refresh instantly. 0 = stock every-frame probing; range 30-1000. |
+| `ncp.HighPollingMouseCoalesce` | 0 | Client, opt-in (launcher → *Experimental: batch high-polling mouse input*). Sums captured gameplay mouse motion and delivers it once per rendered frame with identical integer deltas + sample count, skipping Slate's per-packet UI routing. A wash at 1 kHz; a real game-thread saving at 4-8 kHz. Menus/editor/cursor/focus-loss keep stock behavior. |
 
 > ⚠️ **Don't enable `ncp.GhostFix`.** It's a parked experiment (0 by default) — the current version breaks
 > consecutive held weapon switches. A pawn-level v2 is pending; leave it at `0`.

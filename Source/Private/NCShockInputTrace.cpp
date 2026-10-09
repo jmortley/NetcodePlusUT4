@@ -547,10 +547,17 @@ namespace
 				// AUTPlayerController applies DeferredFireInputs FIFO. Match the
 				// oldest undispatched action so rapid clicks in one frame retain
 				// distinct press IDs even when queue evidence is inconclusive.
+				// A dispatched physical stop closes that action's queue lifetime:
+				// stock can suppress its start during respawn but still dispatch
+				// the stop. Keeping that closed action eligible here would assign
+				// the next click's start/shot to it and report a false chain gap.
+				// Do not exclude bActionStop alone: a same-frame tap can enqueue
+				// both edges before either reaches the weapon.
 				for (int32 Index = 0; Index < Presses.Num(); ++Index)
 				{
 					FNCShockTracePress& Candidate = Presses[Index];
 					if (Candidate.bActionStart && !Candidate.bWeaponStart
+						&& !Candidate.bWeaponStop
 						&& ElapsedMilliseconds(Now, Candidate.ActionStartMs)
 							<= PressLifetimeMs)
 					{

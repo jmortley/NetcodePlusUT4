@@ -1,5 +1,7 @@
 // UTWeap_Minigun_Plus.cpp
 #include "UTWeap_Minigun_Plus.h"
+#include "NCClientFireTiming.h"
+#include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTWeaponState.h"
 #include "UTWeaponStateFiring.h"
@@ -42,6 +44,7 @@ AUTWeap_Minigun_Plus::AUTWeap_Minigun_Plus(const FObjectInitializer& OI)
 
 void AUTWeap_Minigun_Plus::StartFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, true);
 	// MODE SPLIT (2026-07-21):
 	//  - Mode 0 (spin-up hitscan): bypass the transactional RPC path — the stock
 	//    spin-up firing state owns refire timing server-side and there is no
@@ -62,18 +65,21 @@ void AUTWeap_Minigun_Plus::StartFire(uint8 FireModeNum)
 	}
 	else
 	{
+		NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StartFire(FireModeNum);
 	}
 }
 
 void AUTWeap_Minigun_Plus::StopFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, false);
 	if (FireModeNum == 1)
 	{
 		AUTWeaponFix::StopFire(FireModeNum);
 	}
 	else
 	{
+		NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StopFire(FireModeNum);
 	}
 }
@@ -97,7 +103,9 @@ void AUTWeap_Minigun_Plus::FireShot()
 		if (Role == ROLE_Authority && LastFireTime.IsValidIndex(CurrentFireMode))
 		{
 			LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
+            NCClientFireTiming::Record(this, CurrentFireMode);
 		}
+		NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
 		AUTWeapon::FireShot();
 	}
 }

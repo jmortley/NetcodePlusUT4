@@ -39,6 +39,17 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Cosmetics")
 	void ApplyConfiguredShockBeamColor(UParticleSystemComponent* Effect);
 
+	/** Identical two-beam Instagib modes only; excludes normal Shock/core and custom modes. */
+	bool HasSharedInstagibFireModes() const;
+
+	virtual void StartFire(uint8 FireModeNum) override;
+	virtual void StopFire(uint8 FireModeNum) override;
+	virtual void GotoState(UUTWeaponState* NewState) override;
+	virtual void BringUp(float OverflowTime) override;
+	virtual void DetachFromOwner_Implementation() override;
+	virtual void Removed() override;
+	virtual void Destroyed() override;
+
 	/** shock ball bot is waiting to combo */
 	UPROPERTY()
 	class AUTProj_ShockBall* ComboTarget;
@@ -154,6 +165,39 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	virtual float GetHitValidationPredictionTime() const override;
 
 private:
+	// A local, one-shot equip intent, separate from physical held fire and the
+	// server's accepted-request queue. Never stores an aim or shot timestamp.
+	uint8 PendingInstagibEquipTapMode = 255;
+	TWeakObjectPtr<AUTCharacter> PendingInstagibEquipTapOwner;
+	TWeakObjectPtr<AUTPlayerController> PendingInstagibEquipTapController;
+	// Only a real press on the new pawn before ClientRestart may wait for
+	// possession. The deadline uses real time, never the shot/cadence clock.
+	bool bInstagibTapAwaitingPossession = false;
+	bool bInstagibPossessionTapReleased = false;
+	float InstagibPossessionTapDeadline = 0.f;
+	TWeakObjectPtr<AUTPlayerController> InstagibEquipInputController;
+	TWeakObjectPtr<UInputComponent> InstagibEquipInputComponent;
+	TWeakObjectPtr<AUTCharacter> InstagibEquipPressOwner;
+	FDelegateHandle InstagibEquipPrimaryBindingHandle;
+	FDelegateHandle InstagibEquipAlternateBindingHandle;
+	FDelegateHandle InstagibEquipPrimaryReleaseHandle;
+	FDelegateHandle InstagibEquipAlternateReleaseHandle;
+	bool bInstagibEquipPress[2] = { false, false };
+	uint64 InstagibEquipPressFrame[2] = { 0, 0 };
+	uint32 InstagibEquipInputSerial = 0;
+	bool bProcessingInstagibEquipStart = false;
+	bool CanRetainInstagibEquipTap(uint8 FireMode, bool bAllowInactive = false);
+	void ClearInstagibEquipTap();
+	void PumpInstagibEquipTap();
+	void RefreshInstagibEquipInput();
+	void StopInstagibEquipInput();
+	void InstagibEquipPrimaryPressed();
+	void InstagibEquipAlternatePressed();
+	void InstagibEquipPrimaryReleased();
+	void InstagibEquipAlternateReleased();
+	void NoteInstagibEquipPress(uint8 FireMode);
+	void NoteInstagibEquipRelease(uint8 FireMode);
+	bool ConsumeInstagibEquipPress(uint8 FireMode);
 	/** One weapon-owned material instance is shared by its short-lived beam PSCs. */
 	UPROPERTY(Transient)
 	UMaterialInstanceDynamic* CachedShockBeamMID;
@@ -183,6 +227,8 @@ private:
 
 	/** True only for the Instagib shock-rifle variants; normal Shock children stay stock. */
 	bool IsInstagibBeamWeapon() const;
+	/** Primary, or the verified identical alternate beam; never a custom alt mode. */
+	bool IsInstagibBeamFireMode(uint8 FireMode) const;
 	bool ShouldShowOwnInstagibBeam() const;
 
 	/** Lazily-resolved caches for the two checks above, so the fire path costs no
@@ -202,7 +248,7 @@ private:
 	 *  bump a generation counter on menu save and re-resolve when it changes. */
 	mutable int8 CachedIsInstagibBeamWeapon = -1;
 	mutable int8 CachedShowOwnBeam = -1;
-	bool NeedsLegacyInstagibBeamLayer() const;
+	bool NeedsLegacyInstagibBeamLayer(uint8 FireMode) const;
 	void SpawnLegacyInstagibBeamLayer(const FVector& TargetLoc, uint8 FireMode,
 		const FVector& SpawnLocation, const FRotator& SpawnRotation);
 };

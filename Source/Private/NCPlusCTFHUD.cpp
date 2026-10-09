@@ -68,6 +68,8 @@ bool ANCPlusCTFHUD::ShouldDrawMinimap()
 void ANCPlusCTFHUD::AddSpectatorWidgets()
 {
 	Super::AddSpectatorWidgets();
+	if (SpectatorSlideOutWidget && SpectatorSlideOutWidget->GetClass() != UUTHUDWidget_SpectatorSlideOut::StaticClass()
+		&& !Cast<UNCPlusSpectatorSlideOut>(SpectatorSlideOutWidget)) { return; }
 
 	// Replace the stock spectator slide-out with our subclass. In instagib (iCTF)
 	// the weapon-stats panel then shows only the instagib rifle with accuracy from
@@ -81,12 +83,16 @@ void ANCPlusCTFHUD::AddSpectatorWidgets()
 		HudWidgets.Remove(SpectatorSlideOutWidget);
 		SpectatorSlideOutWidget = nullptr;
 	}
-	if (UUTHUDWidget* W = AddHudWidget(UNCPlusSpectatorSlideOut::StaticClass()))
+	UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(FindHudWidgetByClass(UNCPlusSpectatorSlideOut::StaticClass()));
+	if (!SlideOut)
 	{
-		if (UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(W))
-		{
-			SlideOut->WeaponListMode = ENCSlideOutWeaponMode::CTFAuto;
-		}
+		SlideOut = Cast<UNCPlusSpectatorSlideOut>(AddHudWidget(UNCPlusSpectatorSlideOut::StaticClass()));
+	}
+	if (SlideOut)
+	{
+		SpectatorSlideOutWidget = SlideOut;
+		SlideOut->WeaponListMode = ENCSlideOutWeaponMode::CTFAuto;
+		SlideOut->MatchOverlayMode = ENCSlideOutMatchMode::CTF;
 	}
 }
 
@@ -97,6 +103,16 @@ void ANCPlusCTFHUD::BeginPlay()
 	// Stock bottom-bar widgets are stripped ONLY when we're drawing the NCPlus ones;
 	// in stock-bottom-bar mode we keep the parent's stock weapon/ammo/health widgets.
 	const bool bStockBottom = FNCPlusHUDLayout::WantsStockBottomBar();
+	// Stock announcements -> our subclass (stock behaviour + the opt-in kill-name
+	// collapse). Swapped in place so it builds at the same point in the list and
+	// the HUD never holds two announcement widgets.
+	for (FString& Entry : RequiredHudWidgetClasses)
+	{
+		if (Entry.Equals(TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"), ESearchCase::IgnoreCase))
+		{
+			Entry = TEXT("/Script/NetcodePlus.NCPlusHUDWidgetAnnouncements");
+		}
+	}
 	RequiredHudWidgetClasses.RemoveAll([bStockBottom](const FString& Entry)
 	{
 		// Always replaced — our scorebar / scoreboard / flag-status supersede these

@@ -1,4 +1,5 @@
 #include "UTPlusSniper.h"
+#include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTProj_Sniper.h"
 #include "UTWeaponStateZooming.h"
@@ -92,6 +93,7 @@ AUTPlusSniper::AUTPlusSniper(const FObjectInitializer& ObjectInitializer)
 
 void AUTPlusSniper::StartFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, true);
 	UUTWeaponStateFiring* const RequestedState = FiringState.IsValidIndex(FireModeNum)
 		? FiringState[FireModeNum] : nullptr;
 	const bool bExplicitZoomStart = RequestedState != nullptr
@@ -338,7 +340,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 			GetUTOwner()->Controller, SpawnLocation, FireDir, 0.7f,
 			(Hit.Location - SpawnLocation).Size(), 150.0f, AUTCharacter::StaticClass()));
 
-		if (IsLiveHitscanTarget(AltTarget))
+		if (IsLiveHitscanTarget(AltTarget) && IsServerRateTargetHistoryValid(AltTarget, PredictionTime))
 		{
 			// Calculate effective head scale
 			const float UnpaddedHeadScale = GetHeadshotScale(AltTarget);
@@ -470,6 +472,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		bool bIsHeadShot = false;
 		bool bBlockedHeadshot = false;
 		AUTCharacter* C = DamageCharacter;
+		const bool bHitPawn = Cast<APawn>(Hit.Actor.Get()) != nullptr; // before TakeDamage can gib it
 
 		if (C != NULL && CanHeadShot())
 		{
@@ -582,10 +585,8 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		{
 			C->NotifyBlockedHeadShot(UTOwner);
 		}
-		// No accuracy credit for detonating projectiles (shooting a core/rocket
-		// out of the air) — same rule as UTWeaponFix::FireInstantHit (2026-08-10).
-		if ((Role == ROLE_Authority) && PS && (HitsStatsName != NAME_None)
-			&& Cast<AUTProjectile>(Hit.Actor.Get()) == nullptr)
+		// Pawns only — same rule as UTWeaponFix::FireInstantHit.
+		if ((Role == ROLE_Authority) && PS && (HitsStatsName != NAME_None) && bHitPawn)
 		{
 			PS->ModifyStatsValue(HitsStatsName, 1);
 		}
@@ -595,6 +596,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		}
 	}
 
+	NCFireDiagnostics::Hitscan(this, CurrentFireMode, Hit, bDealDamage);
 	if (OutHit != NULL)
 	{
 		*OutHit = Hit;

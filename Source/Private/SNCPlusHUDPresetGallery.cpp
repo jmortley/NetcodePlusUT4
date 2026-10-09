@@ -47,6 +47,8 @@ namespace NCPlusHUDPresetGalleryImpl
 		if (Alias == TEXT("portrait_red"))     return {  60, 60,  RedTeam };
 		if (Alias == TEXT("portrait_blue"))    return {  60, 60,  BlueTeam };
 		if (Alias == TEXT("scorebar"))         return { 320, 40,  Gray };
+		if (Alias == TEXT("xtdm_scorebar"))    return { 466, 125, Gray };
+		if (Alias == TEXT("xtdm_teammates"))   return { 292, 153, HPGreen };
 		if (Alias == TEXT("score_kda"))        return { 130, 40,  White };
 		if (Alias == TEXT("killfeed"))         return { 300, 120, Orange };
 		if (Alias == TEXT("announcements"))    return { 480, 40,  ArmorYellow };

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "CoreMinimal.h"
+#include "NetcodePlus.h" // UTAnnouncer's UTATypes dependency requires full engine types.
 #include "UTAnnouncer.h"
 #include "NCPlusAnnouncer.generated.h"
 

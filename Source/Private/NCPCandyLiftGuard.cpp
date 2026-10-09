@@ -189,20 +189,26 @@ void ANCPCandyLiftGuard::BeginPlay()
 	Super::BeginPlay();
 	if (Role == ROLE_Authority)
 	{
-		// Archetype hardening at match start: the guard spawns from
-		// HandleMatchHasStarted, so the mutator's candy class package is long
-		// loaded and LoadClass is safe here. Instance hardening in Sweep()
-		// still covers any candy class this path doesn't name.
-		UClass* CandyClass = LoadClass<AUTPickupHealth>(nullptr,
-			TEXT("/Game/Blueprints/ElimPlusStuff/CandyPlaceholder.CandyPlaceholder_C"));
-		if (CandyClass != nullptr)
+		// Archetype hardening at match start, before later death drops:
+		// ElimPlus and Wipeout use separate candy Blueprints. Instance hardening
+		// in Sweep() still covers any candy class these paths don't name.
+		const TCHAR* const CandyClassPaths[] =
 		{
-			HardenClassTemplates(CandyClass);
-			UE_LOG(LogNCPCandyGuard, Log, TEXT("[CandyGuard] Hardened class templates for %s"), *CandyClass->GetName());
-		}
-		else
+			TEXT("/Game/Blueprints/ElimPlusStuff/CandyPlaceholder.CandyPlaceholder_C"),
+			TEXT("/Game/Blueprints/ElimPlusStuff/WipeCandyPlaceholder.WipeCandyPlaceholder_C")
+		};
+		for (const TCHAR* CandyClassPath : CandyClassPaths)
 		{
-			UE_LOG(LogNCPCandyGuard, Log, TEXT("[CandyGuard] CandyPlaceholder class not found — relying on instance hardening"));
+			UClass* CandyClass = LoadClass<AUTPickupHealth>(nullptr, CandyClassPath);
+			if (CandyClass != nullptr)
+			{
+				HardenClassTemplates(CandyClass);
+				UE_LOG(LogNCPCandyGuard, Log, TEXT("[CandyGuard] Hardened class templates for %s"), *CandyClass->GetName());
+			}
+			else
+			{
+				UE_LOG(LogNCPCandyGuard, Log, TEXT("[CandyGuard] Candy class %s not found — relying on instance hardening"), CandyClassPath);
+			}
 		}
 
 		if (UWorld* World = GetWorld())

@@ -51,10 +51,12 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
     : Super(ObjectInitializer)
 {
     // --- HIGH-FPS FIX #1: Increase position error tolerance ---
-    // 14 units. At ~700fps with moderate ping, knockback replay divergence
-    // can land just beyond the previous 12u threshold. This is the conservative
-    // next rung: the server remains authoritative and corrects errors above 14u.
-    MaxPositionErrorSquared = 196.f;
+    // 18 units (was 14): widen the server correction deadband for the reported
+    // high-FPS prediction jitter. Sub-threshold errors only receive a good-move
+    // ACK; the server does not adopt the client's position. Larger position
+    // errors and incompatible movement modes still use stock corrections.
+    // This is tolerance tuning, not a fix for lost moves or replay divergence.
+    MaxPositionErrorSquared = 324.f;
 
     // --- Throttle settings ---
 	TeamCollisionUpdateInterval = 0.01111f;  // instead of fps dependent
@@ -85,6 +87,13 @@ FNetworkPredictionData_Client* UTeamArenaCharacterMovement::GetPredictionData_Cl
 
 void UTeamArenaCharacterMovement::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
+	// The body already depends on movement. Choose its animation rate before Super,
+	// which can itself request a pose for root motion; do not change tick ordering.
+	if (ATeamArenaCharacter* Character = Cast<ATeamArenaCharacter>(CharacterOwner))
+	{
+		Character->UpdateRemoteAnimationUROBeforeMovement();
+	}
+
     // --- HIGH-FPS FIX #3: Throttle team collision updates ---
     // Epic's code runs GetPawnIterator() + IgnoreActorWhenMoving() EVERY TICK
     // At 480 FPS with 8 players = 30,720 calls/sec. We reduce.
@@ -118,6 +127,10 @@ void UTeamArenaCharacterMovement::TickComponent(float DeltaTime, ELevelTick Tick
 
 void UTeamArenaCharacterMovement::OnUnregister()
 {
+	if (ATeamArenaCharacter* Character = Cast<ATeamArenaCharacter>(CharacterOwner))
+	{
+		Character->ReleaseRemoteAnimationURO();
+	}
     ClearTeamCollisionIgnores(TeamCollisionIgnoreComponent.Get());
     TeamCollisionIgnoreComponent.Reset();
     LastTeamCollisionUpdateTime = -1.0;
@@ -243,6 +256,47 @@ void UTeamArenaCharacterMovement::UpdateTeamCollisionIgnores()
     }
 }
 
+bool UTeamArenaCharacterMovement::FlushPendingMoveForShot()
+{
+    AUTCharacter* UTCharacterOwner = Cast<AUTCharacter>(CharacterOwner);
+    if (!UTCharacterOwner || GetNetMode() != NM_Client
+        || UTCharacterOwner->Role != ROLE_AutonomousProxy
+        || !UTCharacterOwner->IsLocallyControlled() || UTCharacterOwner->IsDead()
+        || UTCharacterOwner->bClientUpdating || bJustTeleported
+        || LastPreparedMoveFrame != GFrameCounter)
+    {
+        return false;
+    }
+
+    FNetworkPredictionData_Client_Character* ClientData = GetPredictionData_Client_Character();
+    if (!ClientData || ClientData->bUpdatePosition || ClientData->SavedMoves.Num() == 0)
+    {
+        return false;
+    }
+    const FSavedMovePtr& Move = ClientData->SavedMoves.Last();
+    if (!Move.IsValid() || Move->bOldTimeStampBeforeReset
+        || !FMath::IsFinite(Move->TimeStamp) || !FMath::IsFinite(ClientData->ClientUpdateTime)
+        || Move->TimeStamp <= ClientData->ClientUpdateTime
+        || Move->TimeStamp != ClientData->CurrentTimeStamp
+        || Move->TimeStamp != LastPreparedMoveTimeStamp
+        || !Move->SavedLocation.Equals(UTCharacterOwner->GetActorLocation(), KINDA_SMALL_NUMBER)
+        || Move->MovementMode != PackNetworkMovementMode()
+        || Move->EndBase.Get() != UTCharacterOwner->GetMovementBase()
+        || Move->EndBoneName != UTCharacterOwner->GetBasedMovement().BoneName
+        || (MovementBaseUtility::UseRelativeLocation(Move->EndBase.Get())
+            && !Move->SavedRelativeLocation.Equals(UTCharacterOwner->GetBasedMovement().Location, KINDA_SMALL_NUMBER)))
+    {
+        return false;
+    }
+
+    // The move already contains simulated movement. Only add UT's existing shot
+    // marker, which bypasses batching and makes its saved rotation travel too.
+    // Never alter its timestamp/position or resend a move already submitted.
+    static_cast<FSavedMove_UTCharacter*>(Move.Get())->bShotSpawned = true;
+    UTCallServerMove();
+    return true;
+}
+
 void UTeamArenaCharacterMovement::UTCallServerMove()
 {
     AUTCharacter* UTCharacterOwner = Cast<AUTCharacter>(CharacterOwner);
@@ -255,16 +309,30 @@ void UTeamArenaCharacterMovement::UTCallServerMove()
 
     // Decide whether to hold off on move
     const FSavedMovePtr& NewMove = ClientData->SavedMoves.Last();
+    if (!NewMove.IsValid())
+    {
+        return;
+    }
+    // Stock ReplicateMoveToServer calls here after recording each new move.
+    // Re-entering for a flush must not make an older frame appear fresh again.
+    if (NewMove->TimeStamp != LastPreparedMoveTimeStamp)
+    {
+        LastPreparedMoveTimeStamp = NewMove->TimeStamp;
+        LastPreparedMoveFrame = GFrameCounter;
+    }
     if (CanDelaySendingMove(NewMove))
     {
-        // --- HIGH-FPS FIX #5: Adaptive move send rate ---
-        // Stock UT4: 60Hz important, 30Hz normal. At 400+ FPS the 30Hz floor
-        // leaves 66u gaps at sprint speed — too much room for float drift.
+        // --- HIGH-FPS FIX #5: Adaptive move batch cadence ---
+        // Stock UT4 batches at roughly 60Hz important, 30Hz normal. Shorter
+        // intervals reduce the time saved movement waits before submission.
         //
-        // New rates (matches UT2004 UTComp's 0.011 NetMoveDelta):
+        // Batch cadence:
         //   90Hz (11ms) — airborne, high-speed (>1500 u/s), or important moves
         //   40Hz (25ms) — normal ground movement
         //
+        // These are flush rates, not a cap on movement RPCs: the loop below
+        // sends each unsent saved frame. At 700 FPS that can approach 700 move
+        // RPCs/sec before resends. Reducing this cadence does not combine moves.
         // Dodges and shots still bypass this entirely via CanDelaySendingMove.
         bool bNeedsHighRate = NewMove->IsImportantMove(ClientData->LastAckedMove)
                            || IsFalling()

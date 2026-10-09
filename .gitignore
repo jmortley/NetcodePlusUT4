@@ -32,3 +32,7 @@ DerivedDataCache/
 
 # Recovered Clutch objective meshes are shared across editor installs.
 !Content/Clutch/Objective/*.uasset
+
+# Project-mounted xTDM mode and stock UTGameState with safe highlight override.
+!ProjectContent/Blueprints/XTDM/BP_NCP_XTDMGameState.uasset
+!ProjectContent/Blueprints/XTDM/NCP_XTDM.uasset

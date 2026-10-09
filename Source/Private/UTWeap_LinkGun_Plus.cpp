@@ -1,4 +1,5 @@
 #include "UTWeap_LinkGun_Plus.h"
+#include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTWeaponStateFiringLinkBeamPlus.h"
 #include "UTPlayerController.h"
@@ -105,12 +106,14 @@ void AUTWeap_LinkGun_Plus::FireShot()
 		// BYPASS: Skip AUTWeaponFix's gatekeeper logic.
 		// Call the base engine version directly to handle Visuals/Ammo/Inventory events.
 		// Note: We scope it to AUTWeapon (Grandparent) explicitly.
+		NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
 		AUTWeapon::FireShot();
 	}
 	else if (!bIsInCoolDown)
 	{
 		// Mode 0 is Plasma (Projectile).
 		// Use the standard Fix logic (Transactional) for this.
+		NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
 		AUTWeapon::FireShot();
 	}
 }
@@ -379,6 +382,7 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 		LinkStartTime = GetWorld()->GetTimeSeconds();
 	}
 
+	const bool bHitPawn = Cast<APawn>(HitActor) != nullptr; // before TakeDamage can kill it
 	FVector FireDir = (HitLocation - FireStart).GetSafeNormal();
 	HitActor->TakeDamage(DamageAmount,
 		FUTPointDamageEvent(DamageAmount, FHitResult(HitActor, nullptr, HitLocation, -FireDir), FireDir, InstantHitInfo[1].DamageType, FireDir * 1000.f),
@@ -395,7 +399,11 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 	// so the rates didn't match and Hits/Shots clamped to 100% on any hold.
 	// A killing batch still counts: eligibility was checked immediately before
 	// damage, not after TakeDamage potentially transitioned the target to dead.
-	bHitDuringCurrentRefireInterval = true;
+	// Only a pawn connection counts — same rule as UTWeaponFix::FireInstantHit.
+	if (bHitPawn)
+	{
+		bHitDuringCurrentRefireInterval = true;
+	}
 }
 
 
@@ -493,15 +501,18 @@ void AUTWeap_LinkGun_Plus::ClientRemoved()
 
 void AUTWeap_LinkGun_Plus::StartFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, true);
 	if (FireModeNum == 1)
 	{
 		// BYPASS: For the Beam, skip the "Fix" logic (Transactions/Retry Timers).
 		// Go straight to the Grandparent (Standard UT logic).
+		NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StartFire(FireModeNum);
 	}
 	else
 	{
 		// KEEP: For Plasma (Mode 0), use the "Fix" logic (Rewind/Lag Comp).
+		NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StartFire(FireModeNum);
 	}
 }
@@ -677,14 +688,17 @@ void AUTWeap_LinkGun_Plus::Tick(float DeltaTime)
 
 void AUTWeap_LinkGun_Plus::StopFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, false);
 	if (FireModeNum == 1)
 	{
 		// Beam mode - use standard UT logic, skip transactional stuff
+		NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StopFire(FireModeNum);
 	}
 	else
 	{
 		// Plasma - use Fix logic
+		NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StopFire(FireModeNum);
 	}
 }

@@ -37,6 +37,8 @@ namespace UnrealBuildTool.Rules
 				"Http",
 				"Json",
 				"JsonUtilities",
+				"OnlineSubsystem",
+				"OnlineSubsystemUtils",
 				"Projects",       // IPluginManager (FNCPlusHUDLayout::PluginResourcesDir)
 				"RenderCore"      // GWhiteTexture (QuickStats DrawArc canvas fallback)
             });
@@ -47,6 +49,12 @@ namespace UnrealBuildTool.Rules
 			if (Target.Type != TargetRules.TargetType.Server)
 			{
 				PrivateDependencyModuleNames.Add("ImageWrapper");
+			}
+			// Local trainer account uploads use a private, certificate-verified
+			// Windows transport rather than this engine's permissive Curl defaults.
+			if (Target.Platform == UnrealTargetPlatform.Win32 || Target.Platform == UnrealTargetPlatform.Win64)
+			{
+				PublicAdditionalLibraries.Add("winhttp.lib");
 			}
 		}
 	}

@@ -1,0 +1,82 @@
+Fire reliability source fixes -- 2026-09-30
+
+Applies to the NetcodePlus 4.15 and 4.27.2 source trees. No engine build,
+cook, package, deployment, player configuration or downloaded PAK changes.
+
+1. Stale release cleanup
+   Deferred Active transitions have a generation and weak weapon/owner/state
+   identity. A fresh cycle, state change, explicit cancellation, re-equip,
+   removal or destruction invalidates old callbacks. The immediate Active
+   branch also clears its old release timer.
+
+2. Client cadence clock
+   Local predicted cooldowns use TimerManager's double time, reconstructed
+   using a one-second epoch anchor and short elapsed remainder. Retry, stop,
+   switch and direct weapon cooldown consumers use that same clock. Small
+   cadence corrections cannot accumulate future timestamp debt. Pausing and
+   time dilation follow TimerManager; world cleanup and shutdown remove hooks.
+   Normal one-frame pending-timer quantization still exists.
+
+3. Ready-click debounce
+   A legally ready same-mode press bypasses the debounce delay and proceeds
+   through normal state/ammo/equip validation. Generic early retries still
+   cancel on release. The optional released-click buffer remains default-off.
+
+4. Server arrival compression
+   An eligible ordinary transactional request arriving slightly early can
+   reserve one shot until its legal same-mode dispatch time. Its original
+   event, aim, click height, server origin and claim remain attached. A matching
+   Stop ends held firing but preserves that accepted shot. Duplicates cannot
+   duplicate dispatch; an opposite-mode request has one bounded FIFO slot.
+   Death, swap, teleport, stale history and policy changes cancel explicitly.
+
+   ncp.ServerRateQueueMs is SERVER-side: default100, hard maximum100ms, further
+   limited to half the refire interval. Setting0 restores legacy rejection for
+   NEW requests; it does not retroactively discard already accepted requests.
+   Actual dispatch times prevent queued same-mode catch-up bursts. Existing
+   immediate-shot tolerance is not widened to200ms.
+
+   Queue residence is added only within the queued shot's hit-history/render
+   epochs and projectile catch-up. Existing total history ceilings remain.
+   Admission includes34ms scheduling allowance; impossible planned waits stay
+   on the old retry path without consuming their event. Maximum reservation
+   residence is250ms; a larger stall can still cancel rather than damage using
+   mismatched history. Missing/teleported history cannot be bypassed by claim
+   rescue or base/Sniper head fallback.
+
+   A live reservation does not send a premature confirmation that would remove
+   its predicted projectile. Commit sends confirmation after FireShot dispatch.
+   Existing terminal-correction ACK semantics remain; ACK alone does not prove
+   a projectile spawned or damage occurred. Disabled-by-default fire provenance
+   records ACCEPT / RESERVE_RATE / DISPATCH / CANCEL outcomes.
+
+Compatibility and scope
+   No RPC signature, reflected property, replicated data layout, or engine
+   modification. New storage uses native weak-key maps; new methods are ordinary
+   nonvirtual C++. Both sides need updated builds to receive all four fixes.
+   Existing stock stream/charge paths retain their prior delivery behavior;
+   the server reservation applies to ordinary transactional runtime states.
+
+Validation
+   tools/tests/test_instagib_shared_hold.py:14 extracted input/state cases,
+   including stale callbacks, ready short clicks, early released taps, owner
+   changes, shared Instagib hold, cross-mode flow and callback ordering.
+   tools/tests/test_client_fire_timing.py:33 native helper scenarios, including
+   long holds at60..1000FPS, old world times, jitter, hitches and lifecycle.
+   tools/tests/test_server_rate_reservation.py:23 native scenario groups using
+   actual admission, sequence validation, commit/FIFO callbacks and Stop subset.
+
+   These compile actual selected C++ against explicit engine adapters. They do
+   not validate the complete Unreal translation unit, actual projectile pairing,
+   rendered effects or live packet transport. Full engine/client/server build
+   and dedicated multiplayer testing are still pending.
+
+Next runtime check after builds
+   Capture matched client/server fire diagnostics for Shock/Sniper taps and
+   Shock/Rocket/Flak/Link/shard switching, with rate queue100 then0 for comparison.
+   Include release-before-dispatch, opposite fire modes, ammo exhaustion, death,
+   weapon changes, low server tick rates and simulated packet jitter/loss. Verify
+   projectile pairing, preserved shot identity, no extra shots after release,
+   no increased sustained rate and no hits through invalid target history.
+   Use ncp.FireTraceBegin LABEL FRESH_32_HEX_NONCE on both processes with the
+   same fresh nonce, and ncp.FireTraceEnd to complete each capture.

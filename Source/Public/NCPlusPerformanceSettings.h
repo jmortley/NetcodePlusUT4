@@ -18,12 +18,16 @@ namespace NCPlusPerformanceSettings
 	/** Cached squared form for the character tick's distance comparison. */
 	NETCODEPLUS_API float GetCharacterOverlayDistanceSquared();
 
+	/** Saved F5 preference for new death/corpse blood stains. Loaded lazily from
+	 *  [InstagibCTF] bShowDeathBlood in Mod.ini; defaults to true. */
+	NETCODEPLUS_API bool GetShowDeathBlood();
+
 	/**
 	 * Clamp, cache and persist a new client-local overlay distance. The cached
 	 * value takes effect immediately; no map restart or config read is required.
 	 */
 	NETCODEPLUS_API void SetCharacterOverlayDistance(float Distance);
 
-	/** Discard the cache and immediately re-read Mod.ini. */
+	/** Discard the cached preferences and immediately re-read Mod.ini. */
 	NETCODEPLUS_API void Reload();
 }

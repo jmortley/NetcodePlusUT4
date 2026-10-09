@@ -153,12 +153,11 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	// bTeamSharedDeathCounter=false (the C++ default below is team-shared=true).
 	// NOTE: if the BP CDO ALSO overrides RespawnDelays, this array is shadowed —
 	// change it in the BP (or clear that override) for these values to take effect.
-	RespawnDelays.Add(5.0f);   // 1st death
-	RespawnDelays.Add(9.0f);   // 2nd death
-	RespawnDelays.Add(13.0f);  // 3rd death
-	RespawnDelays.Add(20.0f);  // 4th death
-	RespawnDelays.Add(30.0f);  // 5th death
-	RespawnDelays.Add(40.0f);  // 6th+ deaths (cap)
+	RespawnDelays.Add(6.0f);   // 1st death
+	RespawnDelays.Add(12.0f);  // 2nd death
+	RespawnDelays.Add(18.0f);  // 3rd death
+	RespawnDelays.Add(22.0f);  // 4th death
+	RespawnDelays.Add(32.0f);  // 5th+ deaths (cap)
 
 	RespawnProtectionTime = 1.5f;
 	WipeoutGracePeriod = 0.15f;
@@ -834,7 +833,7 @@ float AUWipeoutGame::GetRespawnDelayForDeathIndex(int32 DeathIndex) const
 {
 	if (RespawnDelays.Num() == 0)
 	{
-		return 5.0f; // Fallback
+		return 6.0f; // Fallback: first-death delay
 	}
 
 	// Clamp to last element (the cap)
@@ -960,8 +959,8 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 
 	const int32 TeamIndex = DeadPS->Team->TeamIndex;
 
-	// Compute delay BEFORE incrementing so first death uses index 0 (4s),
-	// second death uses index 1 (7s), etc.
+	// Compute delay BEFORE incrementing so the first death uses index 0,
+	// the second death uses index 1, etc.
 	float RespawnDelay = ComputeRespawnDelay(TeamIndex, DeadPS);
 
 	// Now increment counters
@@ -1891,6 +1890,50 @@ bool AUWipeoutGame::CheckScore_Implementation(AUTPlayerState* Scorer)
 // RESTART PLAYER — Allows mid-round spawns when timer fires
 // ============================================================================
 
+bool AUWipeoutGame::RestoreLivePlayerState(AController* Controller)
+{
+	if (!Controller || GetNetMode() == NM_Client || Controller->IsPendingKillPending()) return false;
+
+	AUTPlayerState* PS = Cast<AUTPlayerState>(Controller->PlayerState);
+	AUTCharacter* Character = Cast<AUTCharacter>(Controller->GetPawn());
+	if (!PS || PS->IsPendingKill() || PS->bOnlySpectator || PS->bIsInactive || !PS->Team
+		|| PS->GetOwner() != Controller || PendingRespawns.Contains(PS)
+		|| RoundEliminatedPlayers.Contains(PS)
+		|| !Character || Character->Health <= 0 || Character->IsDead()
+		|| Character->IsPendingKillPending() || Character->bTearOff
+		|| Character->GetController() != Controller || Character->PlayerState != PS)
+	{
+		return false;
+	}
+
+	AUTPlayerController* PC = Cast<AUTPlayerController>(Controller);
+	const bool bStaleLifeState = PS->bOutOfLives || PS->RespawnWaitTime != 0.f || PS->RespawnTime != 0.f;
+	const bool bStaleControllerState = PC && !PC->IsInState(NAME_Playing);
+	if (!bStaleLifeState && !bStaleControllerState) return false;
+
+	// Reconnects can restore an eliminated PlayerState before an allowed spawn.
+	// Repair only the state contradicting this verified live possession; never
+	// send another RestartPlayer through the inventory/spawn path.
+	UE_LOG(LogGameMode, Warning,
+		TEXT("Wipeout: restoring live player state for %s (outOfLives=%d wait=%.3f remaining=%.3f controllerStateStale=%d)"),
+		*PS->PlayerName, PS->bOutOfLives ? 1 : 0, PS->RespawnWaitTime, PS->RespawnTime,
+		bStaleControllerState ? 1 : 0);
+	PS->bOutOfLives = false;
+	PS->RespawnWaitTime = 0.f;
+	PS->RespawnTime = 0.f;
+	if (bStaleLifeState) PS->ForceNetUpdate();
+	if (PC)
+	{
+		PC->ChangeState(NAME_Playing);
+		PC->SetViewTarget(Character);
+		// Existing RPC restores client possession, input flags and the pawn camera.
+		PC->ClientRestart(Character);
+		// Blueprint controllers may disable automatic camera management.
+		PC->ClientSetViewTarget(Character);
+	}
+	return true;
+}
+
 void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 {
 	if (!NewPlayer) return;
@@ -1916,16 +1959,25 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 	// stock AddInventory dedupes only by instance (not class), so the whole arsenal is
 	// granted twice = the doubled weapon bar. First spawn (no pawn) is unaffected; the
 	// live/lineup paths below already relied on this guard.
-	if (NewPlayer->GetPawn()) return;
+	AUTGameState* GS = GetGameState<AUTGameState>();
+	const bool bLineupIsActive = (GS && GS->ActiveLineUpHelper && GS->ActiveLineUpHelper->bIsPlacingPlayers);
+	if (NewPlayer->GetPawn())
+	{
+		if (!bLineupIsActive && (GetMatchState() == MatchState::WaitingToStart
+			|| (bRoundInProgress && GetMatchState() == MatchState::InProgress)))
+		{
+			RestoreLivePlayerState(NewPlayer);
+		}
+		return;
+	}
 
 	if (GetMatchState() == MatchState::WaitingToStart)
 	{
 		Super::RestartPlayer(NewPlayer);
+		if (!bLineupIsActive) RestoreLivePlayerState(NewPlayer);
 		return;
 	}
 
-	AUTGameState* GS = GetGameState<AUTGameState>();
-	bool bLineupIsActive = (GS && GS->ActiveLineUpHelper && GS->ActiveLineUpHelper->bIsPlacingPlayers);
 	if (bLineupIsActive)
 	{
 		Super::RestartPlayer(NewPlayer);
@@ -2032,6 +2084,7 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		Super::RestartPlayer(NewPlayer);
 		OverriddenPlayerStart = nullptr;
 		bHasPendingHybridSpawnTransform = false;
+		RestoreLivePlayerState(NewPlayer);
 
 		if (bUsedHybridTransform && NewPlayer->GetPawn())
 		{
@@ -2618,7 +2671,7 @@ APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 // ---------------------------------------------------------------------------
 // CheckRelevance — Strip pickups not appropriate for Wipeout:
 //   - Remove Redeemer weapon base (and its weapon)
-//   - Remove ALL health pickups and vials
+//   - Keep super-health pickups (vials and keg) and custom candy; remove normal health packs
 //   - Keep ShieldBelt and ThighPads; stash the first Chest/Vest so it can stay
 //     on authored Belt maps or become the belt location on Belt-less maps
 //   - Preserve UDamage/Amp and Berserk; record non-Amp timed-powerup spots for
@@ -2647,12 +2700,14 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 		return Super::CheckRelevance_Implementation(Other);
 	}
 
-	// --- Health pickups: remove all EXCEPT CandyPlaceholder (custom pickup) ---
-	if (Other->IsA(AUTPickupHealth::StaticClass()))
+	// --- Health pickups: keep vials/keg (super heal), remove normal health packs ---
+	AUTPickupHealth* HealthPickup = Cast<AUTPickupHealth>(Other);
+	if (HealthPickup)
 	{
-		// Whitelist CandyPlaceholder — BP subclass of UTPickupHealth used for custom mechanics
-		FString ClassName = Other->GetClass()->GetName();
-		if (!ClassName.Contains(TEXT("Candy")))
+		// Use pickup behavior so renamed/tuned vial and keg BPs are preserved.
+		// Keep the existing CandyPlaceholder exception for custom mechanics.
+		const FString ClassName = Other->GetClass()->GetName();
+		if (!HealthPickup->bSuperHeal && !ClassName.Contains(TEXT("Candy")))
 		{
 			return false;
 		}
@@ -2870,6 +2925,23 @@ int32 AUWipeoutGame::HealCharacterAndCredit(AUTCharacter* Target, int32 HealAmou
 		return 0;
 	}
 
+	// The banner restores existing armor alongside health, including at full HP.
+	// Never seed an empty armor pool or reduce an already overcharged stack.
+	// NCP owns the belt/regular split and helmet charge: its ordinary armor setter
+	// would reset those, so use the restoration path instead of a new pickup.
+	if (ATeamArenaCharacter* ArenaTarget = Cast<ATeamArenaCharacter>(Target))
+	{
+		ArenaTarget->RestoreRegularArmor(5, 100);
+	}
+	else
+	{
+		const int32 OldArmor = Target->GetArmorAmount();
+		if (OldArmor > 0 && OldArmor < 100)
+		{
+			Target->SetArmorAmount(Target->ArmorType, FMath::Min(OldArmor + 5, 100));
+		}
+	}
+
 	const int32 OldHealth = Target->Health;
 	// The legacy banner stops at the normal 100 HP stack. HealthMax is not that
 	// gameplay cap and may be raised by a pawn or mode, so using it alone lets
@@ -2881,7 +2953,7 @@ int32 AUWipeoutGame::HealCharacterAndCredit(AUTCharacter* Target, int32 HealAmou
 	const int32 Actual = NewHealth - OldHealth;
 	if (Actual <= 0)
 	{
-		return 0;   // already full (or overcharged): nothing applied, nothing credited
+		return 0;   // no HP restored; armor may have recovered above, but is not HP credit
 	}
 
 	Target->Health = NewHealth;
@@ -2913,7 +2985,7 @@ void AUWipeoutGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 {
 	Super::ScoreDamage_Implementation(DamageAmount, Victim, Attacker);
 
-	if (!Victim || !Attacker || !UTGameState) return;
+	if (!Victim || !Attacker || Victim == Attacker || !UTGameState) return;
 	if (UTGameState->OnSameTeam(Victim, Attacker)) return;
 	if (!bRoundInProgress || !Attacker->Team || DamageAmount <= 0) return;
 
@@ -2942,15 +3014,22 @@ void AUWipeoutGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 	int32& PairDmg = LifeDamageMap.FindOrAdd(Key);
 	PairDmg += ActualDamage;
 
-	// Siphon: heal attacker for a percentage of raw damage dealt
+	// Siphon: heal attacker for a percentage of credited damage dealt.
 	AUTCharacter* AttackerChar = Attacker->GetUTCharacter();
-	if (AttackerChar && !AttackerChar->IsDead() && !AttackerChar->IsPendingKillPending())
+	if (AttackerChar && AttackerChar->Health > 0 && !AttackerChar->IsDead() && !AttackerChar->IsPendingKillPending())
 	{
 		AUTSiphonPowerup* Siphon = AttackerChar->FindInventoryType<AUTSiphonPowerup>(
 			AUTSiphonPowerup::StaticClass(), false);
 		if (Siphon)
 		{
-			int32 HealAmount = FMath::CeilToInt(DamageAmount * Siphon->SiphonPercent);
+			// Existing cooked BP_SiphonPowerup assets store 75, although the native
+			// property is a fraction. Accept both 75 and 0.75 as 75% so the fix also
+			// works with those paks, then bound invalid values before integer conversion.
+			const float ConfiguredPercent = Siphon->SiphonPercent;
+			const float SiphonFraction = FMath::IsFinite(ConfiguredPercent)
+				? FMath::Clamp(ConfiguredPercent > 1.f ? ConfiguredPercent * 0.01f : ConfiguredPercent, 0.f, 1.f)
+				: 0.f;
+			int32 HealAmount = FMath::CeilToInt(ActualDamage * SiphonFraction);
 			int32 NewHealth = FMath::Min<int32>(AttackerChar->Health + HealAmount, Siphon->HealCap);
 			if (NewHealth > AttackerChar->Health)
 			{
@@ -3212,7 +3291,8 @@ void AUWipeoutGame::DelayedInitialWinCheck()
 
 void AUWipeoutGame::EnforceRoundSpectatorLock()
 {
-	if (!bRoundInProgress || bWarmupMode || GetNetMode() == NM_Client)
+	if (!bRoundInProgress || bWarmupMode || GetNetMode() == NM_Client
+		|| GetMatchState() != MatchState::InProgress)
 	{
 		return;
 	}
@@ -3222,11 +3302,22 @@ void AUWipeoutGame::EnforceRoundSpectatorLock()
 	{
 		return;
 	}
+	const AUTGameState* GS = GetGameState<AUTGameState>();
+	if (GS && GS->ActiveLineUpHelper && GS->ActiveLineUpHelper->bIsPlacingPlayers)
+	{
+		return;
+	}
 
 	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
 	{
 		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
 		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+		// Recover a stale reconnect life flag without polling healthy players with
+		// restart RPCs. The helper excludes queued/eliminated and unowned pawns.
+		if (PS && PS->bOutOfLives)
+		{
+			RestoreLivePlayerState(PC);
+		}
 		if (!NCPlusRoundSpectate::ShouldLock(PC, PS))
 		{
 			continue;
@@ -3237,7 +3328,17 @@ void AUWipeoutGame::EnforceRoundSpectatorLock()
 
 void AUWipeoutGame::ForceTeamSpectate(AUTPlayerState* DeadPS)
 {
-	if (!DeadPS) return;
+	if (!DeadPS || DeadPS->IsPendingKill() || !DeadPS->bOutOfLives) return;
+
+	AController* Controller = Cast<AController>(DeadPS->GetOwner());
+	AUTCharacter* Character = Controller ? Cast<AUTCharacter>(Controller->GetPawn()) : nullptr;
+	// A delayed death-camera callback must not unpossess a pawn that has since
+	// respawned. Check before the Blueprint hook as well as the native path.
+	if (Character && Character->Health > 0 && !Character->IsDead()
+		&& !Character->IsPendingKillPending() && !Character->bTearOff)
+	{
+		return;
+	}
 
 	if (useBPSpecFunction)
 	{
@@ -3245,7 +3346,7 @@ void AUWipeoutGame::ForceTeamSpectate(AUTPlayerState* DeadPS)
 		return;
 	}
 
-	AUTPlayerController* PC = Cast<AUTPlayerController>(DeadPS->GetOwner());
+	AUTPlayerController* PC = Cast<AUTPlayerController>(Controller);
 	if (!PC) return;
 
 	PC->ChangeState(NAME_Spectating);
@@ -4718,6 +4819,10 @@ void AUWipeoutGame::SpawnSiphonPickup()
 
 bool AUWipeoutGame::AllowPausing(APlayerController* PC)
 {
+	if (NCPlusHostPause::IsStandaloneMenuPause(PC, this))
+	{
+		return false;
+	}
 	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
 	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
 	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.

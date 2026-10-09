@@ -14,6 +14,8 @@ namespace
 	float CharacterOverlayDistance = CharacterOverlayDistanceDefault;
 	float CharacterOverlayDistanceSquared =
 		CharacterOverlayDistanceDefault * CharacterOverlayDistanceDefault;
+	// -1 = not loaded, 0 = disabled, 1 = enabled.
+	int8 ShowDeathBlood = -1;
 
 	FString GetModIniPath()
 	{
@@ -57,6 +59,18 @@ namespace
 
 		PublishCharacterOverlayDistance(StoredDistance);
 	}
+
+	void LoadShowDeathBlood()
+	{
+		if (ShowDeathBlood >= 0 || GConfig == nullptr)
+		{
+			return;
+		}
+
+		bool bShowBlood = true;
+		GConfig->GetBool(TEXT("InstagibCTF"), TEXT("bShowDeathBlood"), bShowBlood, GetModIniPath());
+		ShowDeathBlood = bShowBlood ? 1 : 0;
+	}
 }
 
 float NCPlusPerformanceSettings::GetCharacterOverlayDistance()
@@ -69,6 +83,12 @@ float NCPlusPerformanceSettings::GetCharacterOverlayDistanceSquared()
 {
 	LoadCharacterOverlayDistance();
 	return CharacterOverlayDistanceSquared;
+}
+
+bool NCPlusPerformanceSettings::GetShowDeathBlood()
+{
+	LoadShowDeathBlood();
+	return ShowDeathBlood != 0;
 }
 
 void NCPlusPerformanceSettings::SetCharacterOverlayDistance(float Distance)
@@ -90,5 +110,7 @@ void NCPlusPerformanceSettings::SetCharacterOverlayDistance(float Distance)
 void NCPlusPerformanceSettings::Reload()
 {
 	bCharacterOverlayDistanceLoaded = false;
+	ShowDeathBlood = -1;
 	LoadCharacterOverlayDistance();
+	LoadShowDeathBlood();
 }

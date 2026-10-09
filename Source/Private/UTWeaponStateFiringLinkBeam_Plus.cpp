@@ -1,5 +1,7 @@
 // UTWeaponStateFiringLinkBeam_Plus.cpp
 #include "UTWeaponStateFiringLinkBeamPlus.h"
+#include "NCClientFireTiming.h"
+#include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTWeap_LinkGun_Plus.h"
 #include "UTWeaponFix.h"
@@ -64,6 +66,7 @@ void UUTWeaponStateFiringLinkBeamPlus::RefireCheckTimer()
     if (WeaponFix && WeaponFix->LastFireTime.IsValidIndex(WeaponFix->GetCurrentFireMode()))
     {
         WeaponFix->LastFireTime[WeaponFix->GetCurrentFireMode()] = GetWorld()->GetTimeSeconds();
+        NCClientFireTiming::Record(WeaponFix, WeaponFix->GetCurrentFireMode());
     }
     //UE_LOG(LogUTWeaponState, Warning, TEXT("=== RefireCheckTimer END ==="));
 }
@@ -71,6 +74,7 @@ void UUTWeaponStateFiringLinkBeamPlus::RefireCheckTimer()
 
 void UUTWeaponStateFiringLinkBeamPlus::FireShot()
 {
+    NCFireDiagnostics::FShotScope TraceShot(GetOuterAUTWeapon(), GetOuterAUTWeapon()->GetCurrentFireMode(), INDEX_NONE, 0, TEXT("beam"));
     AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
     if (LinkGun)
     {
@@ -113,6 +117,7 @@ void UUTWeaponStateFiringLinkBeamPlus::BeginState(const UUTWeaponState* Prev)
     if (WeaponFix && WeaponFix->LastFireTime.IsValidIndex(GetOuterAUTWeapon()->GetCurrentFireMode()))
     {
         WeaponFix->LastFireTime[GetOuterAUTWeapon()->GetCurrentFireMode()] = GetOuterAUTWeapon()->GetWorld()->GetTimeSeconds();
+        NCClientFireTiming::Record(WeaponFix, GetOuterAUTWeapon()->GetCurrentFireMode());
     }
 
     GetOuterAUTWeapon()->bNetDelayedShot = false;
@@ -180,6 +185,7 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
     {
         FHitResult Hit;
         LinkGun->FireInstantHit(false, &Hit);
+        NCFireDiagnostics::BeamSample(LinkGun, LinkGun->GetCurrentFireMode(), Hit);
 
         // Update visual beam location immediately
         LinkGun->GetUTOwner()->SetFlashLocation(Hit.Location, LinkGun->GetCurrentFireMode());
@@ -299,6 +305,7 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
         LinkGun->HitsStatsName = NAME_None;
 
         LinkGun->FireInstantHit(false, &Hit);
+        NCFireDiagnostics::BeamSample(LinkGun, LinkGun->GetCurrentFireMode(), Hit);
 
         LinkGun->ShotsStatsName = RealShots;
         LinkGun->HitsStatsName = RealHits;
@@ -348,6 +355,7 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
         LinkGun->HitsStatsName = NAME_None;
 
         LinkGun->FireInstantHit(false, &Hit);
+        NCFireDiagnostics::BeamSample(LinkGun, LinkGun->GetCurrentFireMode(), Hit);
 
         LinkGun->ShotsStatsName = RealShots;
         LinkGun->HitsStatsName = RealHits;

@@ -18,3 +18,7 @@ channels. This intentionally produces fixed red/blue artwork; the ncHUD custom
 Team Color option does not apply while **Absolute Elim 113 layout** is selected.
 The scoreboard's dead and totals row appearances are derived at load time from
 the recovered row textures using the original material saturation/multiply values.
+
+The scoreboard optionally loads UT's existing `fntScoreboard_Score` font for the
+large team scores. If an installed cook omits it, the existing HUD HugeFont is
+used at twice its normal scale. No new cooked font or Blueprint asset is required.
