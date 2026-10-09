@@ -145,7 +145,9 @@ namespace NCPlusHostPause
 			// ShowMenu/OpenDialog install their widget before calling SetPause.
 			// Checking here prevents the pause itself, rather than undoing it later.
 			UUTLocalPlayer* LocalPlayer = Cast<UUTLocalPlayer>(PC->Player);
-			return LocalPlayer != nullptr && LocalPlayer->AreMenusOpen();
+			// Retail UT4 local-player vtable slots differ from these headers; call the exported
+			// implementation directly (same as NCSpawnFireInput).
+			return LocalPlayer != nullptr && LocalPlayer->UUTLocalPlayer::AreMenusOpen();
 		}
 #endif
 		return false;
