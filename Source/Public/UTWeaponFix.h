@@ -104,6 +104,8 @@ struct FPendingFireEventFix
     uint8 ZOffset;
     TWeakObjectPtr<AUTCharacter> HitChar;
     FVector ClientHeadOffset;
+    float ClientMoveTime;
+    FVector ClientFireLoc;
 
     FPendingFireEventFix(uint8 Mode, int32 EventIdx)
         : bIsStartFire(false)
@@ -114,11 +116,13 @@ struct FPendingFireEventFix
         , ZOffset(0)
         , HitChar(nullptr)
         , ClientHeadOffset(FVector::ZeroVector)
+        , ClientMoveTime(-1.f)
+        , ClientFireLoc(FVector::ZeroVector)
     {
     }
 
     FPendingFireEventFix(uint8 Mode, int32 EventIdx, float Timestamp, FRotator ViewRot,
-        AUTCharacter* InChar, uint8 Z, FVector HeadOffset)
+        AUTCharacter* InChar, uint8 Z, FVector HeadOffset, float MoveTime, FVector FireLoc)
         : bIsStartFire(true)
         , FireModeNum(Mode)
         , FireEventIndex(EventIdx)
@@ -127,6 +131,8 @@ struct FPendingFireEventFix
         , ZOffset(Z)
         , HitChar(InChar)
         , ClientHeadOffset(HeadOffset)
+        , ClientMoveTime(MoveTime)
+        , ClientFireLoc(FireLoc)
     {
     }
 };
@@ -171,6 +177,20 @@ struct FActiveServerProjectile
     UPROPERTY()
     uint8 FireMode;
 
+    // Captured on authority before projectile catchup; survives actor destruction.
+    // Loaded claims use this exact key, never the oldest fire-mode sibling.
+    UPROPERTY()
+    TWeakObjectPtr<class AUTCharacter> FiringPawn;
+    UPROPERTY()
+    uint32 LoadedOwnershipEpoch = 0;
+    UPROPERTY()
+    uint32 LoadedVolleyId = 0;
+    UPROPERTY()
+    uint8 LoadedRocketOrdinal = 0;
+
+    UPROPERTY()
+    uint32 FlakShotId = 0;
+
     // --- Grace buffer (populated when the projectile RESOLVES / explodes) ---
     // Retain a resolved projectile's final state briefly so a claim arriving after the server
     // projectile is gone (close-range timing race) can still rewind-rescue. ExpireTime < 0 means
@@ -193,6 +213,16 @@ struct FActiveServerProjectile
     float ExpireTime = -1.f;
     UPROPERTY()
     TWeakObjectPtr<class AUTCharacter> DamagedTarget;
+    // Conservative splash candidates captured at the real loaded explosion.
+    // An exact grace claim must not add full direct damage after possible splash.
+    UPROPERTY()
+    bool bLoadedExplosionObserved = false;
+    UPROPERTY()
+    bool bFlakExplosionObserved = false;
+    UPROPERTY()
+    bool bFlakGraceEligible = false;
+    UPROPERTY()
+    TArray<TWeakObjectPtr<class AUTCharacter>> PossibleSplashTargets;
 
     FActiveServerProjectile()
         : FireMode(0)
@@ -224,6 +254,10 @@ public:
      *  Set via "weaponskins" menu or "weaponhand hidden/show" console command.
      *  BringUp() checks this to hide 1P mesh on weapon switch. */
     static TMap<FName, bool> HiddenWeaponsByTag;
+
+    /** Resolve the saved hide choice. Trainer weapon variants inherit their normal
+     *  weapon's choice only without an explicit class entry; ordinary play is unchanged. */
+    static bool IsWeaponHiddenBySettings(const AUTWeapon* Weapon, const AUTCharacter* Char);
 
     /** Apply or restore the hidden-weapon state. Two selectable styles:
      *  DEFAULT (bClassicWeaponHide=false) = BP-parity, rendering-only —
@@ -361,8 +395,18 @@ public:
     virtual void PlayFiringEffects() override;
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
+    virtual bool BeginFiringSequence(uint8 FireModeNum, bool bClientFired) override;
+    virtual void GotoState(UUTWeaponState* NewState) override;
+    // Native-only helpers: no reflected fields, RPCs, or UObject layout changes.
+    bool RequiresTransactionalRequest() const;
+    bool CompleteAcceptedDeferredFire(UUTWeaponState* CompletingState);
+    void CompleteAcceptedRateFire(uint8 FireModeNum, uint32 ContextGeneration);
+    void PromoteFollowingRateFire();
     virtual bool ShouldDrawFFIndicator(APlayerController* Viewer,
         AUTPlayerState*& HitPlayerState) const override;
+    /** Client HUD only: stock crosshair, minus the teammate sign when the opt-in
+     *  F5/nchud "hide friendly crosshair sign" toggle is on. */
+    virtual void DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta) override;
 
     /** Server-authoritative fire policy hook. Return false to hard-reject a fire mode
      *  at every server fire entry (ServerStartFireFixed and the resend funnel) BEFORE any
@@ -443,6 +487,18 @@ public:
     // Guard against race condition: replicated fire RPC arrives after owner dies
     // and weapon is being destroyed. The base class dereferences owner without null check.
     virtual void ServerUpdateFiringStates_Implementation(uint8 FireSettings) override;
+    virtual bool ValidateFireEventIndex(uint8 FireModeNum, uint8 InFireEventIndex) override;
+    virtual void QueueResendFire(bool bIsStartFire, uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired) override;
+    virtual void EndFiringSequence(uint8 FireModeNum) override;
+    void DescribeFireTraceLayout();
+    // Diagnostic wrappers for inherited RPCs; no new reflected functions.
+    virtual void ServerStartFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, bool bClientFired) override;
+    virtual void ServerStartFireOffset_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired) override;
+    virtual void ResendServerStartFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, bool bClientFired) override;
+    virtual void ResendServerStartFireOffset_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired) override;
+    virtual void ServerStopFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex) override;
+    virtual void ServerStopFireRecent_Implementation(uint8 FireModeNum, uint8 InFireEventIndex) override;
+
     virtual FRotator GetAdjustedAim_Implementation(FVector StartFireLoc) override;
     virtual void HitScanTrace(const FVector& StartLocation, const FVector& EndTrace,
         float TraceRadius, FHitResult& Hit, float PredictionTime) override;
@@ -462,26 +518,18 @@ public:
 
     // =========================================================================
     // PROJECTILE REWIND SYSTEM
-    // Called by UTPlusProj_Rocket / UTPlusProj_FlakShell when fake hits a pawn.
-    // Sends ServerProjectileHitClaim RPC if bEnableProjectileRewind is true.
+    // Called by the shooter's replicated real projectile when it hits a pawn.
+    // Loaded rockets send their exact identity; other projectiles retain the legacy claim.
     // =========================================================================
-    /** @param SourceProj  The projectile reporting the hit. Callers resolve `this` weapon from
-     *                     UTCharacter::GetWeapon() at IMPACT time, which is the weapon currently
-     *                     HELD — not necessarily the one that fired. Fire a rocket, switch to flak,
-     *                     rocket lands: `this` is the flak cannon. Passing the projectile lets the
-     *                     hitsound prediction read damage off the instance that actually hit,
-     *                     instead of ProjClass[FireModeNum] on the wrong weapon. Optional: a null
-     *                     SourceProj keeps the legacy CDO lookup. */
+    /** SourceProj supplies the reporting projectile's damage and exact loaded identity.
+     *  Callers resolve the original weapon with FindFiringWeaponForProjectile, even after a
+     *  weapon switch. A null SourceProj retains the legacy damage CDO/fire-mode lookup. */
     void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum,
         AUTProjectile* SourceProj = nullptr);
 
-    /** Resolve the weapon that FIRED Proj, rather than the one OwnerChar happens to be holding.
-     *  AUTCharacter::GetWeapon() is evaluated at IMPACT: fire a rocket, switch to flak, and the
-     *  rocket's claim routes to the flak cannon, whose ActiveServerProjectiles never held it, so
-     *  the server drops the claim and that shot silently loses lag compensation. Matching on the
-     *  projectile's exact class is unambiguous — each claim-capable class comes from exactly one
-     *  weapon. Falls back to the held weapon when nothing was recorded, so the worst case is the
-     *  behaviour that shipped. Call this instead of GetWeapon() from projectile impact handlers. */
+    /** Resolve the original firing weapon. Identified loaded rockets use their exact launcher
+     *  and ownership epoch and never fall back. Other projectiles retain the recorded-class
+     *  inventory lookup and, if unavailable, the legacy held-weapon fallback. */
     static AUTWeaponFix* FindFiringWeaponForProjectile(AUTCharacter* OwnerChar, AUTProjectile* Proj);
 
     /** Server-side: a tracked projectile (rocket/flak shell) calls this when it resolves (explodes) to
@@ -490,6 +538,11 @@ public:
      *  hit this frame, or null (geometry/whiff) — prevents double-damaging a target that already took the
      *  present-time hit. PUBLIC: called from the UTPlusProj_* classes, which are not AUTWeaponFix subclasses. */
     void OnTrackedProjectileResolved(class AUTProjectile* Proj, class AUTCharacter* DamagedChar);
+    void CaptureFlakShellSpawn(class AUTPlusProj_FlakShell* Proj);
+    void OnTrackedFlakExploding(class AUTPlusProj_FlakShell* Proj, const FVector& HitLocation,
+        const FVector& HitNormal);
+    void OnTrackedRocketExploding(class AUTPlusProj_Rocket* Proj, const FVector& HitLocation,
+        const FVector& HitNormal);
     UPROPERTY()
     TArray<float> LastFireTime;
 
@@ -515,6 +568,10 @@ public:
      *  during travel/setup; cleanup must never guess using the replacement. */
     UPROPERTY(Transient)
     UInputComponent* ShockInputTraceActionComponent;
+
+    /** Exact observer identities; other weapon-owned action bindings are independent. */
+    FDelegateHandle ShockInputTraceStartBindingHandle;
+    FDelegateHandle ShockInputTraceStopBindingHandle;
 
     /** Snapshot taken by the higher-priority, non-consuming key observer before
      *  the stock StartFire action runs. It lets the later passive action observer
@@ -582,12 +639,17 @@ public:
 
 protected:
 
+    /** Keep an identical Instagib mode held without interrupting the other held mode. */
+    bool TryPreserveInstagibHeldFire(uint8 FireModeNum);
+
     /** Client-only crosshair presentation state; see FNCFriendlyTargetProbeCache. */
     mutable FNCFriendlyTargetProbeCache FriendlyTargetProbeCache;
 
     /** Common server RTT-to-rewind conversion. Hitscan passes the live cvar;
      *  the legacy projectile-origin path passes its per-weapon field. */
     float GetPredictionTimeWithFudgeMs(float InFudgeMs) const;
+    float GetHitValidationRenderTime(float PresentationMs, bool& bTimingValid) const;
+    bool Is329FireProtocolReady() const;
 
     FTimerHandle DelayedPutDownHandle;
     bool bHandlingRetry;
@@ -616,11 +678,10 @@ protected:
     bool bFireHeldByPlayer[2];
 
     // True while RetryFireHandle[mode] is armed BY THE CROSS-MODE stall-fix block
-    // (ncp.CrossModeRetry) rather than the same-mode cooldown paths. The legacy
-    // (ncp.GhostFix=0) PutDown retry-graduation must NOT graduate these — a tapped
-    // cross-mode press followed by a fast weapon switch would become a ghost shot
-    // on the next weapon. Set only at the cross-mode arm site; every other arm site
-    // overwrites it false (the graduation's IsTimerActive guard covers cleared timers).
+    // (ncp.CrossModeRetry) rather than the same-mode cooldown paths. It is not
+    // promoted to Pawn PendingFire until PutDown actually starts, and only while
+    // the timer is still active; a genuine release clears the timer first. Set only
+    // at the cross-mode arm site; every other arm site overwrites it false.
     bool bCrossModeRetryArmed[2];
 
     // True while RetryFireHandle[mode] holds a BUFFERED CLICK. In 328 dogfood
@@ -634,9 +695,17 @@ protected:
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
 
+    void ClearDeferredEquipFireContext(bool bInvalidateGeneration = true,
+        const TCHAR* Reason = TEXT("equip_lifetime"));
+    bool HasAcceptedTransactionalRequest(uint8 FireModeNum) const;
+    void RecoverUnauthorizedTransactionalEntry();
+    void ReconcileDeferredEquipRelease(uint8 FireModeNum, int32 InFireEventIndex,
+        uint32 ContextGeneration, TWeakObjectPtr<AUTCharacter> ExpectedOwner);
+
     // --- Trade-kill grace period: cache owner state before Removed() nulls UTOwner ---
     /** World time when UTOwner was lost (weapon removed from dying player) */
     float OwnerLostTime = 0.f;
+    TWeakObjectPtr<AController> FireProtocolController;
     /** Last known fire start location when owner was alive */
     FVector CachedFireStartLoc = FVector::ZeroVector;
     /** Last known fire rotation when owner was alive */
@@ -701,6 +770,8 @@ public:
 
 protected:
 
+    void ClearDeferredActiveState();
+    void ScheduleDeferredActiveState(uint8 FireModeNum, float Delay);
     FTimerHandle DeferredActiveStateHandle;
     /** Server-side ground truth for the last accepted fire event in each mode.
      *  Owning clients are corrected explicitly through ClientConfirmFireEvent. */
@@ -743,11 +814,14 @@ protected:
      *
      * @param FireModeNum - Which fire mode to activate
      * @param InFireEventIndex - Unique sequence number for this fire event
-     * @param ClientTimestamp - Client's GetWorld()->GetTimeSeconds() when fire was initiated
+     * @param ClientTimestamp - Estimated server world time; validation only, never a rewind selector.
+     * @param ClientMoveTime - Original movement timestamp, matched to one server-observed marker in 329.
+     * @param ClientFireLoc - Quantized original eye origin, usable only after tight server validation.
      */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+        float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc);
 
     /**
      * Server RPC to stop firing.
@@ -777,7 +851,9 @@ protected:
      *
      * @return true if request is valid and should be processed
      */
-    bool ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, float ClientTime);
+    bool ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, float ClientTime, float* OutRateDelay = nullptr, float MinimumRateDelay = 0.f);
+    bool CanReserveServerRateFire(uint8 FireModeNum, float Delay);
+    bool IsServerRateTargetHistoryValid(AUTCharacter* Target, float PredictionTime) const;
 
     /** Shared RPC-edge validation so initial and retry start payloads use identical checks. */
     bool ValidateStartFireFixedPayload(uint8 FireModeNum, int32 InFireEventIndex,
@@ -880,7 +956,8 @@ protected:
     FTimerHandle ResendFireHandle;
 
     void QueueResendStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+        float ClientMoveTime, const FVector& ClientFireLoc);
     void QueueResendStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);
     void QueueResendFireEventFixed(const FPendingFireEventFix& Event);
     void ResendNextFireEventFixed();
@@ -888,7 +965,8 @@ protected:
 
     UFUNCTION(Server, Unreliable, WithValidation)
     void ResendServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+        float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc);
 
     UFUNCTION(Server, Unreliable, WithValidation)
     void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);
@@ -925,12 +1003,31 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
     float ProjectileRewindMinScale = 0.5f;
 
-    /** Server RPC: Client's fake projectile hit a target, validate with rewind */
+    /** Legacy projectile claim. Identified loaded rockets and flak cannot use this FIFO path. */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
         uint8 ClaimedFireMode);
 
-    /** Server-side tracking of authoritative projectiles, matched oldest-first by fire mode. */
+    /** 329 loaded-rocket claim, scoped to this weapon and its ownership lifetime. */
+    UFUNCTION(Server, Reliable, WithValidation)
+    void ServerLoadedRocketHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
+        uint32 Epoch, uint32 VolleyId, uint8 Ordinal);
+
+    /** 329 flak-secondary claim. ShotId is unique for this firing weapon's lifetime. */
+    UFUNCTION(Server, Reliable, WithValidation)
+    void ServerFlakShellHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
+        uint32 ShotId);
+
+    void ProcessProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
+        uint8 ClaimedFireMode, uint32 ClaimedEpoch, uint32 ClaimedVolleyId, uint8 ClaimedOrdinal,
+        uint32 ClaimedFlakShotId = 0);
+    void PruneTrackedProjectiles(float Now);
+    void ClearFlakShellClaims();
+
+    // Authority only. Never reset on weapon switching, removal or re-acquisition.
+    uint32 NextFlakShotId = 0;
+
+    /** Server-side authoritative tracking, including exact loaded identities and resolved grace. */
     UPROPERTY()
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
 

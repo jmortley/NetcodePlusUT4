@@ -6,6 +6,7 @@
 #include "UTCharacter.h"
 #include "UTProjectileMovementComponent.h"
 #include "HAL/IConsoleManager.h"
+#include "Net/UnrealNetwork.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFlakShellPair, Log, All);
 
@@ -66,6 +67,13 @@ AUTPlusProj_FlakShell::AUTPlusProj_FlakShell(const FObjectInitializer& ObjectIni
 	: Super(ObjectInitializer)
 {
 	bForcingShutdownExplosion = false;
+}
+
+void AUTPlusProj_FlakShell::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME_CONDITION(AUTPlusProj_FlakShell, ShotId, COND_InitialOnly);
+	DOREPLIFETIME_CONDITION(AUTPlusProj_FlakShell, FiringWeapon, COND_InitialOnly);
 }
 
 bool AUTPlusProj_FlakShell::CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const
@@ -224,6 +232,13 @@ void AUTPlusProj_FlakShell::Explode_Implementation(const FVector& HitLocation, c
 		return;
 	}
 
+	// Capture only a real terminal transition. ProcessHit may reject an overlap,
+	// and recording before that decision used to poison the late-claim snapshot.
+	if (Role == ROLE_Authority && !bExploded && FiringWeapon)
+	{
+		FiringWeapon->OnTrackedFlakExploding(this, HitLocation, HitNormal);
+	}
+
 	// Real (or listen-server host) resolved before its visible fake caught up: drive the fake to
 	// play exactly one authoritative explosion at truth so it doesn't silently disappear.
 	if (CVarFlakShellServerFirstExplosionVisual.GetValueOnGameThread() > 0
@@ -303,22 +318,6 @@ void AUTPlusProj_FlakShell::ProcessHit_Implementation(AActor* OtherActor, UPrimi
 					Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, 1, this); // FireMode 1 = alt-fire (flak shell)
 				}
 			}
-		}
-	}
-
-	// SERVER-SIDE: snapshot final state into the weapon's grace buffer BEFORE Super explodes/
-	// destroys this shell, so a claim arriving after the shell is gone (close-range timing race)
-	// can still rewind-rescue. The pawn we directly hit (or null = geometry/whiff) is passed so
-	// the grace path won't double-damage a target that already took the present-time hit.
-	if (Role == ROLE_Authority)
-	{
-		AUTCharacter* OwnerChar = Cast<AUTCharacter>(GetInstigator());
-		// Resolve the cannon that fired this shell, not the weapon held when it explodes.
-		// The tracked grace entry lives on the firing weapon, matching the client claim route.
-		AUTWeaponFix* Weapon = AUTWeaponFix::FindFiringWeaponForProjectile(OwnerChar, this);
-		if (Weapon)
-		{
-			Weapon->OnTrackedProjectileResolved(this, Cast<AUTCharacter>(OtherActor));
 		}
 	}
 

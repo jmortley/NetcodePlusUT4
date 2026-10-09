@@ -7,8 +7,8 @@
 /**
  * Enhanced flak shell (alt-fire ball) for NetcodePlus.
  *
- * Adds client-notify projectile rewind: when the client's fake flak ball
- * hits an enemy, sends an RPC so the server can validate with rewind.
+ * Adds client-notify projectile rewind: when the shooter's replicated real
+ * shell hits an enemy, claims its exact server-assigned identity for validation.
  *
  * Reparent your flak shell Blueprint to this class to enable projectile
  * lag compensation. No behavioral change until reparented.
@@ -20,6 +20,14 @@ class NETCODEPLUS_API AUTPlusProj_FlakShell : public AUTProj_FlakShell
 
 public:
 	AUTPlusProj_FlakShell(const FObjectInitializer& ObjectInitializer);
+
+	// 329 identity is assigned by authority before catchup and sent once with the
+	// real shell. Cosmetic fakes never submit claims or allocate a server identity.
+	UPROPERTY(Replicated)
+	uint32 ShotId = 0;
+	UPROPERTY(Replicated)
+	class AUTWeaponFix* FiringWeapon = nullptr;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	/** Stock accepts every gravity projectile candidate. Flak shells instead require an
 	 * unpaired live fake from the same instigator and a compatible ballistic phase. */

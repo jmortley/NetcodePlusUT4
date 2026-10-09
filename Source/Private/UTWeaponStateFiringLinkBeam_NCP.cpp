@@ -1,4 +1,5 @@
 #include "UTWeaponStateFiringLinkBeam_NCP.h"
+#include "NCFireDiagnostics.h"
 #include "NetcodePlus.h"
 #include "UTWeap_LinkGun_NCP.h"
 #include "Animation/AnimInstance.h"
@@ -22,6 +23,7 @@ void UUTWeaponStateFiringLinkBeam_NCP::BeginState(const UUTWeaponState* PrevStat
 
 void UUTWeaponStateFiringLinkBeam_NCP::FireShot()
 {
+    NCFireDiagnostics::FShotScope TraceShot(GetOuterAUTWeapon(), GetOuterAUTWeapon()->GetCurrentFireMode(), INDEX_NONE, 0, TEXT("beam"));
 	// Beam damage is accumulated in Tick(); the refire pulse only drives stock
 	// effects, ammo consumption, and inventory notification.
 	AUTWeap_LinkGun_NCP* LinkGun = Cast<AUTWeap_LinkGun_NCP>(GetOuterAUTWeapon());
@@ -142,6 +144,7 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 		const FName RealHitsStatsName = LinkGun->HitsStatsName;
 		LinkGun->HitsStatsName = NAME_None;
 		LinkGun->FireInstantHit(false, &Hit);
+        NCFireDiagnostics::BeamSample(LinkGun, LinkGun->GetCurrentFireMode(), Hit);
 		LinkGun->ShotsStatsName = RealShotsStatsName;
 		LinkGun->HitsStatsName = RealHitsStatsName;
 
@@ -173,6 +176,7 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 
 		if (Hit.Actor.IsValid() && Hit.Actor.Get()->bCanBeDamaged)
 		{
+			const bool bHitPawn = Cast<APawn>(Hit.Actor.Get()) != nullptr; // before TakeDamage can kill it
 			if (LinkGun->IsValidLinkTarget(Hit.Actor.Get()))
 			{
 				LinkGun->CurrentLinkedTarget = Hit.Actor.Get();
@@ -196,10 +200,8 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 						FireDir * (LinkGun->GetImpartedMomentumMag(Hit.Actor.Get()) * float(AppliedDamage) / float(DamageInfo.Damage))),
 					LinkDamageInstigator,
 					LinkGun);
-				// No accuracy credit for melting projectiles (cores/rockets) —
-				// same rule as UTWeaponFix::FireInstantHit (2026-08-10).
-				if (PS != nullptr && LinkGun->HitsStatsName != NAME_None
-					&& Cast<AUTProjectile>(Hit.Actor.Get()) == nullptr)
+				// Pawns only — same rule as UTWeaponFix::FireInstantHit.
+				if (PS != nullptr && LinkGun->HitsStatsName != NAME_None && bHitPawn)
 				{
 					PS->ModifyStatsValue(LinkGun->HitsStatsName, AppliedDamage / FMath::Max(LinkedDamage, 1.f));
 				}

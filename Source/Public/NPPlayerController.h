@@ -1,6 +1,7 @@
 // NPPlayerController.h
-// Neutral C++ PlayerController shell — behaviorally identical to stock
-// AUTPlayerController. Kept as the proven-safe home for future PC-level work
+// Existing C++ PlayerController shell — stock behavior outside xTDM, where
+// legacy two-team announcements are substituted before text/audio dispatch.
+// Kept as the proven-safe home for PC-level work
 // (e.g. an ncp.FlushNetOnFire experiment) that must not live in a Blueprint.
 //
 // HISTORY (2026-08-06): this class previously carried a deferred-fire-queue
@@ -34,4 +35,10 @@ class NETCODEPLUS_API ANPPlayerController : public AUTPlayerController
 
 public:
 	ANPPlayerController(const FObjectInitializer& ObjectInitializer);
+
+	/** Four-team text/audio substitution before stock ClientReceive dispatch.
+	 * Reuses the inherited RPC; adds no replicated fields or new RPCs. */
+	virtual void ClientReceiveLocalizedMessage_Implementation(TSubclassOf<ULocalMessage> Message,
+		int32 Switch, APlayerState* RelatedPlayerState_1, APlayerState* RelatedPlayerState_2,
+		UObject* OptionalObject) override;
 };

@@ -1,0 +1,158 @@
+{
+  "version": 2,
+  "status": "editor_activated_runtime_acceptance_pending",
+  "native_parent": "/Script/NetcodePlus.NCPickupBaseMutator",
+  "expected_original_parent": "/Script/UnrealTournament.UTMutator",
+  "mutators": [
+    "/Game/Blueprints/ElimPlusStuff/NCWepMut",
+    "/Game/Blueprints/ElimPlusStuff/NCStockWeapons",
+    "/Game/Blueprints/ElimPlusStuff/WipeoutMutator"
+  ],
+  "defaults": {
+    "NCWeaponBaseClass": "BlueprintGeneratedClass'/Game/Blueprints/Netcode/Performance/NCWeaponBase.NCWeaponBase_C'",
+    "NCPowerupBaseClass": "BlueprintGeneratedClass'/Game/Blueprints/Netcode/Performance/NCPowerupBase.NCPowerupBase_C'",
+    "NCPowerupTimerBaseClass": "BlueprintGeneratedClass'/Game/Blueprints/Netcode/Performance/NCPowerupBaseTimer.NCPowerupBaseTimer_C'"
+  },
+  "copy_component_defaults": {
+    "component": "Collision",
+    "defaults": {
+      "bShouldUpdatePhysicsVolume": true
+    }
+  },
+  "copies": [
+    {
+      "source": "/Game/RestrictedAssets/Weapons/WeaponBase",
+      "target": "/Game/Blueprints/Netcode/Performance/NCWeaponBase"
+    },
+    {
+      "source": "/Game/RestrictedAssets/Pickups/Powerups/PowerupBase",
+      "target": "/Game/Blueprints/Netcode/Performance/NCPowerupBase"
+    },
+    {
+      "source": "/Game/Blueprints/Netcode/NCPowerupBase_test",
+      "target": "/Game/Blueprints/Netcode/Performance/NCPowerupBaseTimer"
+    }
+  ],
+  "activation": {
+    "date": "2026-09-09",
+    "native_parent_loaded": true,
+    "mutators_compiled_and_saved": true,
+    "existing_defaults_preserved": true,
+    "graph_count": 18,
+    "graph_connections_preserved": true,
+    "copy_tick_interval_seconds": 0.05,
+    "diagnostic_native_rebuild_required": false,
+    "guard_correction_native_rebuild_required": false,
+    "copy_capsule_match_native_rebuild_required": false,
+    "copy_capsule_update_physics_volume": true
+  },
+  "runtime_acceptance": {
+    "passed": false,
+    "stock_smoke": {
+      "map": "/Game/RestrictedAssets/Maps/Example_Map",
+      "mutator": "NCStockWeapons",
+      "kept_weapon_bases": 11,
+      "kept_powerup_bases": 5,
+      "replacements": 0,
+      "exit": "normal"
+    },
+    "additional_smokes": {
+      "NCWepMut": "Headless startup access violation before pickup-hook rows; cause unverified.",
+      "NCStockWeapons_fresh": "Startup timeout; owned test process terminated."
+    },
+    "rendered_pie_followup": {
+      "date": "2026-09-09",
+      "user_report": "Wipeout worked in PIE without visible errors.",
+      "observed_log": "Wipeout round start and normal PIE shutdown; startup GS-reference Blueprint runtime errors also present.",
+      "pickup_base_rows": 0,
+      "replacement_verified": false,
+      "logging_enabled_after_test": true,
+      "diagnostic_dll_rebuild_confirmed": false
+    },
+    "diagnostic_pie_followup": {
+      "date": "2026-09-09",
+      "session_start_utc": "16:11:31",
+      "diagnostic_dll_rebuild_confirmed": true,
+      "dll_last_write_utc": "2026-09-09T16:04:53.3147898Z",
+      "kept_weapon_bases": 10,
+      "kept_powerup_bases": 2,
+      "replacements": 0,
+      "keep_reason": "bound actor delegate OnDestroyed",
+      "stock_binding_source": "AUTWorldSettings::NotifyBeginPlay -> LevelActorDestroyed; replay destruction bookkeeping",
+      "exit": "normal PIE shutdown",
+      "replacement_verified": false,
+      "evidence_log": "wipeout-pie-161131.log"
+    },
+    "guard_correction": {
+      "compiled": true,
+      "runtime_verified": false,
+      "observed_advance_to_physics_volume_guard": true,
+      "stock_replay_binding_excluded_from_classification_only": true,
+      "actual_delegate_preserved": true,
+      "weapon_timer_preview_visibility_normalized": true,
+      "inactive_legacy_angular_velocity_normalized": true,
+      "all_component_differences_logged_at_very_verbose": true,
+      "physics_volume_override_guard_retained": true
+    },
+    "capsule_volume_pie_followup": {
+      "date": "2026-09-09",
+      "session_start_utc": "16:32:04",
+      "built_source_commit": "3a8808d",
+      "dll_last_write_utc": "2026-09-09T16:29:38.1967123Z",
+      "kept_weapon_bases": 10,
+      "kept_powerup_bases": 2,
+      "replacements": 0,
+      "only_component_mismatch": "Capsule.bShouldUpdatePhysicsVolume",
+      "exit": "normal PIE shutdown"
+    },
+    "copy_capsule_match_followup": {
+      "compiled": true,
+      "runtime_verified": true,
+      "runtime_verification_scope": "Successful replacement of eligible existing map bases in Wipeout PIE; fresh false-source preservation and server/client gameplay checks remain pending.",
+      "comparison_reference": "replacement capsule template",
+      "copy_templates_compiled_saved_and_verified": true,
+      "copy_capsule_update_physics_volume": true,
+      "original_capsule_defaults_still_false": true,
+      "false_source_bases_kept_with_configured_true_copies": true,
+      "full_default_comparison_only_intended_flag_changed": true,
+      "fresh_weapon_copy_inherits_flag_and_tick_interval": true,
+      "temporary_probes_removed": true,
+      "evidence_folder": "physics-volume-20260909T164100858Z"
+    },
+    "successful_swap_pie_followup": {
+      "date": "2026-09-09",
+      "session_starts_utc": ["16:56:43", "16:58:47"],
+      "source_revision_at_check": "4336551",
+      "dll_last_write_utc": "2026-09-09T16:53:32.1275529Z",
+      "copied_weapon_bases_per_session": 10,
+      "copied_powerup_bases_per_session": 2,
+      "kept_per_session": 0,
+      "removed_by_relevance_per_session": 0,
+      "custom_weapon_array_warnings_per_session": 8,
+      "warning_indices": [12, 14, 15, 11, 17, 13, 17, 16],
+      "siphon_selection": "Two powerup candidates, one AMP; Berserk selected.",
+      "exit": "Both sessions ended normally.",
+      "evidence_folder": "successful-swaps-20260909T1715"
+    },
+    "wipeout_mapping_correction": {
+      "applied": false,
+      "asset": "/Game/Blueprints/ElimPlusStuff/WipeoutMutator",
+      "graph": "EventGraph",
+      "node": "K2Node_CallArrayFunction_53",
+      "node_guid": "DAAB8FC6448196C8C05196A3148C6F20",
+      "cause": "Init appends nine starting weapon classes to DefaultWeaponClasses without paired CustomWeaponClasses entries. Copied pickups reenter this lookup.",
+      "correction": "Disconnect execution into Array_AddUnique(DefaultWeaponClasses) after the UTWeapon class cast. Keep the ForEach Completed wire and the ten existing stock-to-custom mappings. Compile/save and rerun PIE.",
+      "native_rebuild_required": false,
+      "editor_limit": "Graph import adds nodes; existing-node SET was rejected by UnrealEd. No semantic graph/CDO change was applied."
+    },
+    "next_step": "Apply the Wipeout Init mapping correction and rerun PIE with LogGameMode VeryVerbose. Confirm twelve swaps with no CustomWeaponClasses warnings, then test fresh false-source preservation, gameplay, remote clients, replay and lighting. Recook the updated copies with the mutators after runtime acceptance."
+  },
+  "checks": [
+    "Back up each mutator package and export all graphs before changing its parent.",
+    "Confirm the new native parent is loaded in this editor and all copies compile.",
+    "For each listed mutator, reparent to native_parent, apply defaults, then compile and inspect every diagnostic.",
+    "Read back ParentClass and the three class references. Confirm original settings and graph connections survived.",
+    "Test standalone and server/client pickup replacement, Wipeout Siphon/AMP and baked base lighting before cooking a release.",
+    "Editor activation completed on 2026-09-09; runtime checks remain pending. Successful Blueprint compilation is not runtime acceptance."
+  ]
+}

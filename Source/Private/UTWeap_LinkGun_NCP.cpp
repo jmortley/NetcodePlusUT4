@@ -1,4 +1,6 @@
 #include "UTWeap_LinkGun_NCP.h"
+#include "NCAimTrainerCharacter.h"
+#include "NCFireDiagnostics.h"
 #include "NCWeaponColorSettings.h"
 #include "NetcodePlus.h"
 #include "UTWeaponStateFiringLinkBeam_NCP.h"
@@ -182,22 +184,36 @@ void AUTWeap_LinkGun_NCP::StopFiringEffects_Implementation()
 	Super::StopFiringEffects_Implementation();
 }
 
+bool AUTWeap_LinkGun_NCP::SupportsLinkPull() const
+{
+	// Practice uses the regular Link's authored beam width, damage and effects,
+	// but releasing either held beam input must not pull the immortal target.
+	// The native owner class is available on both client and authority, without
+	// a server-only game mode query or a separately replicated practice flag.
+	return !Cast<ANCAimTrainerCharacter>(UTOwner);
+}
+
 void AUTWeap_LinkGun_NCP::StartFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, true);
 	// Link primary's 7+ shots/sec cadence is intentionally not transactional.
 	// The beam likewise keeps its stock continuous-state lifecycle.
-	AUTWeapon::StartFire(FireModeNum);
+	NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
+		AUTWeapon::StartFire(FireModeNum);
 }
 
 void AUTWeap_LinkGun_NCP::StopFire(uint8 FireModeNum)
 {
-	AUTWeapon::StopFire(FireModeNum);
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, false);
+	NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
+		AUTWeapon::StopFire(FireModeNum);
 }
 
 bool AUTWeap_LinkGun_NCP::PutDown()
 {
 	// StartFire bypasses AUTWeaponFix, so its private held-input bookkeeping is
 	// intentionally unset. Use stock PutDown to preserve stock hold-through-swap.
+	NCFireDiagnostics::Record(this, TEXT("SWITCH_ATTEMPT"), CurrentFireMode, INDEX_NONE, 0, FString(), TEXT("state"));
 	return AUTWeapon::PutDown();
 }
 
@@ -205,6 +221,7 @@ void AUTWeap_LinkGun_NCP::FireShot()
 {
 	if (!bIsInCoolDown)
 	{
+		NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
 		AUTWeapon::FireShot();
 	}
 }
@@ -234,7 +251,9 @@ AUTProjectile* AUTWeap_LinkGun_NCP::FireProjectile()
 
 AUTProjectile* AUTWeap_LinkGun_NCP::SpawnNetPredictedProjectile(TSubclassOf<AUTProjectile> ProjectileClass, FVector SpawnLocation, FRotator SpawnRotation)
 {
-	return AUTWeapon::SpawnNetPredictedProjectile(ProjectileClass, SpawnLocation, SpawnRotation);
+	AUTProjectile* Result = AUTWeapon::SpawnNetPredictedProjectile(ProjectileClass, SpawnLocation, SpawnRotation);
+    NCFireDiagnostics::Projectile(this, CurrentFireMode, Result, Result ? TEXT("ok") : TEXT("null"));
+	return Result;
 }
 
 float AUTWeap_LinkGun_NCP::GetHitValidationPredictionTime() const

@@ -16,8 +16,8 @@ class AUTGameState;
  * using your transactional networking model:
  * - Client holds button -> loads rockets locally with animations
  * - Client releases (or grace timer fires) -> commits the completed load once
- * - The 328 client intentionally retains both the stock and fixed Stop RPC families;
- *   this state makes their duplicate release notifications idempotent
+ * - 329 uses one reliable, numbered Begin/Release protocol on the launcher;
+ *   each completed load owns a volley ID and each projectile an ordinal
  *
  * Key differences from stock:
  * - NO auto-release due to desyncing (only grace timer after full load)
@@ -56,7 +56,7 @@ public:
 
     /**
      * Set before release performs any firing or state-transition side effects.
-     * It prevents the stock and fixed Stop RPC families from committing twice.
+     * It prevents repeated local/remote release notifications from committing twice.
      */
     bool bReleaseCommitted;
 
@@ -69,6 +69,10 @@ public:
 
     /** Suppresses repeated diagnostic lines from identical Stop retries. */
     bool bDuplicateReleaseLogged;
+
+    /** A queued next Begin must not inherit cleanup from the previous state cycle. */
+    uint32 StateVolleyId = 0;
+    uint32 StateVolleyEpoch = 0;
 
     // === TIMER HANDLES ===
 

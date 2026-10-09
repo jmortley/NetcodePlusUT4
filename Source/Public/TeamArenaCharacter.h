@@ -16,11 +16,12 @@ class UTeamArenaCharacterMovement;
 class ACTFStatsReplicator;
 class AClutchRoundState;
 class AUTWeaponFix;
+class AUTPlayerController;
 class UUTWeaponSkin;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class USkeletalMeshComponent;
-
+struct FNCRemoteAnimationUROState;
 /** Server-only companion to AUTCharacter::SavedPositions. Stock rewind history
  *  records location but not capsule posture, so a slide that ends before hit
  *  validation cannot otherwise be reconstructed safely. */
@@ -52,8 +53,16 @@ class NETCODEPLUS_API ATeamArenaCharacter : public AUTCharacter
 
 public:
     ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer);
+    virtual ~ATeamArenaCharacter();
+
+	/** Client presentation only; called before movement can tick the body pose. */
+	void UpdateRemoteAnimationUROBeforeMovement();
+	void ReleaseRemoteAnimationURO(bool bTeardown = false);
 
     virtual void BecomeViewTarget(APlayerController* PC) override;
+	virtual void BehindViewChange(APlayerController* PC, bool bNowBehindView) override;
+	/** Client HUD only: opt-in hiding of the teammate overhead beacon (see NCPlusDisplaySettings). */
+	virtual void PostRenderFor(APlayerController* PC, UCanvas* Canvas, FVector CameraPosition, FVector CameraDir) override;
 	// The material to use for the overlay (Assign M_ShieldBelt_Overlay here in BP)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawn Protection")
 	UMaterialInterface* SpawnProtectionMaterial;
@@ -71,6 +80,7 @@ public:
 
 	virtual void Tick(float DeltaTime) override;
 	virtual void PossessedBy(AController* NewController) override;
+	virtual void PawnClientRestart() override;
 	virtual bool AddInventory(AUTInventory* InvToAdd, bool bAutoActivate) override;
 	virtual void SetSkinForWeapon(UUTWeaponSkin* WeaponSkin) override;
 	virtual void UpdateWeaponSkinPrefFromProfile(AUTWeapon* Weapon) override;
@@ -80,6 +90,7 @@ public:
 	virtual void UpdateHolsteredWeaponAttachment() override;
 	virtual void UpdateWeaponSkin() override;
 	virtual void UpdateSkin() override;
+	virtual void UpdateCharOverlays() override;
 	void SubmitConfiguredWeaponSkin(AUTWeaponFix* Weapon, bool bForce);
 
 	/** Submit the local F5 choice for an owned weapon. Empty SkinPath is Default. */
@@ -112,12 +123,16 @@ public:
 	/** Record capsule posture beside stock position history on authority. */
 	virtual void PositionUpdated(bool bShotSpawned) override;
 
+	/** Observe stock delayed-origin selection without changing its result. */
+	virtual FVector GetDelayedShotPosition() override;
+
 	/** Resolve a bracketed, non-teleport capsule posture at PredictionTime.
 	 *  Returns false when history cannot prove one posture across the sample. */
 	bool GetRewindCapsulePosture(float PredictionTime, float& OutHalfHeight,
 		bool& bOutFloorSliding, float& OutSlideElapsed) const;
 	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	virtual FVector GetHeadLocation(float PredictionTime = 0.f)  override;
 
@@ -137,6 +152,27 @@ public:
 
 
 protected:
+	/** One bounded recovery after local possession, using stock's current held-input flags. */
+	void RetrySpawnHeldFire();
+	void CancelSpawnHeldFire();
+	TWeakObjectPtr<AUTPlayerController> SpawnHeldFireController;
+	TWeakObjectPtr<UWorld> SpawnHeldFireWorld;
+	TWeakObjectPtr<AUTWeapon> SpawnHeldFireWeapon;
+	bool bSpawnHeldFireWeaponBound = false;
+	FTimerHandle SpawnHeldFireHandle;
+	double SpawnHeldFireDeadline = 0.0;
+
+	// Generated constructors can instantiate member cleanup without seeing the
+	// private state definition. Keep the actual delete in the implementation file.
+	struct NETCODEPLUS_API FRemoteAnimationURODeleter
+	{
+		void operator()(FNCRemoteAnimationUROState* State) const;
+	};
+
+	// Allocated only when the experimental client animation policy is enabled.
+	TUniquePtr<FNCRemoteAnimationUROState, FRemoteAnimationURODeleter> RemoteAnimationUROState;
+	uint64 LastRemoteAnimationUROFrame = ~uint64(0);
+
 	/** Kept to the same age horizon as stock SavedPositions; authority only. */
 	TArray<FNCSavedCapsulePosture> SavedCapsulePostures;
 
@@ -236,6 +272,10 @@ public:
 	virtual void SetArmorAmount(class AUTArmor* InArmorType, int32 Amount) override;
 	virtual void RemoveArmor(int32 Amount) override;
 	virtual void ServerDropArmor_Implementation() override;
+	/** Restore regular armor only while a live authority pawn already has armor.
+	 *  Total is capped at min(MaxArmor, 100); existing belt points and helmet
+	 *  charge are preserved. Returns actual points restored, never a pickup grant. */
+	int32 RestoreRegularArmor(int32 Amount, int32 MaxArmor);
 
 	// Helmet: an Armor_Small pickup grants exactly ONE headshot block (UT3-style
 	// ding + BlockedHeadshotDamage), consumed on use. Config-gated by
@@ -288,6 +328,7 @@ public:
 	// Client-side render override: force every OTHER player to a chosen AUTCharacterContent
 	// + team-recolour, driven by the local NCPlusForceModels config. Fires on spawn /
 	// team-change (both route through NotifyTeamChanged) and is a no-op on a dedicated server.
+	// Four-team matches also tint the natural model with the absolute team palette when forcing is off.
 	virtual void NotifyTeamChanged() override;
 	/** Keep stock outline recreation out of ApplyCharacterData's body-mesh reregister window. */
 	virtual void ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data) override;
@@ -305,10 +346,10 @@ public:
 	virtual void SetEyewearClass(TSubclassOf<AUTEyewear> EyewearClass) override;
 	virtual void LeaderHatStatusChanged_Implementation() override;
 
-	// Force Models "DarkenBodies": on death, hide the corpse after a short delay (so the death/ragdoll
-	// effects are still visible briefly). Client-side (PlayDying runs per-client), gated by bEnabled +
-	// bDarkenBodies.
+	/** Apply the local ragdoll visibility settings and schedule safe hidden-corpse cleanup. */
 	virtual void PlayDying() override;
+	/** Optional local suppression of death and corpse-collision blood decals. */
+	virtual void SpawnBloodDecal(const FVector& TraceStart, const FVector& TraceDir) override;
 	/** Clear client-local outline duplicates before stock teardown destroys the weapon attachment.
 	 *  Prematch lineup pawns are destroyed alive, so they never pass through PlayDying(). */
 	virtual void Destroyed() override;
@@ -400,13 +441,25 @@ protected:
 	 *  when transitioning back to false. Called from ApplyForcedModel. */
 	void UpdateCosmeticStrip(bool bShouldStrip);
 
-	/** DarkenBodies: on death, schedule the corpse to hide after a short delay (lets death/ragdoll effects
-	 *  play first). Gated by bEnabled + bDarkenBodies. Called from PlayDying (client-side). */
+	/** Schedule corpse hiding from Show Ragdoll, Darken Bodies and the iCTF Ragdoll Time settings. */
 	void SpawnSkeletonDissolve();
 	/** Permanently retire this pawn's client-local body and weapon CustomDepth render state. */
 	void ClearLocalOutlineRenderState();
 	/** Timer callback for SpawnSkeletonDissolve — hides the corpse mesh once the delay elapses. */
 	void HideDeadBody();
+	/** Retire hidden online-client corpses once local cameras, carried objects and death audio allow it. */
+	void CleanupHiddenCorpse();
+	FTimerHandle HiddenCorpseCleanupHandle;
+
+	/** Client-local AMP hum, driven by the stock replicated weapon-overlay bits. */
+	void UpdateAmpAmbientSound();
+	void StopAmpAmbientSound();
+	UPROPERTY(Transient)
+	UAudioComponent* AmpAmbientSoundComp = nullptr;
+	UPROPERTY(Transient)
+	USoundBase* AmpAmbientLoopSound = nullptr;
+	TWeakObjectPtr<UMaterialInterface> CachedAmpOverlayMaterial;
+	float NextAmpAmbientRetryTime = 0.f;
 
 	// ── Own footstep volume (iCTF) ──
 	/** Reimplemented own-footstep play honouring OwnFootstepVolumeScale (UTPlaySound has no volume arg). */

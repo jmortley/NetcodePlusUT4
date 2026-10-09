@@ -1877,6 +1877,8 @@ void ANCPlusCTFGameMode::CommitUsedSpawn(AController* Player, APlayerStart* Used
 	Recent.ThirdLast = Recent.SecondLast;
 	Recent.SecondLast = Recent.Last;
 	Recent.Last = UsedStart;
+	Recent.LastLocation = UsedStart->GetActorLocation();
+	Recent.bHasLastLocation = true;
 	SpawnLastUsedTime.Add(UsedStart, GetWorld()->GetTimeSeconds());
 
 	if (!bSpawnUseNewCTFSelection)
@@ -2265,13 +2267,14 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		return Best;
 	}
 
-	if (bLogSpawnChoices)
-	{
-		const AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
-		UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF pick: %s -> stock | system=newctf primary=none secondary=none"),
-			PS ? *PS->PlayerName : TEXT("?"));
-	}
-	return ChooseEpicPlayerStart(Player);
+	// No usable team pool/context: do not silently bypass the NewCTF filters.
+	// Small games and the explicit legacy selector return above, unchanged.
+	AActor* StockStart = ChooseEpicPlayerStart(Player);
+	const AUTPlayerState* PS = Cast<AUTPlayerState>(Player->PlayerState);
+	UE_LOG(LogGameMode, Warning,
+		TEXT("NCPlusCTF spawn emergency: %s -> %s | system=stock reason=no-usable-team-pool previousProtection=unavailable"),
+		PS ? *PS->PlayerName : TEXT("?"), StockStart ? *StockStart->GetName() : TEXT("none"));
+	return StockStart;
 }
 
 APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
@@ -2303,6 +2306,76 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 
 	const int32 CycleExcluded = FMath::Clamp(SpawnMinCycleDistance, 0, FMath::Max(0, Pool.Num() - 1));
 	const int32 EligibleCount = Pool.Num() - CycleExcluded;
+
+	// Team rotation alone only protects the team's most recent starts. A
+	// teammate spawning elsewhere must not unlock this player's previous spot.
+	// 100 uu (one metre) catches duplicate/near-duplicate actors without banning
+	// separate floors just because their XY coordinates match.
+	const float PreviousSpawnRadius = 100.f;
+	const FRecentSpawns* Recent = PlayerRecentSpawns.Find(TWeakObjectPtr<AController>(Player));
+	auto IsPreviousSpawn = [Recent, PreviousSpawnRadius](APlayerStart* Candidate) -> bool
+	{
+		return Recent && (Recent->Last.Get() == Candidate
+			|| (Recent->bHasLastLocation
+				&& (Candidate->GetActorLocation() - Recent->LastLocation).SizeSquared()
+					<= FMath::Square(PreviousSpawnRadius)));
+	};
+
+	TArray<APlayerStart*> Candidates;
+	int32 PreviousExcluded = 0;
+	for (int32 Index = 0; Index < EligibleCount; ++Index)
+	{
+		APlayerStart* Candidate = Pool[Index].Get();
+		if (IsPreviousSpawn(Candidate))
+		{
+			++PreviousExcluded;
+		}
+		else
+		{
+			Candidates.Add(Candidate);
+		}
+	}
+
+	bool bRelaxedTeamCycle = false;
+	bool bRelaxedPreviousSpawn = false;
+	if (Candidates.Num() == 0)
+	{
+		// Prefer a different spot in the recent team tail over repeating this
+		// player's spot. Primary/secondary still operate on the same filtered set.
+		for (int32 Index = EligibleCount; Index < Pool.Num(); ++Index)
+		{
+			APlayerStart* Candidate = Pool[Index].Get();
+			if (!IsPreviousSpawn(Candidate))
+			{
+				Candidates.Add(Candidate);
+			}
+		}
+		bRelaxedTeamCycle = Candidates.Num() > 0;
+	}
+	if (Candidates.Num() == 0)
+	{
+		// Every authored team start is this player's previous location. A one-
+		// location map must still spawn players; make this last resort visible.
+		bRelaxedPreviousSpawn = true;
+		for (int32 Index = 0; Index < EligibleCount; ++Index)
+		{
+			Candidates.Add(Pool[Index].Get());
+		}
+	}
+	auto LogEmergencySpawn = [&](APlayerStart* Selected, const TCHAR* System)
+	{
+		if (bRelaxedTeamCycle || bRelaxedPreviousSpawn)
+		{
+			UE_LOG(LogGameMode, Warning,
+				TEXT("NCPlusCTF spawn emergency: %s(T%d) -> %s | system=%s reason=%s previousRelaxed=%s cycleRelaxed=%s last=%s lastLocation=%s chosenLocation=%s radius=%.0f"),
+				*SpawnPS->PlayerName, TeamIndex, *Selected->GetName(), System,
+				bRelaxedPreviousSpawn ? TEXT("no-distinct-team-start") : TEXT("team-cycle-exhausted"),
+				bRelaxedPreviousSpawn ? TEXT("true") : TEXT("false"), bRelaxedTeamCycle ? TEXT("true") : TEXT("false"),
+				Recent && Recent->Last.IsValid() ? *Recent->Last->GetName() : TEXT("expired"),
+				Recent && Recent->bHasLastLocation ? *Recent->LastLocation.ToString() : TEXT("unknown"),
+				*Selected->GetActorLocation().ToString(), PreviousSpawnRadius);
+		}
+	};
 
 	struct FSpawnParticipant
 	{
@@ -2423,9 +2496,9 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 	int32 RobbedBlocked = 0;
 	APlayerStart* Primary = nullptr;
 
-	for (int32 Index = 0; Index < EligibleCount && !Primary; ++Index)
+	for (int32 Index = 0; Index < Candidates.Num() && !Primary; ++Index)
 	{
-		APlayerStart* Candidate = Pool[Index].Get();
+		APlayerStart* Candidate = Candidates[Index];
 		if (!Candidate)
 		{
 			continue;
@@ -2534,44 +2607,45 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 		if (bLogSpawnChoices)
 		{
 			UE_LOG(LogGameMode, Warning,
-				TEXT("NCPlusCTF pick: %s(T%d) -> %s | system=primary cycle=%d/%d blocked=evis:%d enemy:%d fvis:%d friend:%d carrier:%d flag:%d killer:%d robbed:%d"),
+				TEXT("NCPlusCTF pick: %s(T%d) -> %s | system=primary cycle=%d/%d blocked=evis:%d enemy:%d fvis:%d friend:%d carrier:%d flag:%d killer:%d robbed:%d previousExcluded=%d"),
 				*SpawnPS->PlayerName, TeamIndex, *Primary->GetName(), CycleExcluded, Pool.Num(),
 				EnemyVisionBlocked, EnemyRangeBlocked, FriendlyVisionBlocked, FriendlyRangeBlocked,
-				CarrierBlocked, FlagBlocked, KillerBlocked, RobbedBlocked);
+				CarrierBlocked, FlagBlocked, KillerBlocked, RobbedBlocked, PreviousExcluded);
 		}
+		LogEmergencySpawn(Primary, TEXT("primary"));
 		return Primary;
-	}
-
-	if (!bSpawnSecondaryEnabled)
-	{
-		return nullptr;
 	}
 
 	APlayerStart* Secondary = nullptr;
 	float BestDistanceSum = -FLT_MAX;
-	for (int32 Index = 0; Index < EligibleCount; ++Index)
+	for (int32 Index = 0; Index < Candidates.Num(); ++Index)
 	{
-		APlayerStart* Candidate = Pool[Index].Get();
+		APlayerStart* Candidate = Candidates[Index];
 		if (!Candidate)
 		{
 			continue;
 		}
 
-		float DistanceSum = 0.f;
-		for (const FSpawnParticipant& Other : Participants)
+		// Secondary-off retains stock scoring, but not the stock picker's
+		// unfiltered/cached choices, which could silently return the last spot.
+		float DistanceSum = bSpawnSecondaryEnabled ? 0.f : Super::RatePlayerStart(Candidate, Player);
+		if (bSpawnSecondaryEnabled)
 		{
-			float Distance = FMath::Min(
-				(Candidate->GetActorLocation() - Other.PredictedEye).Size(),
-				SpawnSecondaryMaxDistance);
-			if (Other.TeamNum == uint8(TeamIndex))
+			for (const FSpawnParticipant& Other : Participants)
 			{
-				Distance *= SpawnSecondaryOwnTeamWeight;
+				float Distance = FMath::Min(
+					(Candidate->GetActorLocation() - Other.PredictedEye).Size(),
+					SpawnSecondaryMaxDistance);
+				if (Other.TeamNum == uint8(TeamIndex))
+				{
+					Distance *= SpawnSecondaryOwnTeamWeight;
+				}
+				else if (Other.bFlagCarrier)
+				{
+					Distance *= SpawnSecondaryCarrierWeight;
+				}
+				DistanceSum += Distance;
 			}
-			else if (Other.bFlagCarrier)
-			{
-				Distance *= SpawnSecondaryCarrierWeight;
-			}
-			DistanceSum += Distance;
 		}
 
 		if (!Secondary || DistanceSum > BestDistanceSum)
@@ -2581,13 +2655,18 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 		}
 	}
 
-	if (Secondary && bLogSpawnChoices)
+	const TCHAR* FallbackSystem = bSpawnSecondaryEnabled ? TEXT("secondary") : TEXT("stock-rating");
+	if (Secondary)
 	{
-		UE_LOG(LogGameMode, Warning,
-			TEXT("NCPlusCTF pick: %s(T%d) -> %s | system=secondary weight=%.0f cycle=%d/%d primaryBlocked=evis:%d enemy:%d fvis:%d friend:%d carrier:%d flag:%d killer:%d robbed:%d"),
-			*SpawnPS->PlayerName, TeamIndex, *Secondary->GetName(), BestDistanceSum, CycleExcluded, Pool.Num(),
-			EnemyVisionBlocked, EnemyRangeBlocked, FriendlyVisionBlocked, FriendlyRangeBlocked,
-			CarrierBlocked, FlagBlocked, KillerBlocked, RobbedBlocked);
+		if (bLogSpawnChoices)
+		{
+			UE_LOG(LogGameMode, Warning,
+				TEXT("NCPlusCTF pick: %s(T%d) -> %s | system=%s weight=%.0f cycle=%d/%d primaryBlocked=evis:%d enemy:%d fvis:%d friend:%d carrier:%d flag:%d killer:%d robbed:%d previousExcluded=%d"),
+				*SpawnPS->PlayerName, TeamIndex, *Secondary->GetName(), FallbackSystem, BestDistanceSum, CycleExcluded, Pool.Num(),
+				EnemyVisionBlocked, EnemyRangeBlocked, FriendlyVisionBlocked, FriendlyRangeBlocked,
+				CarrierBlocked, FlagBlocked, KillerBlocked, RobbedBlocked, PreviousExcluded);
+		}
+		LogEmergencySpawn(Secondary, FallbackSystem);
 	}
 	return Secondary;
 }
@@ -3968,6 +4047,10 @@ void ANCPlusCTFGameMode::CreateGameURLOptions(TArray<TSharedPtr<TAttributeProper
 
 bool ANCPlusCTFGameMode::AllowPausing(APlayerController* PC)
 {
+	if (NCPlusHostPause::IsStandaloneMenuPause(PC, this))
+	{
+		return false;
+	}
 	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
 	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
 	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.

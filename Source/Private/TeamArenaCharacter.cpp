@@ -1,5 +1,7 @@
 // TeamArenaCharacter.cpp
 #include "TeamArenaCharacter.h"
+#include "NCFireAnchor.h"
+#include "NCShotOriginDiagnostics.h"
 #include "UTCharacterMovement.h"
 #include "TeamArenaCharacterMovement.h"
 #include "UTWeaponAttachment.h"
@@ -13,6 +15,7 @@
 #include "UTGameState.h"
 #include "UTGameMode.h"
 #include "UTCTFBaseGame.h"
+#include "NCPlusXTDMGameMode.h"
 #include "UTWeap_LinkGun.h"
 #include "UTWeap_LightningRifle.h"
 #include "UTArmor.h"
@@ -28,6 +31,7 @@
 #include "NCPlusForceModels.h"
 #include "NCPlusPerformanceSettings.h"
 #include "NCPlusICTFAudioSettings.h"
+#include "NCPlusDisplaySettings.h"
 #include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
 #include "CoreGlobals.h"             // GFrameCounter (per-world local-view cache)
 #include "HAL/PlatformTime.h"        // monotonic overlay-visibility deadline
@@ -38,6 +42,39 @@
 #include "UTMutator.h"              // iCTF WARMUP gate: find the replicated MutInstagibNCP mutator
 #include "ClutchRoundState.h"       // Clutch defender footstep role/phase lookup
 #include "Engine/DemoNetDriver.h"   // deferred-outline warning: tag killcam/instant-replay worlds
+#include "Engine/NetConnection.h"   // wait for recorded corpse tear-off before local cleanup
+#include "Engine/LocalPlayer.h"
+#include "NCRemoteAnimationPolicy.h"
+#include "NCRemoteAnimationURO.h"
+#include "Components/AudioComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Sound/SoundBase.h"
+
+DECLARE_STATS_GROUP_VERBOSE(TEXT("NCP URO"), STATGROUP_NCPURO, STATCAT_Advanced);
+DECLARE_CYCLE_STAT(TEXT("Policy total"), STAT_NCPUROPolicy, STATGROUP_NCPURO);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Managed characters"), STAT_NCPUROManaged, STATGROUP_NCPURO);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Characters assigned half rate"), STAT_NCPUROThrottled, STATGROUP_NCPURO);
+
+static TAutoConsoleVariable<int32> CVarRemoteAnimationURO(
+	TEXT("ncp.RemoteAnimationURO"), 0,
+	TEXT("Experimental remote third-person animation optimization on online clients. ")
+	TEXT("1 = distant peripheral bodies may update every other frame above 240 FPS; 0 = restore authored settings. ")
+	TEXT("No Blueprint opt-in required. Requires a.URO.Enable 1. Default 0."), ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarAppearanceDiagnostics(
+	TEXT("ncp.AppearanceDiagnostics"), 0,
+	TEXT("Log client character/team appearance refreshes and actual content rebuilds. Default 0."), ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarHiddenCorpseCleanup(
+	TEXT("ncp.HiddenCorpseCleanup"), 1,
+	TEXT("Clean up hidden, torn-off corpses on online clients after the existing ragdoll hide delay. ")
+	TEXT("Waits for local cameras, carried objects, the queued death sound and replay recording. ")
+	TEXT("0 = retain stock corpse lifetime. Does not affect servers or replay playback. Default 1."), ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarDeathBloodDecals(
+	TEXT("ncp.DeathBloodDecals"), -1,
+	TEXT("Diagnostic override: -1 = follow F5 Show Death Blood; 0 = suppress new death/corpse blood decals; 1 = force them on. ")
+	TEXT("Does not affect living-character hit effects or existing decals. Default -1."), ECVF_Default);
 
 // Shipping clients report every ensure with a synchronous game-thread minidump, which hitches the
 // match and hard-crashes under AV hooks (328 Blitz/iCTF cap crash). Recoverable outline states must
@@ -61,6 +98,26 @@ static TAutoConsoleVariable<int32> CVarHelmetBlocksHeadshot(
 
 namespace
 {
+	void DisableWeaponOutlineShadows(AUTWeaponAttachment* Attachment)
+	{
+		if (Attachment == nullptr || Attachment->GetNetMode() == NM_DedicatedServer)
+		{
+			return;
+		}
+
+		const USkeletalMeshComponent* const DepthMesh = Attachment->GetCustomDepthMesh();
+		if (DepthMesh != nullptr && DepthMesh != Attachment->Mesh
+			&& DepthMesh->bRenderCustomDepth && !DepthMesh->bRenderInMainPass
+			&& DepthMesh->CastShadow)
+		{
+			// Unlike UT's shared outline helper, AUTWeaponAttachment duplicates Mesh3P
+			// without disabling shadows. Main-pass visibility does not gate shadow passes.
+			// UT exposes only a const getter for this mutable, actor-owned runtime copy.
+			// Keep the source mesh's shadow and the duplicate's stencil/pose untouched.
+			const_cast<USkeletalMeshComponent*>(DepthMesh)->SetCastShadow(false);
+		}
+	}
+
 	constexpr int32 ArmorPlusMaxTotal = 150;
 	constexpr int32 ArmorPlusSoftLimit = 100;
 	constexpr float ClutchDefenderFootstepVolume = 0.10f;
@@ -73,6 +130,7 @@ namespace
 		TWeakObjectPtr<APlayerCameraManager> CameraManager;
 		TWeakObjectPtr<AActor> ViewTarget;
 		FVector Location = FVector::ZeroVector;
+		NCRemoteAnimationPolicy::FView AnimationView;
 		bool bCameraCut = false;
 	};
 
@@ -82,8 +140,56 @@ namespace
 		uint64 FrameNumber = ~uint64(0);
 		uint32 Revision = 1;
 		double MonotonicTimeSeconds = 0.0;
+		double SmoothedFrameSeconds = 0.0;
+		bool bAnimationFrameRateSafe = false;
 		TArray<FOverlayViewerState, TInlineAllocator<4>> Viewers;
 	};
+
+	NCRemoteAnimationPolicy::FView MakeRemoteAnimationView(APlayerController& PC,
+		const FVector& Location, const FRotator& Rotation)
+	{
+		NCRemoteAnimationPolicy::FView View;
+		View.Location = Location;
+		View.Forward = Rotation.Vector();
+		View.bProtectAll = true;
+		const APlayerCameraManager* Camera = PC.PlayerCameraManager;
+		const ULocalPlayer* LocalPlayer = Cast<ULocalPlayer>(PC.Player);
+		if (Camera == nullptr || LocalPlayer == nullptr)
+		{
+			return View;
+		}
+		const FMinimalViewInfo& POV = Camera->CameraCache.POV;
+		const float FOV = Camera->GetFOVAngle();
+		int32 Width = 0, Height = 0;
+		PC.GetViewportSize(Width, Height);
+		const float ViewWidth = Width * LocalPlayer->Size.X;
+		const float ViewHeight = Height * LocalPlayer->Size.Y;
+		if (POV.ProjectionMode != ECameraProjectionMode::Perspective
+			|| !FMath::IsFinite(FOV) || FOV <= 0.f || FOV >= 179.f
+			|| !FMath::IsFinite(ViewWidth) || !FMath::IsFinite(ViewHeight)
+			|| ViewWidth <= 0.f || ViewHeight <= 0.f)
+		{
+			return View;
+		}
+		const float Aspect = POV.bConstrainAspectRatio ? POV.AspectRatio : ViewWidth / ViewHeight;
+		if (!FMath::IsFinite(Aspect) || Aspect <= 0.f)
+		{
+			return View;
+		}
+		const bool bMaintainX = POV.bConstrainAspectRatio
+			|| LocalPlayer->AspectRatioAxisConstraint == AspectRatio_MaintainXFOV
+			|| (LocalPlayer->AspectRatioAxisConstraint == AspectRatio_MajorAxisFOV && ViewWidth > ViewHeight);
+		View.TanHalfVerticalFOV = FMath::Tan(FMath::DegreesToRadians(FOV * 0.5f)) / (bMaintainX ? Aspect : 1.f);
+		const AUTCharacter* ViewedCharacter = Cast<AUTCharacter>(PC.GetViewTarget());
+		const AUTWeapon* ViewedWeapon = ViewedCharacter != nullptr ? ViewedCharacter->GetWeapon() : nullptr;
+		// Protect all during zoom, cuts and an unresolved large camera/aim change.
+		// Camera data can precede this frame's camera update at the movement hook.
+		View.bProtectAll = Camera->bGameCameraCutThisFrame
+			|| (ViewedWeapon != nullptr && ViewedWeapon->ZoomState != EZoomState::EZS_NotZoomed)
+			|| FOV < Camera->DefaultFOV - 1.f
+			|| FVector::DotProduct(View.Forward, PC.GetControlRotation().Vector()) < 0.9659258f;
+		return View;
+	}
 
 	double GetOverlayFrameTimeSeconds()
 	{
@@ -136,8 +242,37 @@ namespace
 
 		if (Cache->FrameNumber != GFrameCounter)
 		{
+			const double PreviousFrameTime = Cache->MonotonicTimeSeconds;
+			const bool bConsecutiveFrame = Cache->FrameNumber != ~uint64(0)
+				&& Cache->FrameNumber + 1 == GFrameCounter;
 			Cache->FrameNumber = GFrameCounter;
 			Cache->MonotonicTimeSeconds = GetOverlayFrameTimeSeconds();
+			const bool bAnimationEnabled = CVarRemoteAnimationURO.GetValueOnGameThread() > 0;
+			Cache->bAnimationFrameRateSafe = false;
+			if (bAnimationEnabled)
+			{
+				// Wall time keeps time dilation and fixed simulation steps from admitting
+				// low-FPS clients. Missing samples retain full rate until sampling resumes.
+				const double FrameSeconds = Cache->MonotonicTimeSeconds - PreviousFrameTime;
+				if (bConsecutiveFrame && NCRemoteAnimationPolicy::IsFiniteTime(FrameSeconds) && FrameSeconds > 0.0)
+				{
+					const double Alpha = FMath::Clamp(FrameSeconds / 0.25, 0.0, 1.0);
+					Cache->SmoothedFrameSeconds = Cache->SmoothedFrameSeconds > 0.0
+						? Cache->SmoothedFrameSeconds + Alpha * (FrameSeconds - Cache->SmoothedFrameSeconds)
+						: FrameSeconds;
+					const double MaxFrameSeconds = 1.0 / NCRemoteAnimationPolicy::FSettings().MinFPS;
+					Cache->bAnimationFrameRateSafe = FrameSeconds <= MaxFrameSeconds
+						&& Cache->SmoothedFrameSeconds <= MaxFrameSeconds;
+				}
+				else
+				{
+					Cache->SmoothedFrameSeconds = 0.0;
+				}
+			}
+			else
+			{
+				Cache->SmoothedFrameSeconds = 0.0;
+			}
 
 			TArray<FOverlayViewerState, TInlineAllocator<4>> NewViewers;
 			if (World != nullptr)
@@ -158,8 +293,13 @@ namespace
 						? PC->PlayerCameraManager->GetViewTarget() : PC->GetViewTarget();
 					Viewer.bCameraCut = PC->PlayerCameraManager != nullptr &&
 						PC->PlayerCameraManager->bGameCameraCutThisFrame;
-					FRotator UnusedViewRotation;
-					PC->GetPlayerViewPoint(Viewer.Location, UnusedViewRotation);
+					FRotator ViewRotation;
+					PC->GetPlayerViewPoint(Viewer.Location, ViewRotation);
+					Viewer.AnimationView.bProtectAll = true;
+					if (bAnimationEnabled)
+					{
+						Viewer.AnimationView = MakeRemoteAnimationView(*PC, Viewer.Location, ViewRotation);
+					}
 				}
 			}
 
@@ -276,6 +416,100 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
     //LastPositionSaveTime = 0.0f;
 }
 
+ATeamArenaCharacter::~ATeamArenaCharacter() = default;
+
+void ATeamArenaCharacter::FRemoteAnimationURODeleter::operator()(FNCRemoteAnimationUROState* State) const
+{
+	delete State;
+}
+
+void ATeamArenaCharacter::UpdateRemoteAnimationUROBeforeMovement()
+{
+	const bool bRequested = CVarRemoteAnimationURO.GetValueOnGameThread() > 0;
+	if (!bRequested && !RemoteAnimationUROState)
+	{
+		return;
+	}
+	SCOPE_CYCLE_COUNTER(STAT_NCPUROPolicy);
+	if (LastRemoteAnimationUROFrame == GFrameCounter)
+	{
+		return;
+	}
+	LastRemoteAnimationUROFrame = GFrameCounter;
+	UWorld* World = GetWorld();
+	const bool bEnabled = bRequested && World != nullptr && GetNetMode() == NM_Client
+		&& World->DemoNetDriver == nullptr && Role == ROLE_SimulatedProxy && !IsLocallyControlled();
+	if (!bEnabled && !RemoteAnimationUROState)
+	{
+		return;
+	}
+	if (!RemoteAnimationUROState)
+	{
+		RemoteAnimationUROState.Reset(new FNCRemoteAnimationUROState());
+	}
+	const NCRemoteAnimationPolicy::FSettings Settings;
+	bool bCandidate = false;
+	uint32 ViewRevision = 0;
+	double Now = GetOverlayFrameTimeSeconds();
+	if (bEnabled)
+	{
+		const FOverlayWorldViewCache& Views = GetOverlayWorldViewCache(World);
+		Now = Views.MonotonicTimeSeconds;
+		ViewRevision = Views.Revision;
+		const USkeletalMeshComponent* Body = GetMesh();
+		bCandidate = Body != nullptr && Views.bAnimationFrameRateSafe && Views.Viewers.Num() > 0;
+		if (bCandidate)
+		{
+			for (const FOverlayViewerState& Viewer : Views.Viewers)
+			{
+				if (Viewer.ViewTarget.Get() == this
+					|| (Viewer.Controller.IsValid() && Viewer.Controller->GetPawn() == this)
+					|| NCRemoteAnimationPolicy::IsHighPriorityForView(
+						Body->Bounds.Origin, Body->Bounds.SphereRadius, Viewer.AnimationView, Settings))
+				{
+					bCandidate = false;
+					break;
+				}
+			}
+		}
+	}
+	RemoteAnimationUROState->Update(*this, bEnabled, bCandidate, Now, ViewRevision, Settings.DemotionDelay);
+	if (RemoteAnimationUROState->IsManaged())
+	{
+		INC_DWORD_STAT(STAT_NCPUROManaged);
+		if (RemoteAnimationUROState->IsThrottled())
+		{
+			INC_DWORD_STAT(STAT_NCPUROThrottled);
+		}
+	}
+	else if (!bRequested)
+	{
+		RemoteAnimationUROState.Reset();
+	}
+}
+
+void ATeamArenaCharacter::ReleaseRemoteAnimationURO(bool bTeardown)
+{
+	if (RemoteAnimationUROState)
+	{
+		SCOPE_CYCLE_COUNTER(STAT_NCPUROPolicy);
+		RemoteAnimationUROState->Release(*this, bTeardown);
+		if (bTeardown || (!RemoteAnimationUROState->IsManaged()
+			&& CVarRemoteAnimationURO.GetValueOnGameThread() <= 0))
+		{
+			RemoteAnimationUROState.Reset();
+		}
+	}
+}
+
+void ATeamArenaCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	CancelSpawnHeldFire();
+	StopAmpAmbientSound();
+	ReleaseRemoteAnimationURO(true);
+	Super::EndPlay(EndPlayReason);
+}
+
 // ── Force Models (MutForceModels port, phase 1) ─────────────────────────────
 // One override covers every apply trigger — spawn (PossessedBy) and team-change
 // (OnRep_PlayerState / Team / SelectedCharacter OnRep) all route through the base
@@ -284,6 +518,11 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
 // the pawn dirty and re-assert the forced model once on the next Tick (FlushForcedModelUpdate).
 void ATeamArenaCharacter::NotifyTeamChanged()
 {
+	if (CVarAppearanceDiagnostics.GetValueOnGameThread() != 0 && GetNetMode() != NM_DedicatedServer)
+	{
+		UE_LOG(LogTemp, Log, TEXT("NCP appearance team: frame=%llu pawn=%s team=%d dirty=%d"),
+			(uint64)GFrameCounter, *GetName(), int32(GetTeamNum()), bForcedModelDirty ? 1 : 0);
+	}
 	if (GetNetMode() != NM_DedicatedServer)
 	{
 		// Super may rebuild the armour overlay through our UpdateArmorOverlay override.
@@ -317,6 +556,14 @@ void ATeamArenaCharacter::NotifyTeamChanged()
 
 void ATeamArenaCharacter::ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data)
 {
+	if (CVarAppearanceDiagnostics.GetValueOnGameThread() != 0 && GetNetMode() != NM_DedicatedServer)
+	{
+		UE_LOG(LogTemp, Log, TEXT("NCP appearance content: frame=%llu pawn=%s from=%s to=%s rebuild=%d forced=%d"),
+			(uint64)GFrameCounter, *GetName(), *GetNameSafe(CharacterData.Get()), *GetNameSafe(Data.Get()),
+			bAllowCharacterDataOverride ? 1 : 0, bApplyingForcedModel ? 1 : 0);
+	}
+	// A new animation instance must not inherit time owed by the previous pose.
+	ReleaseRemoteAnimationURO(true);
 	if (GetNetMode() == NM_DedicatedServer)
 	{
 		Super::ApplyCharacterData(Data);
@@ -337,6 +584,13 @@ void ATeamArenaCharacter::ApplyCharacterData(TSubclassOf<AUTCharacterContent> Da
 	{
 		bDeferredOutlineUpdatePending = true;
 	}
+	// A model change can rebuild MIDs without NotifyTeamChanged. Reuse the existing one-shot
+	// dirty flush, but do not recursively dirty a forced-model apply that is already painting them.
+	if (!bApplyingForcedModel && NCPlusForceModels::IsFourTeamGame(GetWorld()))
+	{
+		bForcedModelDirty = true;
+		bForcedArmourOverlayDirty = true;
+	}
 }
 
 void ATeamArenaCharacter::UpdateOutline()
@@ -346,7 +600,12 @@ void ATeamArenaCharacter::UpdateOutline()
 	// body duplicate during the unsafe window; the flush reads the latest outline state.
 	if (!bDeferredOutlineUpdatePending)
 	{
+		if (IsOutlined() && (CustomDepthMesh == nullptr || !CustomDepthMesh->IsRegistered()))
+		{
+			ReleaseRemoteAnimationURO(true);
+		}
 		Super::UpdateOutline();
+		DisableWeaponOutlineShadows(WeaponAttachment);
 	}
 }
 
@@ -372,6 +631,8 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 	// critical parent invariant before stock gets the opportunity to call RegisterComponent().
 	if (IsOutlined() && CustomDepthMesh == nullptr)
 	{
+		// DuplicateObject must not copy our temporary body opt-in to the outline.
+		ReleaseRemoteAnimationURO(true);
 		CustomDepthMesh = DuplicateObject<USkeletalMeshComponent>(BodyMesh, this);
 		if (CustomDepthMesh == nullptr)
 		{
@@ -442,7 +703,12 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 		return;
 	}
 
+	if (IsOutlined() && (CustomDepthMesh == nullptr || !CustomDepthMesh->IsRegistered()))
+	{
+		ReleaseRemoteAnimationURO(true);
+	}
 	Super::UpdateOutline();
+	DisableWeaponOutlineShadows(WeaponAttachment);
 }
 
 // Apply the coalesced forced-model work, at most once per frame. Called from the top of Tick on clients,
@@ -492,6 +758,8 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	UWorld* const World = GetWorld();
 
 	// ── Resolve desired state: the model class + colour to force, or "none" = leave natural. ──
+	const int32 MyTeam = (int32)GetTeamNum();
+	const bool bFourTeamPalette = NCPlusForceModels::IsFourTeamGame(World) && MyTeam >= 0 && MyTeam < 4;
 	TSubclassOf<AUTCharacterContent> Content = nullptr;
 	FLinearColor Colour = FLinearColor::White;
 	float        GlowIntensity = 0.f;          // subtle-highlight emissive strength, from Brightness
@@ -500,7 +768,6 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 
 	if (NCPlusForceModels::IsEnabled())
 	{
-		const int32 MyTeam = (int32)GetTeamNum();
 		if (MyTeam != 255)                                // FFA / no team: deferred (see ForceModels plan)
 		{
 			// Resolve friend/enemy against THE LOCAL VIEWER's team. NCPlusForceModels::GetViewerTeam
@@ -509,7 +776,7 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			// false for a spectator, which made everyone read as an enemy).
 			const bool bIsFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(World));
 
-			const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
+			const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly, World);
 			Content = NCPlusForceModels::GetModelClass(Side);
 			const bool bModelOK = Content && NCPlusForceModels::IsModelAllowed(Content);
 			// A side is active when it forces a model OR opts into tint-only (the F5
@@ -544,6 +811,39 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			if (!bModelOK)
 			{
 				Content = nullptr;   // tint-only: never a mesh-swap target (also keeps the dirty latch honest)
+			}
+		}
+	}
+	if (bFourTeamPalette && !bWantTint)
+	{
+		// Stock body materials generally select only red/blue/neutral. Four-team identity must remain
+		// visible with Force Models disabled too; this is colour-only and never changes the pawn class.
+		Colour = NCPlusForceModels::GetFourTeamColour(MyTeam);
+		bWantTint = true;
+	}
+	if (bFourTeamPalette && !bColourOnly)
+	{
+		// Resolve against the desired content before the latch. Checking the currently forced mesh
+		// would alternate between an unsupported selection and its fallback on every refresh.
+		const AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState);
+		const TSubclassOf<AUTCharacterContent> NaturalContent = PS && PS->GetSelectedCharacter()
+			? PS->GetSelectedCharacter() : GetClass()->GetDefaultObject<AUTCharacter>()->CharacterData;
+		const TSubclassOf<AUTCharacterContent> DesiredContent = bWantForce ? Content : NaturalContent;
+		if (!NCPlusForceModels::CanTintBodyContent(DesiredContent))
+		{
+			// AUTCharacter hard-references stock Malcolm_New in its constructor. Reuse that already
+			// required cooked content, with no new package dependency. Leave the local player's model
+			// and first-person arms intact; every other viewer resolves this body independently.
+			const TSubclassOf<AUTCharacterContent> Fallback = GetDefault<AUTCharacter>()->CharacterData;
+			if (NCPlusForceModels::CanTintBodyContent(Fallback))
+			{
+				Content = Fallback;
+				bWantForce = true;
+			}
+			else if (CVarAppearanceDiagnostics.GetValueOnGameThread() != 0)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("NCP appearance: no tintable four-team fallback for %s (%s)."),
+					*GetName(), *GetNameSafe(DesiredContent.Get()));
 			}
 		}
 	}
@@ -600,7 +900,9 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// stock ApplyCharacterData early-returns unless bAllowCharacterDataOverride is true.
 	// Own pawn (bColourOnly) and tint-only sides (no model picked): skip the mesh swap —
 	// keep the real model and its existing BodyMIs, tint only.
-	if (bWantForce && !bColourOnly)
+	// In four-team mode an unchanged content class needs only material writes. Rebuilding it here
+	// would restart its animation when brightness changes or a tint-only dirty flush repeats.
+	if (bWantForce && !bColourOnly && (!bFourTeamPalette || CharacterData.Get() != Content.Get()))
 	{
 		bAllowCharacterDataOverride = true;
 		ApplyCharacterData(Content);
@@ -612,7 +914,8 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	static const FName NAME_EmissionPower(TEXT("Emission Power"));
 	static const FName NAME_GenghisBrightMesh(TEXT("ghengis_3p_bright"));
 	static const FName NAME_LiandriRobotBrightMesh(TEXT("robot_3p_bright"));
-	const TArray<FName>& Params = NCPlusForceModels::TeamColourParamNames();
+	// A personal narrow parameter list must not accidentally erase green/yellow team identity.
+	const TArray<FName>& Params = NCPlusForceModels::TeamColourParamNames(!bFourTeamPalette);
 	// These two curated content classes use dedicated *_bright meshes whose static material instances
 	// deliberately author HDR team-colour values (2.5). The generic recolour pass used to replace those
 	// values with the raw F5 colour and silently throw away the very compensation the bright variants
@@ -622,6 +925,18 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	const bool bPreserveBrightVariantTint = ActiveBodyMesh
 		&& (ActiveBodyMesh->GetFName() == NAME_GenghisBrightMesh
 			|| ActiveBodyMesh->GetFName() == NAME_LiandriRobotBrightMesh);
+	// First-person arms have their own MIDs. Include them only for four-team palette compatibility;
+	// ordinary force-model behavior continues to use exactly the existing body material list.
+	TArray<UMaterialInstanceDynamic*> FourTeamMaterials;
+	if (bFourTeamPalette)
+	{
+		FourTeamMaterials = GetBodyMIs();
+		for (UMaterialInstanceDynamic* MID : FirstPersonMeshMIDs)
+		{
+			if (MID) { FourTeamMaterials.AddUnique(MID); }
+		}
+	}
+	const TArray<UMaterialInstanceDynamic*>& TintMaterials = bFourTeamPalette ? FourTeamMaterials : GetBodyMIs();
 
 	// Decide ONCE whether this model can be recoloured. It can't if either (a) no non-skipped body
 	// material exposes any of our team-colour params (param-less models, e.g. Garog — auto-detected),
@@ -629,12 +944,12 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// indistinguishable at runtime, e.g. the community Robot). Non-recolourable models fall back to
 	// their baked red/blue team skin below, so they stay team-readable instead of a flat default colour.
 	bool bHasParam = false, bDenylisted = false;
-	for (UMaterialInstanceDynamic* MID : GetBodyMIs())
+	for (UMaterialInstanceDynamic* MID : TintMaterials)
 	{
 		if (!MID) { continue; }
 		const UMaterialInterface* Src = MID->Parent;
 		const FString MatName = Src ? Src->GetName() : MID->GetName();
-		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName)) { continue; }
+		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName, !bFourTeamPalette)) { continue; }
 		if (NCPlusForceModels::IsBakedMaterial(MatName)) { bDenylisted = true; }
 		if (!bHasParam)
 		{
@@ -661,15 +976,27 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// UT character materials are three-way (TeamSelect 0=Red, 1=Blue, 255=NoTeam). Recolour forces the
 	// neutral NoTeam path then tints it (the Red/Blue paths are the model's baked team skins, which a
 	// colour param only accents); the fallback instead selects a baked team skin directly.
-	for (UMaterialInstanceDynamic* MID : GetBodyMIs())
+	for (UMaterialInstanceDynamic* MID : TintMaterials)
 	{
 		if (!MID) { continue; }
 		const UMaterialInterface* Src = MID->Parent;
 		const FString MatName = Src ? Src->GetName() : MID->GetName();
-		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName))
+		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName, !bFourTeamPalette))
 		{
 			// Face/eyes/hair: leave UNTOUCHED so they keep the model's own team tint.
 			continue;
+		}
+		bool bCanRecolourMaterial = bRecolour;
+		if (bFourTeamPalette && !bDenylisted)
+		{
+			// First-person and third-person meshes can have different material capabilities. A tintable
+			// arm material must not make a parameterless body take the red branch accidentally.
+			bCanRecolourMaterial = false;
+			FLinearColor UnusedColour;
+			for (const FName& P : Params)
+			{
+				if (MID->GetVectorParameterValue(P, UnusedColour)) { bCanRecolourMaterial = true; break; }
+			}
 		}
 
 		if (bOutlineMode)
@@ -687,9 +1014,9 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			continue;
 		}
 
-		if (!bRecolour)
+		if (!bCanRecolourMaterial)
 		{
-			if (bWantForce)
+			if (bWantForce && !bFourTeamPalette)
 			{
 				// Non-recolourable model: route to its baked red/blue skin rather than the futile NoTeam
 				// recolour (which would leave it a flat default). The baked textures carry the team look.
@@ -701,7 +1028,10 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			continue;
 		}
 
-		MID->SetScalarParameterValue(NAME_TeamSelect, 255.f);
+		// Stock Malcolm's team material exposes red/blue parameters but no green/yellow branch.
+		// Paint every supported branch identically, then select a valid branch instead of passing
+		// TeamIndex 2/3 into a two-team shader. Keep the existing neutral-path behavior in other modes.
+		MID->SetScalarParameterValue(NAME_TeamSelect, bFourTeamPalette ? 0.f : 255.f);
 		// Some masters bake the team skin into TEXTURES and only blend the colour params over them at a
 		// strength gated by this scalar; crank it so the colour actually paints. No-op where absent.
 		MID->SetScalarParameterValue(NAME_TeamBlendMax, 1.f);
@@ -820,13 +1150,32 @@ void ATeamArenaCharacter::LeaderHatStatusChanged_Implementation()
 
 void ATeamArenaCharacter::PlayDying()
 {
+	CancelSpawnHeldFire();
+	StopAmpAmbientSound();
 	Super::PlayDying();
 	ClearLocalOutlineRenderState();
 	SpawnSkeletonDissolve();
 }
 
+void ATeamArenaCharacter::SpawnBloodDecal(const FVector& TraceStart, const FVector& TraceDir)
+{
+	// Stock death and ragdoll-collision decals bypass the damage type's bCausesBlood flag.
+	if (IsDead())
+	{
+		const int32 Override = CVarDeathBloodDecals.GetValueOnGameThread();
+		const bool bShowBlood = Override < 0 ? NCPlusPerformanceSettings::GetShowDeathBlood() : Override != 0;
+		if (!bShowBlood)
+		{
+			return;
+		}
+	}
+	Super::SpawnBloodDecal(TraceStart, TraceDir);
+}
+
 void ATeamArenaCharacter::Destroyed()
 {
+	CancelSpawnHeldFire();
+	StopAmpAmbientSound();
 	// AUTLineUpHelper destroys its prematch preview pawns while they are still alive. That
 	// bypasses PlayDying(), and stock AUTCharacter::Destroyed() destroys WeaponAttachment
 	// without first unregistering either duplicated CustomDepth mesh. Retire both while all
@@ -879,14 +1228,13 @@ void ATeamArenaCharacter::SetOutlineLocal(bool bNowOutlined, bool bWhenUnocclude
 //  (1) "Darken Bodies" toggle (any mode): hide after the ~1s death-effects fade (instant hide looked abrupt).
 //      Replaces dc's ModelDissolveEffect (exec-chain dissolve that didn't run reliably across models); this
 //      clean hide works on any model with zero asset dependency.
-//  (2) iCTF safety net (regardless of DarkenBodies): the body is supposed to be removed by the BP CleanUpRagdoll
-//      at [InstagibCTF] RagdollTime, but if that doesn't happen (e.g. DarkenBodies off and the BP cleanup never
-//      fires) the corpse would linger. So in iCTF we ALSO hide it at the ragdoll lifespan, so a low Ragdoll Time
-//      reliably makes the body vanish. Hide-only (SetVisibility) — never destroys the actor, so it can't fight
-//      the BP destroy or the engine corpse cleanup. Client-side, per pawn; no-op on a dedicated server.
+//  (2) Instagib safety net (iCTF and xTDM, regardless of DarkenBodies): remove the body after
+//      [InstagibCTF] RagdollTime even when the BP CleanUpRagdoll event never fires. A low Ragdoll Time
+//      reliably makes the body vanish. Online clients then retire hidden corpses when cameras, carried
+//      objects and the queued death sound no longer need them. Dedicated servers retain stock cleanup.
 void ATeamArenaCharacter::SpawnSkeletonDissolve()
 {
-	if (GetNetMode() == NM_DedicatedServer) { return; }
+	if (GetNetMode() == NM_DedicatedServer || IsPendingKillPending()) { return; }
 
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
 	const bool bDarken = (C.bEnabled && C.bDarkenBodies);
@@ -894,16 +1242,11 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 	FString Val;
 	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
-	// F5 "Show Ragdoll" ([InstagibCTF] bShowRagdoll). INTENDED consumer = the BP instagib DAMAGE TYPE
-	// (it reads these keys and drives ragdoll time for instagib kills) — which by construction only
-	// ever fires in iCTF, so in every other mode the setting did nothing and the only hide path was
-	// ForceModels' DarkenBodies (community: "uncheck force models and you can see dead bodys" /
-	// "ragdoll setting overridden by force models"). This C++ read is the MODE-AGNOSTIC stand-in:
-	// when the key exists (any F5 save writes it) it is AUTHORITATIVE over the Darken fade in both
-	// directions — unticked hides corpses in every mode with FM off, ticked shows them even with
-	// Darken on. Hide-only, so it composes with the BP in iCTF (ShowRagdoll-on defers to the
-	// RagdollTime safety net below = the BP's own cleanup time). Key ABSENT (never saved F5 — e.g. a
-	// dc-TeamSkins migrant) -> Darken keeps its old dc-parity hide role.
+	// F5 "Show Ragdoll" retains its legacy [InstagibCTF] config section. The BP damage type
+	// consumes it for instagib kills; this native path also handles other modes. An explicit
+	// preference takes precedence over ForceModels' DarkenBodies in both directions. With
+	// Show Ragdoll enabled, iCTF/xTDM still honor RagdollTime below. If the key has never
+	// been saved, preserve the old DarkenBodies fade behavior.
 	bool bShowRagdoll = true;
 	bool bShowRagdollExplicit = false;
 	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowRagdoll"), Val, ConfigPath))
@@ -912,16 +1255,22 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 		bShowRagdollExplicit = true;
 	}
 
-	// iCTF detection: RagdollTime is an iCTF setting (the BP CleanUpRagdoll only runs for the instagib damage
-	// type). ACTFStatsReplicator is present only in NCPlusCTF instagib; absent in ElimPlus etc.
+	// xTDM uses the same instagib pawn/rifle and ragdoll preferences, but has no CTF
+	// stats replicator. Its replicated game-mode class is available on clients too.
 	bool bIsInstagib = false;
 	if (UWorld* World = GetWorld())
 	{
-		for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It) { bIsInstagib = It->bIsInstagibMatch; break; }
+		const AUTGameState* GS = World->GetGameState<AUTGameState>();
+		bIsInstagib = GS && GS->GameModeClass
+			&& GS->GameModeClass->IsChildOf(ANCPlusXTDMGameMode::StaticClass());
+		if (!bIsInstagib)
+		{
+			for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It) { bIsInstagib = It->bIsInstagibMatch; break; }
+		}
 	}
 
-	// Fade-hide when: Show Ragdoll explicitly unticked (any mode), or — with the key never written —
-	// the legacy DarkenBodies fade. iCTF keeps its ragdoll-cleanup backup regardless. Outside all of
+	// Fade-hide when: Show Ragdoll explicitly unticked (any mode), or with the key never written,
+	// the legacy DarkenBodies fade. iCTF/xTDM keep their ragdoll-cleanup backup regardless. Outside all of
 	// that, leave corpses to the stock/engine cleanup — no change to ElimPlus and friends.
 	const bool bFadeHide = bShowRagdollExplicit ? !bShowRagdoll : bDarken;
 	if (!bFadeHide && !bIsInstagib) { return; }
@@ -931,16 +1280,16 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 	{
 		RagdollTime = FCString::Atof(*Val);
 	}
-	// The menu stores iCTF "Ragdoll Time = 0" (remove instantly) as 0.01 so the BP SetTimer fires.
-	// That sentinel must not leak into the OTHER modes' fade cap — an iCTF "instant" choice would
-	// make bodies vanish frame-one in ElimPlus/Wipeout. Outside iCTF, treat it as the normal fade.
+	// The menu stores "Ragdoll Time = 0" (remove instantly) as 0.01 so the BP SetTimer fires.
+	// That sentinel must not leak into other modes' fade cap and make bodies vanish frame-one
+	// in ElimPlus/Wipeout. Outside iCTF/xTDM, treat it as the normal fade.
 	if (!bIsInstagib && RagdollTime <= 0.011f)
 	{
 		RagdollTime = 1.0f;
 	}
 
 	// The fade paths (Show-Ragdoll-off / legacy DarkenBodies) hide early (~1s death-effects fade, but never
-	// longer than the ragdoll lives); otherwise (iCTF, no fade) hide exactly at the ragdoll lifespan so the
+	// longer than the ragdoll lives); otherwise (iCTF/xTDM, no fade) hide exactly at the ragdoll lifespan so the
 	// body still vanishes when the BP CleanUpRagdoll doesn't. Floor 0.01s (SetTimer never schedules
 	// rate<=0). Timer is bound to this actor, so it auto-clears if the corpse is destroyed/cleaned up
 	// sooner (gib, respawn, DeathCleanupTimer).
@@ -952,7 +1301,7 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 void ATeamArenaCharacter::HideDeadBody()
 {
 	USkeletalMeshComponent* BodyMesh = GetMesh();
-	if (!BodyMesh) { return; }
+	if (!BodyMesh || !IsDead() || IsPendingKillPending()) { return; }
 
 	BodyMesh->SetVisibility(false, /*bPropagateToChildren=*/true);
 
@@ -977,6 +1326,85 @@ void ATeamArenaCharacter::HideDeadBody()
 			Child->SetVisibility(true, /*bPropagateToChildren=*/false);
 		}
 	}
+
+	// Retire on a later timer tick, after all death/Blueprint callbacks have unwound.
+	if (GetNetMode() == NM_Client && CVarHiddenCorpseCleanup.GetValueOnGameThread() != 0)
+	{
+		GetWorldTimerManager().SetTimer(HiddenCorpseCleanupHandle, this,
+			&ATeamArenaCharacter::CleanupHiddenCorpse, 0.01f, false);
+	}
+}
+
+void ATeamArenaCharacter::CleanupHiddenCorpse()
+{
+	UWorld* World = GetWorld();
+	USkeletalMeshComponent* BodyMesh = GetMesh();
+	// Torn-off client pawns become ROLE_Authority. Use net mode, not role, so local settings
+	// cannot destroy a listen server's gameplay actors. Keep replay playback on stock cleanup.
+	if (World == nullptr || GetNetMode() != NM_Client || !IsDead() || IsPendingKillPending()
+		|| BodyMesh == nullptr || BodyMesh->IsVisible() || CVarHiddenCorpseCleanup.GetValueOnGameThread() == 0
+		|| (World->DemoNetDriver != nullptr && World->DemoNetDriver->IsPlaying()))
+	{
+		return;
+	}
+
+	// Destroyed() clears actor timers, including stock's death sound queued at 0.25 seconds.
+	bool bMustWait = GetWorldTimerManager().IsTimerActive(DeathSoundHandle);
+	if (World->DemoNetDriver != nullptr && World->DemoNetDriver->IsRecording())
+	{
+		// A client recorder must serialize the final tear-off before we destroy this pawn.
+		// DemoReplicateActor closes that channel after replication; closing removes it from
+		// ActorChannels. A torn-off actor cannot open a new recording channel afterwards.
+		for (UNetConnection* Connection : World->DemoNetDriver->ClientConnections)
+		{
+			if (Connection != nullptr && Connection->ActorChannels.FindRef(this) != nullptr)
+			{
+				bMustWait = true;
+				break;
+			}
+		}
+	}
+	for (FLocalPlayerIterator It(GEngine, World); It; ++It)
+	{
+		const APlayerController* PC = It->PlayerController;
+		const APlayerCameraManager* Camera = PC != nullptr ? PC->PlayerCameraManager : nullptr;
+		// GetViewTarget() reports the incoming target during a blend; protect the outgoing
+		// target too. Preserve a still-possessed local pawn while death replication catches up.
+		if (PC != nullptr && (PC->GetPawn() == this || PC->GetViewTarget() == this
+			|| (Camera != nullptr && (Camera->ViewTarget.Target == this || Camera->PendingViewTarget.Target == this))))
+		{
+			bMustWait = true;
+			break;
+		}
+	}
+
+	if (!bMustWait)
+	{
+		// Let the flag's own replicated detach run. Destroying the parent first can interfere
+		// with attachment and trail cleanup even though the flag actor itself is not owned by us.
+		TArray<USceneComponent*> Descendants;
+		BodyMesh->GetChildrenComponents(/*bIncludeAllDescendants=*/true, Descendants);
+		for (USceneComponent* Child : Descendants)
+		{
+			if (Child != nullptr && Child->GetOwner() != nullptr && Child->GetOwner()->IsA(AUTCarriedObject::StaticClass()))
+			{
+				bMustWait = true;
+				break;
+			}
+		}
+	}
+
+	if (bMustWait)
+	{
+		// An actor-bound timer also works after actor ticking stops; stock Destroyed() clears it.
+		GetWorldTimerManager().SetTimer(HiddenCorpseCleanupHandle, this,
+			&ATeamArenaCharacter::CleanupHiddenCorpse, 0.1f, false);
+		return;
+	}
+
+	// Use normal teardown to retire physics, components, weapon attachments and BP timers.
+	// Merely hiding or sleeping the rigid bodies leaves skeletal/component work registered.
+	Destroy();
 }
 
 // When the local player's team changes, every other pawn's friend/enemy bucket can flip without
@@ -1009,6 +1437,16 @@ void ATeamArenaCharacter::RefreshOtherForcedModels()
 	}
 }
 
+void ATeamArenaCharacter::UpdateCharOverlays()
+{
+	if (CharOverlayFlags != 0 && (OverlayMesh == nullptr || !OverlayMesh->IsRegistered()))
+	{
+		// Creation copies the body flag; re-registration can wake a second pose consumer.
+		ReleaseRemoteAnimationURO(true);
+	}
+	Super::UpdateCharOverlays();
+}
+
 void ATeamArenaCharacter::UpdateArmorOverlay()
 {
 	Super::UpdateArmorOverlay();   // sets up the armour overlay (+ the stock hardcoded yellow "Color")
@@ -1039,24 +1477,25 @@ void ATeamArenaCharacter::RefreshForcedArmourOverlay()
 	ObservedArmourOverlayMaterial = OverlayMaterial;
 	bForcedArmourOverlayDirty = false;
 
-	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
-	if (!C.bEnabled || !C.bArmour || NCPlusForceModels::OutlineModeActive(GetWorld())) { return; }   // Outline mode: leave stock armour (no super-tint)
-
 	const int32 MyTeam = (int32)GetTeamNum();
 	if (MyTeam == 255) { return; }                                  // FFA: deferred
 
 	UWorld* const World = GetWorld();
+	const bool bFourTeamPalette = NCPlusForceModels::IsFourTeamGame(World) && MyTeam >= 0 && MyTeam < 4;
+	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
+	if (!bFourTeamPalette && (!C.bEnabled || !C.bArmour || NCPlusForceModels::OutlineModeActive(World))) { return; }
+
 	const bool bIsFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(World));   // spectator -> red is "ours"
-	if (C.Style == ENCPlusSkinStyle::EnemyOnly && bIsFriendly) { return; }   // Enemy-Only leaves teammates stock
+	if (!bFourTeamPalette && C.Style == ENCPlusSkinStyle::EnemyOnly && bIsFriendly) { return; }
 
 	UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMaterial);
 	if (!MID) { return; }
 
-	const FNCPlusModelSettings Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
+	const FNCPlusModelSettings Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly, World);
 	// Same model-or-tint gate as ApplyForcedModel and the spawn-protection glow. A side with neither
 	// a forced model nor "Tint skin" leaves the stock overlay untouched.
 	TSubclassOf<AUTCharacterContent> GateContent = NCPlusForceModels::GetModelClass(Side);
-	if (!((GateContent && NCPlusForceModels::IsModelAllowed(GateContent)) || Side.bTint)) { return; }
+	if (!bFourTeamPalette && !((GateContent && NCPlusForceModels::IsModelAllowed(GateContent)) || Side.bTint)) { return; }
 	const FLinearColor ArmourColour = NCPlusForceModels::GetArmourColour(Side);
 
 	// Stock "Color" is a BRIGHT ~(1,1,0) yellow that drives the armour's emissive glow; our configured
@@ -1414,9 +1853,17 @@ void ATeamArenaCharacter::FiringInfoUpdated()
     K2_FiringInfoUpdated();
 }
 
+FVector ATeamArenaCharacter::GetDelayedShotPosition()
+{
+	const FVector Result = Super::GetDelayedShotPosition();
+	FNCShotOriginScope::ObserveStockLookup(this, Result);
+	return Result;
+}
+
 void ATeamArenaCharacter::PositionUpdated(bool bShotSpawned)
 {
 	Super::PositionUpdated(bShotSpawned);
+    NCFireAnchor::RecordMove(this, bShotSpawned);
 
 	// Position rewind is authoritative. Avoid duplicating this short history on
 	// simulated/autonomous clients, which never validate a server hitscan.
@@ -1674,6 +2121,99 @@ void ATeamArenaCharacter::BeginPlay()
 
 
 
+
+void ATeamArenaCharacter::StopAmpAmbientSound()
+{
+	NextAmpAmbientRetryTime = 0.f;
+	if (AmpAmbientSoundComp && AmpAmbientSoundComp->IsPlaying())
+	{
+		AmpAmbientSoundComp->Stop();
+	}
+}
+
+void ATeamArenaCharacter::UpdateAmpAmbientSound()
+{
+	// Inventory is owner-only. The stock weapon-overlay bits already publish AMP
+	// acquisition/removal to every relevant client, including spectators/replays.
+	// Match the AMP material specifically: Siphon/Berserk also set overlay bits.
+	bool bHasAmp = false;
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	const uint16 Flags = uint16(GetWeaponOverlayFlags());
+	if (!IsDead() && !IsPendingKillPending() && GS && Flags != 0)
+	{
+		static const FName AmpMaterialName(TEXT("M_UDamageSkin_3P"));
+		static const FName LegacyAmpMaterialName(TEXT("M_UDamage_Overlay"));
+		for (int32 Index = 0; Index < int32(sizeof(Flags) * 8); ++Index)
+		{
+			if ((Flags & (uint16(1) << Index)) == 0) { continue; }
+			UMaterialInterface* Material = GS->GetOverlayMaterial(Index, false).Material;
+			if (!Material) { continue; }
+			if (Material == CachedAmpOverlayMaterial.Get())
+			{
+				bHasAmp = true;
+				break;
+			}
+			if (Material->GetFName() == AmpMaterialName || Material->GetFName() == LegacyAmpMaterialName)
+			{
+				const FString Path = Material->GetPathName();
+				if (Path == TEXT("/Game/RestrictedAssets/Effects/Pickups/UDamage/Materials/M_UDamageSkin_3P.M_UDamageSkin_3P")
+					|| Path == TEXT("/Game/RestrictedAssets/Pickups/Powerups/Assets/M_UDamage_Overlay.M_UDamage_Overlay"))
+				{
+					CachedAmpOverlayMaterial = Material;
+					bHasAmp = true;
+					break;
+				}
+			}
+		}
+	}
+	if (!bHasAmp)
+	{
+		StopAmpAmbientSound();
+		return;
+	}
+	if (!AmpAmbientLoopSound)
+	{
+		// This stock cue contains the looping node and spatial attenuation. The raw
+		// wave is a one-shot; using it directly would periodically restart playback.
+		static bool bMissingSoundLogged = false;
+		if (bMissingSoundLogged) { return; }
+		AmpAmbientLoopSound = LoadObject<USoundBase>(nullptr,
+			TEXT("/Game/RestrictedAssets/Pickups/Powerups/Assets/A_Powerup_UDamage_PowerLoop_Cue.A_Powerup_UDamage_PowerLoop_Cue"));
+		if (!AmpAmbientLoopSound)
+		{
+			bMissingSoundLogged = true;
+			UE_LOG(UT, Warning, TEXT("NCP: stock AMP ambient cue is missing; carried AMP loop unavailable."));
+			return;
+		}
+	}
+	// Avoid doubling the same cue if a custom powerup already uses stock ambient.
+	if (AmbientSound == AmpAmbientLoopSound || StatusAmbientSound == AmpAmbientLoopSound)
+	{
+		StopAmpAmbientSound();
+		return;
+	}
+	if (!AmpAmbientSoundComp)
+	{
+		AmpAmbientSoundComp = NewObject<UAudioComponent>(this);
+		AmpAmbientSoundComp->bAutoDestroy = false;
+		AmpAmbientSoundComp->bAutoActivate = false;
+		AmpAmbientSoundComp->bStopWhenOwnerDestroyed = true;
+		AmpAmbientSoundComp->SetupAttachment(GetRootComponent());
+		AmpAmbientSoundComp->RegisterComponent();
+		AmpAmbientSoundComp->SetSound(AmpAmbientLoopSound);
+	}
+	// A separate local component preserves weapon/flag/Siphon loops. No RPC or
+	// replicated property is added; clients running this DLL restore the audio.
+	if (!AmpAmbientSoundComp->IsPlaying())
+	{
+		// Distance/voice culling can reject a loop. Retry at 4 Hz instead of
+		// submitting a new sound on every high-FPS render tick. Allow replay rewinds.
+		const float Now = GetWorld()->GetTimeSeconds();
+		if (Now < NextAmpAmbientRetryTime && NextAmpAmbientRetryTime - Now <= 0.25f) { return; }
+		NextAmpAmbientRetryTime = Now + 0.25f;
+		AmpAmbientSoundComp->Play();
+	}
+}
 
 void ATeamArenaCharacter::SetAmbientSound(USoundBase* NewAmbientSound, bool bClear)
 {
@@ -2254,6 +2794,15 @@ void ATeamArenaCharacter::UpdateSkin()
 
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
+	// Movement normally services the drain before the next body pose. If movement
+	// stops, keep servicing restoration from the actor without acquiring a policy.
+	const UCharacterMovementComponent* AnimationMovement = GetCharacterMovement();
+	if (RemoteAnimationUROState && (AnimationMovement == nullptr
+		|| !AnimationMovement->IsRegistered() || !AnimationMovement->IsActive()
+		|| !AnimationMovement->IsComponentTickEnabled()))
+	{
+		ReleaseRemoteAnimationURO();
+	}
 	// Flush work queued by an earlier ApplyCharacterData before any forced-model apply below can
 	// queue another rebuild. This ordering guarantees an ApplyCharacterData reached from this Tick
 	// cannot recreate its outline until the following character tick.
@@ -2304,13 +2853,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			&& CurrentWeapon->GetMesh() && CurrentWeapon->GetMesh()->IsRegistered())
 		{
 			LastEquippedWeapon = CurrentWeapon;
-			// Check hide by class name (allows Lightning Gun and Sniper to hide independently)
-			FName HideKey = FName(*CurrentWeapon->GetClass()->GetName());
-			bool bShouldHide = false;
-			{
-				bool* bHidden = AUTWeaponFix::HiddenWeaponsByTag.Find(HideKey);
-				bShouldHide = bHidden && *bHidden;
-			}
+			const bool bShouldHide = AUTWeaponFix::IsWeaponHiddenBySettings(CurrentWeapon, this);
 
 			// BP-parity apply (visibility-only; also restores when not hidden).
 			// See AUTWeaponFix::ApplyWeaponHideState for why not SetHiddenInGame.
@@ -2445,6 +2988,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	{
 		return;
 	}
+	UpdateAmpAmbientSound();
 
 	const bool bOverlayRegistered = OverlayMesh != nullptr && OverlayMesh->IsRegistered();
 	UMaterialInterface* const CurrentArmourOverlayMaterial =
@@ -2603,7 +3147,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			if (GlowTeam != 255)
 			{
 				const bool bGlowFriendly = (GlowTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
-				const FNCPlusModelSettings& GlowSide = NCPlusForceModels::GetModelSettings(GlowTeam, bGlowFriendly);
+				const FNCPlusModelSettings& GlowSide = NCPlusForceModels::GetModelSettings(GlowTeam, bGlowFriendly, GetWorld());
 				TSubclassOf<AUTCharacterContent> GlowContent = NCPlusForceModels::GetModelClass(GlowSide);
 				// Model-or-tint, matching ApplyForcedModel and the overlay recolour above.
 				if ((GlowContent && NCPlusForceModels::IsModelAllowed(GlowContent)) || GlowSide.bTint)
@@ -2683,6 +3227,8 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 
 void ATeamArenaCharacter::BecomeViewTarget(APlayerController* PC)
 {
+	// Stock may enable the previously sleeping first-person animation consumer.
+	ReleaseRemoteAnimationURO(true);
 	Super::BecomeViewTarget(PC);
 
 
@@ -2706,6 +3252,47 @@ void ATeamArenaCharacter::BecomeViewTarget(APlayerController* PC)
 	// OnRepWeaponSkin may have run before a remote first-person weapon existed.
 	// Re-resolve now so a newly spectated player shows the same skin as third person.
 	UpdateWeaponSkin();
+}
+
+void ATeamArenaCharacter::BehindViewChange(APlayerController* PC, bool bNowBehindView)
+{
+	// BehindViewChange can also run without BecomeViewTarget when toggling the camera.
+	ReleaseRemoteAnimationURO(true);
+	Super::BehindViewChange(PC, bNowBehindView);
+}
+
+void ATeamArenaCharacter::PostRenderFor(APlayerController* PC, UCanvas* Canvas, FVector CameraPosition, FVector CameraDir)
+{
+	// Opt-in F5/nchud toggle: hide the overhead beacon (name, health/armor bars,
+	// combat indicator) that stock draws above teammates while this client plays.
+	// Toggle off, line-ups, match end, intermission, spectators, out-of-lives
+	// viewers, enemies and the viewed pawn all take the stock path unchanged.
+	if (!NCPlusDisplaySettings::GetHideTeammateOverheadTags())
+	{
+		Super::PostRenderFor(PC, Canvas, CameraPosition, CameraDir);
+		return;
+	}
+	AUTPlayerState* UTPS = Cast<AUTPlayerState>(PlayerState);
+	if (UTPS != nullptr && PC != nullptr && PC->PlayerState != nullptr && !PC->PlayerState->bOnlySpectator
+		&& PC->GetViewTarget() != this)
+	{
+		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+		AUTPlayerController* UTPC = Cast<AUTPlayerController>(PC);
+		const bool bViewerOutOfLives = UTPC && UTPC->UTPlayerState && UTPC->UTPlayerState->bOutOfLives;
+		if (GS != nullptr && !GS->IsLineUpActive() && !GS->HasMatchEnded() && !GS->IsMatchIntermission()
+			&& !bViewerOutOfLives && GS->OnSameTeam(PC, this))
+		{
+			// Skip the draw but keep stock's bookkeeping (AUTCharacter::PostRenderFor):
+			// AUTHUD draws the death marker for any player whose pawn was not
+			// post-rendered this frame yet was within the last 5 s, and the minimap
+			// reads the same flag. Without this, live teammates would get markers.
+			UTPS->LastPostRenderedLocation = GetMesh()->GetComponentLocation() + FVector(0.f, 0.f, GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() * 2.25f);
+			UTPS->bPawnWasPostRendered = true;
+			UTPS->PawnPostRenderedTime = GetWorld()->GetTimeSeconds();
+			return;
+		}
+	}
+	Super::PostRenderFor(PC, Canvas, CameraPosition, CameraDir);
 }
 
 
@@ -2804,6 +3391,44 @@ void ATeamArenaCharacter::GiveArmor(AUTArmor* InArmorType)
 		? ArmorType
 		: InArmorType;
 	Super::SetArmorAmount(DisplayArmorType, NewTotal);
+}
+
+int32 ATeamArenaCharacter::RestoreRegularArmor(int32 Amount, int32 MaxArmor)
+{
+	if (!HasAuthority() || IsDead() || IsPendingKillPending() || Health <= 0 || Amount <= 0)
+	{
+		return 0;
+	}
+	const int32 CurrentTotal = GetArmorAmount();
+	const int32 Cap = FMath::Min(MaxArmor, ArmorPlusSoftLimit);
+	if (CurrentTotal <= 0 || CurrentTotal >= Cap)
+	{
+		return 0;
+	}
+	const int32 Restored = FMath::Min(Amount, Cap - CurrentTotal);
+	BeltArmorRemaining = FMath::Clamp(BeltArmorRemaining, 0, CurrentTotal);
+	if (LastRegularArmorType == nullptr)
+	{
+		// A pure belt can gain regular points here. Retain a rooted regular CDO
+		// so consuming its last belt point later restores the correct effects.
+		AUTArmor* RegularType = ArmorType;
+		if (RegularType == nullptr || IsArmorPlusBelt(RegularType))
+		{
+			RegularType = AUTGameMode::StaticClass()->GetDefaultObject<AUTGameMode>()
+				->StartingArmorClass.GetDefaultObject();
+			if (RegularType == nullptr || IsArmorPlusBelt(RegularType))
+			{
+				RegularType = AUTArmor::StaticClass()->GetDefaultObject<AUTArmor>();
+			}
+		}
+		LastRegularArmorType = RegularType;
+	}
+	AUTArmor* DisplayArmorType = BeltArmorRemaining > 0 && ArmorType != nullptr
+		? ArmorType : LastRegularArmorType;
+	// Bypass the full re-spec override: restoration neither grants new belt
+	// points nor consumes/re-arms the existing one-shot helmet protection.
+	Super::SetArmorAmount(DisplayArmorType, CurrentTotal + Restored);
+	return Restored;
 }
 
 void ATeamArenaCharacter::SetArmorAmount(AUTArmor* InArmorType, int32 Amount)

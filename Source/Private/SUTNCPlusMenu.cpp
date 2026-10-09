@@ -4,7 +4,9 @@
 #include "NCPlusForceModels.h"
 #include "NCPlusPerformanceSettings.h"
 #include "NCPlusICTFAudioSettings.h"
+#include "NCPlusDisplaySettings.h"
 #include "NCClutchOverlay.h"
+#include "NCPlusSpectatorSlideOut.h"
 #include "NCReadyUp.h"
 #include "UnrealTournament.h"
 #include "UTGameState.h"
@@ -17,16 +19,14 @@
 
 // Mod.ini section (iCTF tab)
 static const TCHAR* NCPSection = TEXT("NetcodePlus");
-// Gib/ragdoll death settings live under [InstagibCTF] — that's the section the iCTF damage type
-// (NCPlusUTDmg_Instagib: ShouldGib reads bAllowGib, PlayDeathEffects reads RagdollTime) actually reads.
+// Gore settings share the legacy [InstagibCTF] section with the damage Blueprint's RagdollTime.
 static const TCHAR* IGCTFSection = TEXT("InstagibCTF");
 
 // Ragdoll-time semantics (the iCTF damage-type BP NCPlusUTDmg_Instagib::PlayDeathEffects passes RagdollTime
 // straight into a "Set Timer by Function Name" / CleanUpRagdoll node). Engine rule, FTimerManager::SetTimer:
-// rate <= 0 NEVER schedules the timer, so a literal 0 would KEEP the ragdoll forever — counter-intuitive
-// (players read "0 time" as "no ragdoll"). So the slider's 0 is remapped to 0.01 on SAVE: the BP then fires
-// the cleanup almost instantly = ragdoll removed. The user sees 0..10 (0 = remove instantly, N = N-sec
-// despawn, max 10); the stored config value is never a keep-forever 0.
+// rate <= 0 never schedules that timer, so retain the legacy 0.01 sentinel when saving slider 0.
+// C++ also honors this visibility delay and safely retires hidden online-client corpses after
+// camera, carried-object and audio dependencies clear, even if the BP cleanup is disconnected.
 
 // Shared fonts
 static FSlateFontInfo BoldFont(int32 Size)   { return FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), Size); }
@@ -80,7 +80,7 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			.Padding(0, 20, 0, 10)
 			.HAlign(HAlign_Center)
 			[
-				SNew(STextBlock)
+				SAssignNew(TitleRow, STextBlock)
 				.Text(FText::FromString(TEXT("NETCODEPLUS SETTINGS")))
 				.Font(BoldFont(28))
 				.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
@@ -92,7 +92,7 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			.Padding(0, 0, 0, 12)
 			.HAlign(HAlign_Center)
 			[
-				SNew(SHorizontalBox)
+				SAssignNew(TabRow, SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.Padding(0, 0, 8, 0)
@@ -138,14 +138,24 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				]
 			]
 
-			// Active tab content
+			// Active tab content. Capped to the space the viewport leaves after the
+			// title/tabs/buttons and scrolled beyond that; a tab that fits is unchanged
+			// (the scroll bar collapses when not needed).
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.HAlign(HAlign_Center)
 			[
-				SAssignNew(ContentArea, SBox)
+				SNew(SBox)
+				.MaxDesiredHeight(this, &SUTNCPlusMenu::GetTabContentMaxHeight)
 				[
-					BuildTabContent(ActiveTab)
+					SNew(SScrollBox)
+					+ SScrollBox::Slot()
+					[
+						SAssignNew(ContentArea, SBox)
+						[
+							BuildTabContent(ActiveTab)
+						]
+					]
 				]
 			]
 
@@ -155,7 +165,7 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			.Padding(0, 25, 0, 20)
 			.HAlign(HAlign_Center)
 			[
-				SNew(SHorizontalBox)
+				SAssignNew(ButtonRow, SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.Padding(0, 0, 10, 0)
@@ -177,6 +187,25 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			]
 		]
 	];
+}
+
+void SUTNCPlusMenu::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
+{
+	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
+	CachedViewHeight = AllottedGeometry.GetLocalSize().Y;
+}
+
+FOptionalSize SUTNCPlusMenu::GetTabContentMaxHeight() const
+{
+	// Before the first tick there is no allotted height yet: leave the tab uncapped.
+	if (CachedViewHeight <= 1.f || !TitleRow.IsValid() || !TabRow.IsValid() || !ButtonRow.IsValid())
+	{
+		return FOptionalSize();
+	}
+	// Slot paddings in Construct: title 20+10, tab strip 12, buttons 25+20; plus a small margin.
+	const float ChromeHeight = TitleRow->GetDesiredSize().Y + TabRow->GetDesiredSize().Y
+		+ ButtonRow->GetDesiredSize().Y + 87.f + 16.f;
+	return FOptionalSize(FMath::Max(200.f, CachedViewHeight - ChromeHeight));
 }
 
 TSharedRef<SWidget> SUTNCPlusMenu::MakeTabButton(const FString& Label, ENCPMenuTab Tab)
@@ -520,6 +549,67 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 				]
 			]
 
+			+ SVerticalBox::Slot().AutoHeight().Padding(40, 0, 40, 8).HAlign(HAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]() { return bExpandedSpectatorSlideout ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState State) { bExpandedSpectatorSlideout = State == ECheckBoxState::Checked; })
+				.ToolTipText(FText::FromString(TEXT("Add CTF or Wipeout match statistics to the spectator slideout. True spectators only; camera controls stay available.")))
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Expanded spectator slideout")))
+					.Font(RegularFont(14)).ColorAndOpacity(FLinearColor::White)
+				]
+			]
+
+			// Opt-in HUD display toggles (client-only, default off). The same three
+			// checkboxes live in the nchud HUD editor, which applies them immediately.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 4, 0, 3)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("HUD Display")))
+				.Font(BoldFont(18))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(40, 0, 40, 4).HAlign(HAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]() { return bHideFriendlyCrosshairSign ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState State) { bHideFriendlyCrosshairSign = State == ECheckBoxState::Checked; bHideFriendlyCrosshairSignEdited = true; })
+				.ToolTipText(FText::FromString(TEXT("Don't draw the green 'forbidden' sign on your crosshair when aiming at a teammate. Teammate names still don't show under the crosshair; enemy names are unchanged. NetcodePlus weapons only.")))
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Hide teammate crosshair sign")))
+					.Font(RegularFont(14)).ColorAndOpacity(FLinearColor::White)
+				]
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(40, 0, 40, 4).HAlign(HAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]() { return bHideTeammateOverheadTags ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState State) { bHideTeammateOverheadTags = State == ECheckBoxState::Checked; bHideTeammateOverheadTagsEdited = true; })
+				.ToolTipText(FText::FromString(TEXT("Hide the name and health/armor bars above teammates while you play. Line-ups, match end, spectating and out-of-lives views are unchanged. Enemy names under the crosshair still show.")))
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Hide teammate overhead tags (name and health bars)")))
+					.Font(RegularFont(14)).ColorAndOpacity(FLinearColor::White)
+				]
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(40, 0, 40, 8).HAlign(HAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]() { return bCollapseRepeatedKillNames ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState State) { bCollapseRepeatedKillNames = State == ECheckBoxState::Checked; bCollapseRepeatedKillNamesEdited = true; })
+				.ToolTipText(FText::FromString(TEXT("When you kill the same player again within a few seconds, show 'You killed ToX' instead of 'You killed ToX & ToX'. Different victims are still listed.")))
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Show each victim once in kill messages")))
+					.Font(RegularFont(14)).ColorAndOpacity(FLinearColor::White)
+				]
+			]
+
 			// About/link information stays on the landing page, like UTComp.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
@@ -677,6 +767,7 @@ FReply SUTNCPlusMenu::OnGitHubClicked()
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
 {
+	const FText DeathBloodTooltip = FText::FromString(TEXT("Show new blood stains when players die or their bodies hit surfaces. Existing stains are unaffected."));
 	return SNew(SVerticalBox)
 
 		// ── Gore Settings ──
@@ -715,6 +806,35 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
 				.Text(FText::FromString(TEXT("Allow Gib")))
 				.Font(RegularFont(14))
 				.ColorAndOpacity(FLinearColor::White)
+			]
+		]
+
+		// Show Death Blood
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bShowDeathBlood ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnShowDeathBloodChanged)
+				.ToolTipText(DeathBloodTooltip)
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Show Death Blood")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+				.ToolTipText(DeathBloodTooltip)
 			]
 		]
 
@@ -772,7 +892,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
 				.Value(RagdollTime)
 				.OnValueCommitted(this, &SUTNCPlusMenu::OnRagdollTimeChanged)
 				.MinDesiredWidth(80.f)
-				.ToolTipText(FText::FromString(TEXT("Seconds a ragdoll stays before despawning. 0 = remove instantly (no ragdoll); e.g. 3 = despawn after 3s. Max 10.")))
+				.ToolTipText(FText::FromString(TEXT("Seconds before the body hides in iCTF. 0 = hide as soon as possible. Hidden bodies are cleaned up when death cameras, sounds and carried flags no longer need them. Max 10.")))
 			]
 		]
 
@@ -1006,13 +1126,12 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 			.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
 		]
 
-		// Model picker (collapsed on fixed-colour rows — Red/Blue borrows the Team/Enemy model)
+		// Every side can choose a model independently, including the fixed-colour Red/Blue rows.
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 2, 0, 4)
 		[
 			SNew(SHorizontalBox)
-			.Visibility(bFixedColour ? EVisibility::Collapsed : EVisibility::Visible)
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
@@ -1021,9 +1140,8 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 				SNew(STextBlock)
 				.Text(FText::FromString(TEXT("Model")))
 				.Font(RegularFont(12))
-				// Live colour preview: tint the "Model" label with this side's current skin colour
-				// (from its H/S/V), re-evaluated each paint so it tracks the sliders as you drag them.
-				.ColorAndOpacity_Lambda([Side] { return FSlateColor(NCPlusForceModels::GetSkinColour(*Side)); })
+				// Preview editable colours only; Red/Blue ignores the side's stored H/S/V.
+				.ColorAndOpacity_Lambda([Side, bFixedColour] { return FSlateColor(bFixedColour ? FLinearColor::White : NCPlusForceModels::GetSkinColour(*Side)); })
 			]
 			+ SHorizontalBox::Slot()
 			.FillWidth(1.f)
@@ -1032,6 +1150,9 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 				SNew(STextComboBox)
 				.OptionsSource(&FMModelOptions)
 				.InitiallySelectedItem(InitialModel)
+				.ToolTipText(bFixedColour
+					? FText::FromString(TEXT("Choose a model for this team. With (none), Tint skin keeps players' own models; otherwise the Team model is used, then Enemy."))
+					: FText::GetEmpty())
 				.OnSelectionChanged_Lambda([this, Side](TSharedPtr<FString> NewSel, ESelectInfo::Type)
 				{
 					if (!NewSel.IsValid()) { return; }
@@ -1169,6 +1290,26 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 				// removed" = box unchecked, plus the separate Cosmetics launcher
 				// button in this same menu). Ini key [ForceModels] Cosmetics unchanged.
 				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Remove Cosmetics"), &FMConfig.bCosmetics) ]
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(20, 2, 20, 8).HAlign(HAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 12, 0)
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Flag brightness")))
+					.Font(RegularFont(13)).ColorAndOpacity(FLinearColor::White)
+				]
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					SNew(SBox).WidthOverride(100.f)
+					[
+						SNew(SSpinBox<float>).MinValue(1.f).MaxValue(5.f).Delta(0.1f)
+						.Value_Lambda([this]() { return FMConfig.FlagBrightness; })
+						.OnValueChanged_Lambda([this](float Value) { FMConfig.FlagBrightness = FMath::Clamp(Value, 1.f, 5.f); })
+						.ToolTipText(FText::FromString(TEXT("Brightness of recoloured CTF flags. 1 = original intensity; 2 = brighter default. Requires Force Models and Flags. Save applies live.")))
+					]
+				]
 			]
 
 			// Style selector
@@ -1452,6 +1593,11 @@ void SUTNCPlusMenu::LoadSettings()
 	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Balanced (4500)"))));
 	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Full (6500)"))));
 	bShowClutchOverlay = NCClutchOverlay::IsEnabled();
+	bExpandedSpectatorSlideout = UNCPlusSpectatorSlideOut::IsMatchOverlayEnabled();
+	bHideFriendlyCrosshairSign = NCPlusDisplaySettings::GetHideFriendlyCrosshairSign();
+	bHideTeammateOverheadTags = NCPlusDisplaySettings::GetHideTeammateOverheadTags();
+	bCollapseRepeatedKillNames = NCPlusDisplaySettings::GetCollapseRepeatedKillNames();
+	bHideFriendlyCrosshairSignEdited = bHideTeammateOverheadTagsEdited = bCollapseRepeatedKillNamesEdited = false;
 
 	FString Val;
 	// Death gib/ragdoll settings: [InstagibCTF] with the iCTF damage type's exact keys (bAllowGib /
@@ -1461,6 +1607,8 @@ void SUTNCPlusMenu::LoadSettings()
 		bAllowGib = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
 	else
 		bAllowGib = false;
+
+	bShowDeathBlood = NCPlusPerformanceSettings::GetShowDeathBlood();
 
 	if (GConfig->GetString(IGCTFSection, TEXT("bShowRagdoll"), Val, ConfigPath))
 		bShowRagdoll = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
@@ -1572,13 +1720,30 @@ void SUTNCPlusMenu::SaveSettings()
 	// cached squared distance used by character ticks immediately.
 	NCPlusPerformanceSettings::SetCharacterOverlayDistance(CharacterOverlayDistance);
 	NCClutchOverlay::SetEnabled(bShowClutchOverlay);
+	UNCPlusSpectatorSlideOut::SetMatchOverlayEnabled(bExpandedSpectatorSlideout);
+	// Client-local HUD display toggles; the setters persist and update the cached
+	// values the crosshair, teammate beacon and kill-message paths read. Only toggles
+	// clicked in this panel are written: nchud applies the same settings immediately
+	// and can be opened from the console while F5 is still up.
+	if (bHideFriendlyCrosshairSignEdited)
+	{
+		NCPlusDisplaySettings::SetHideFriendlyCrosshairSign(bHideFriendlyCrosshairSign);
+	}
+	if (bHideTeammateOverheadTagsEdited)
+	{
+		NCPlusDisplaySettings::SetHideTeammateOverheadTags(bHideTeammateOverheadTags);
+	}
+	if (bCollapseRepeatedKillNamesEdited)
+	{
+		NCPlusDisplaySettings::SetCollapseRepeatedKillNames(bCollapseRepeatedKillNames);
+	}
 
 	// [InstagibCTF] so the iCTF damage type (NCPlusUTDmg_Instagib) actually reads them — was wrongly under
 	// [NetcodePlus] with key "AllowGib" (vs the BP's "bAllowGib"), so the menu never drove the damage type.
 	GConfig->SetString(IGCTFSection, TEXT("bAllowGib"), bAllowGib ? TEXT("True") : TEXT("False"), ConfigPath);
+	GConfig->SetBool(IGCTFSection, TEXT("bShowDeathBlood"), bShowDeathBlood, ConfigPath);
 	GConfig->SetString(IGCTFSection, TEXT("bShowRagdoll"), bShowRagdoll ? TEXT("True") : TEXT("False"), ConfigPath);
-	// Slider 0 -> store 0.01 so the BP's SetTimer fires (rate>0) and removes the ragdoll instantly, rather
-	// than a literal 0 (rate<=0) which never fires = keep forever. Non-zero values pass through unchanged.
+	// Slider 0 -> retain the positive timer sentinel used by the legacy BP and C++ hide path.
 	GConfig->SetString(IGCTFSection, TEXT("RagdollTime"),
 		*FString::SanitizeFloat(RagdollTime <= 0.f ? 0.01f : RagdollTime), ConfigPath);
 	GConfig->SetString(IGCTFSection, TEXT("bShowOwnBeam"), bShowOwnBeam ? TEXT("True") : TEXT("False"), ConfigPath);
@@ -1587,6 +1752,7 @@ void SUTNCPlusMenu::SaveSettings()
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
 
 	GConfig->Flush(false, ConfigPath);
+	NCPlusPerformanceSettings::Reload();
 	// Publish the newly saved value to the character's lazy cache so muting or
 	// restoring the loop takes effect on the next stock character tick.
 	NCPlusICTFAudioSettings::Reload();
@@ -1672,6 +1838,11 @@ void SUTNCPlusMenu::OnAllowGibChanged(ECheckBoxState NewState)
 	bAllowGib = (NewState == ECheckBoxState::Checked);
 }
 
+void SUTNCPlusMenu::OnShowDeathBloodChanged(ECheckBoxState NewState)
+{
+	bShowDeathBlood = (NewState == ECheckBoxState::Checked);
+}
+
 void SUTNCPlusMenu::OnShowRagdollChanged(ECheckBoxState NewState)
 {
 	bShowRagdoll = (NewState == ECheckBoxState::Checked);
@@ -1679,8 +1850,7 @@ void SUTNCPlusMenu::OnShowRagdollChanged(ECheckBoxState NewState)
 
 void SUTNCPlusMenu::OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType)
 {
-	// Slider value the user sees (0..10). 0 = remove instantly (remapped to 0.01 on save, since a literal 0
-	// would keep ragdolls forever); N = despawn after N seconds. See the semantics note at the top of the file.
+	// Slider value is the body visibility duration; zero is saved as the legacy 0.01 timer sentinel.
 	RagdollTime = FMath::Clamp(NewValue, 0.f, 10.f);
 }
 

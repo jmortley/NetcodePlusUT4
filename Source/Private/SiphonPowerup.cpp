@@ -24,7 +24,7 @@ AUTSiphonPowerup::AUTSiphonPowerup(const FObjectInitializer& ObjectInitializer)
 	TriggeredTime = 15.f;
 
 	// Life steal defaults
-	SiphonPercent = 0.5f;
+	SiphonPercent = 0.75f;
 	HealCap = 199;
 
 	// Reuse Berserk stat tracking (same conceptual slot — Berserk never spawns in

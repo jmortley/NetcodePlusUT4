@@ -189,6 +189,16 @@ private:
 	ECheckBoxState GetViewerRelativePortraitsState() const;
 	void OnViewerRelativePortraitsChanged(ECheckBoxState NewState);
 
+	// Opt-in display toggles shared with the F5 Home tab (NCPlusDisplaySettings).
+	// Apply immediately; persist [NetcodePlus] HideFriendlyCrosshairSign /
+	// HideTeammateOverheadTags / CollapseRepeatedKillNames.
+	ECheckBoxState GetHideFriendlyCrosshairSignState() const;
+	void OnHideFriendlyCrosshairSignChanged(ECheckBoxState NewState);
+	ECheckBoxState GetHideTeammateOverheadTagsState() const;
+	void OnHideTeammateOverheadTagsChanged(ECheckBoxState NewState);
+	ECheckBoxState GetCollapseRepeatedKillNamesState() const;
+	void OnCollapseRepeatedKillNamesChanged(ECheckBoxState NewState);
+
 	// Scoreboard background opacity (0.05..1.0). Global; persists [NetcodePlus] ScoreboardOpacity.
 	TOptional<float> GetScoreboardOpacityValue() const;
 	void OnScoreboardOpacityChanged(float NewValue);

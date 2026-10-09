@@ -49,6 +49,9 @@ class SUTNCPlusMenu : public SCompoundWidget
 
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 	virtual bool SupportsKeyboardFocus() const override { return true; }
+	/** Caches the viewport height this full-screen panel is allotted (4.15 has no
+	 *  SWidget::GetCachedGeometry) for GetTabContentMaxHeight. */
+	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
 private:
 	TWeakObjectPtr<UUTLocalPlayer> PlayerOwner;
@@ -57,6 +60,7 @@ private:
 
 	// ── iCTF settings ([NetcodePlus]/[InstagibCTF] in Mod.ini) ──
 	bool bAllowGib;
+	bool bShowDeathBlood;
 	bool bShowRagdoll;
 	float RagdollTime;
 	bool bShowOwnBeam;
@@ -72,6 +76,18 @@ private:
 	float CharacterOverlayDistance = 6500.f;
 	TArray<TSharedPtr<FString>> CharacterOverlayDistanceOptions;
 	bool bShowClutchOverlay = true;
+	bool bExpandedSpectatorSlideout = true;
+
+	// ── Home HUD display toggles ── opt-in, default off (NCPlusDisplaySettings); applied on Save.
+	bool bHideFriendlyCrosshairSign = false;
+	bool bHideTeammateOverheadTags = false;
+	bool bCollapseRepeatedKillNames = false;
+	// Set when the checkbox is clicked in this panel. Save writes only edited toggles: an
+	// nchud edit made while F5 is open survives an untouched checkbox, and an explicit F5
+	// edit wins even when it ends on the value F5 opened with.
+	bool bHideFriendlyCrosshairSignEdited = false;
+	bool bHideTeammateOverheadTagsEdited = false;
+	bool bCollapseRepeatedKillNamesEdited = false;
 
 	// ── Force Models settings ── working copy of the live config, edited in-place by the tab's
 	// widgets via bool*/float* lambdas and written back on Save. The combo option lists are members
@@ -94,6 +110,13 @@ private:
 	// ── Tabs ──
 	ENCPMenuTab ActiveTab = ENCPMenuTab::Home;
 	TSharedPtr<class SBox> ContentArea;
+	// Tab body height cap: the viewport minus the title, tab strip and Save/Cancel rows,
+	// so a tall tab scrolls instead of pushing the buttons off-screen at 720p/768p.
+	TSharedPtr<SWidget> TitleRow;
+	TSharedPtr<SWidget> TabRow;
+	TSharedPtr<SWidget> ButtonRow;
+	float CachedViewHeight = 0.f;
+	FOptionalSize GetTabContentMaxHeight() const;
 	TSharedRef<SWidget> BuildHomeTab();
 	TSharedRef<SWidget> BuildICTFTab();
 	TSharedRef<SWidget> BuildForceModelsTab();
@@ -123,6 +146,7 @@ private:
 
 	// iCTF handlers
 	void OnAllowGibChanged(ECheckBoxState NewState);
+	void OnShowDeathBloodChanged(ECheckBoxState NewState);
 	void OnShowRagdollChanged(ECheckBoxState NewState);
 	void OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType);
 	void OnShowOwnBeamChanged(ECheckBoxState NewState);
@@ -131,9 +155,8 @@ private:
 	void OnScreenshotChanged(ECheckBoxState NewState);
 
 	// Force Models tab builders/helpers
-	/** One per-side settings row. bFixedColour (the Red/Blue rows): the style forces the colours
-	 *  wholesale (zero-config red/blue), so the Model picker + H/S/V are collapsed and only Glow +
-	 *  Armour mode show. */
+	/** One per-side settings row. bFixedColour (the Red/Blue rows) hides H/S/V because the style
+	 *  fixes those colours. Model, Tint, Glow and Armour controls remain available. */
 	TSharedRef<SWidget> BuildSideRow(const FString& Label, FNCPlusModelSettings* Side, bool bFixedColour = false);
 	TSharedRef<SWidget> MakeFlagCheck(const FString& Label, bool* Flag);
 	TSharedRef<SWidget> MakeLabeledSpin(const FString& Label, float* Value, float Min, float Max, float Delta);

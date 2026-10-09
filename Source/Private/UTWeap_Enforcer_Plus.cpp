@@ -9,6 +9,8 @@
 #include "UTGameState.h"
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
+#include "NCPlusDisplaySettings.h"
+#include "NCPlusWeaponPresentation.h"
 #include "Components/CapsuleComponent.h"
 #include "Particles/ParticleSystem.h"
 #include "Particles/ParticleSystemComponent.h"
@@ -81,6 +83,16 @@ bool AUTWeap_Enforcer_Plus::ShouldDrawFFIndicator(APlayerController* Viewer,
 	bDrawIndicator = Super::ShouldDrawFFIndicator(Viewer, HitPlayerState);
 	FriendlyTargetProbeCache.Store(Viewer, UTOwner, HitPlayerState, bDrawIndicator);
 	return bDrawIndicator;
+}
+
+void AUTWeap_Enforcer_Plus::DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta)
+{
+	if (NCPlusDisplaySettings::GetHideFriendlyCrosshairSign())
+	{
+		NCPlusWeaponPresentation::DrawWeaponCrosshairWithoutFriendlySign(this, WeaponHudWidget, RenderDelta);
+		return;
+	}
+	Super::DrawWeaponCrosshair_Implementation(WeaponHudWidget, RenderDelta);
 }
 
 float AUTWeap_Enforcer_Plus::GetRewindSeconds() const

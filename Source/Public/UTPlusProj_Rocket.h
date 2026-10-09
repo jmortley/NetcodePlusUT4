@@ -7,8 +7,9 @@
 /**
  * Enhanced rocket projectile for NetcodePlus.
  *
- * Adds client-notify projectile rewind: when the client's fake rocket
- * hits an enemy, sends an RPC so the server can validate with rewind.
+ * Adds client-notify projectile rewind: when the shooter's replicated real
+ * rocket hits an enemy, sends an RPC so the server can validate with rewind.
+ * Loaded rockets use their exact weapon/epoch/volley/ordinal identity.
  * Also prevents replicated primary rockets from adopting another player's
  * client fake by requiring matching instigators and bounded separation.
  *
@@ -22,6 +23,18 @@ class NETCODEPLUS_API AUTPlusProj_Rocket : public AUTProj_Rocket
 
 public:
 	AUTPlusProj_Rocket(const FObjectInitializer& ObjectInitializer);
+
+    // Initial identity prevents a loaded rocket from stealing a primary fake
+    // before the exact per-ordinal owner RPC performs its visual handoff.
+    UPROPERTY(Replicated)
+    uint32 LoadedOwnershipEpoch;
+    UPROPERTY(Replicated)
+    uint32 LoadedVolleyId;
+    UPROPERTY(Replicated)
+    uint8 LoadedRocketOrdinal;
+    UPROPERTY(Replicated)
+    class AUTPlusWeap_RocketLauncher* LoadedVolleyWeapon;
+    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	virtual void ProcessHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp,
 		const FVector& HitLocation, const FVector& HitNormal) override;
@@ -44,4 +57,5 @@ private:
 	FVector PrimarySyncEstimateVelocity;
 	float PrimarySyncCorrectionSpeed;
 	bool bForcingShutdownExplosion;
+    bool bLoadedIdentityDelivered = false;
 };

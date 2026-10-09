@@ -42,18 +42,27 @@ rules — just add `NCWepMut` and the gunplay is NetcodePlus.
   Duel, Shaft Arena, Shock Domination — §4) layer ELO, fair‑spawn logic, the custom HUD, end‑of‑match
   cap replays, host/captain pause and the version gate **on top of** those same weapons.
 
-**Two weapon‑balance flavors — pick one.** There are two weapon‑replacement paks; both run on the *same*
-NetcodePlus netcode and differ only in weapon **balance**:
+**Two weapon‑balance flavors — pick one.** There are two weapon-replacement paks.
+Their replacement lists and weapon tuning differ:
 
 - **`NCWepMut`** — the **NA‑style** competitive balance (the tuning the UTPugs / North‑American scene
   plays). The default choice for a NetcodePlus hub.
-- **`NCStockWeapons`** — **stock UT4 weapon balance** on the NetcodePlus netcode, for admins / leagues
-  that want Epic's stock feel with the better hit registration. Primary fire and the normal charged shots
-  are **100% stock values**, just lag‑compensated. *Caveat:* the Rocket Launcher keeps the NetcodePlus
-  behaviour (spiraling rockets + grenades), so RL is not bit‑for‑bit stock — everything else is.
+- **`NCStockWeapons`** uses stock-oriented Shock, Flak, Rocket and Sniper replacements
+  with NetcodePlus hit registration. The inspected 4.15 replacement table retains stock
+  Link, Minigun, Bio, Enforcer, Grenade Launcher and Hammer classes. This is not exact stock
+  behavior: switching times are adjusted, and Rockets retain NCP spiral/grenade modes
+  and an ammo maximum of 22 rather than 21.
 
 Pick exactly one and add it like any other token (**don't run both**) — e.g. `?mutator=...,NCStockWeapons`
 in place of `NCWepMut`.
+
+For **ElimPlus**, also select `?WeaponSet=Stock`. Its built-in ElimPlusMutator uses
+that URL option to choose the stock loadout and character. NCStockWeapons alone
+does not convert the competitive NCP classes already in ElimPlus's default inventory.
+ElimPlus still supplies its own round rules, custom hammer and ammo policy; it does
+not reproduce Absolute Elimination's defaults. See the
+[Absolute 1.13 comparison](Docs/absolute-elim113-comparison.md) for verified differences
+and the asset versions inspected.
 
 Requires clients to run the NetcodePlus plugin (via the launcher) and to have the matching weapon pak —
 `NCWepMut` **or** `NCStockWeapons` (both are launcher‑maintained; §2). Neither is auto‑added by anything —
@@ -451,14 +460,28 @@ Fallbacks for the launch‑URL options of the same name (see §7). Leave empty u
 CTF/iCTF uses a two-stage, NewCTF-style server-side selector above `SpawnSystemThreshold`.
 Each team's authored starts are shuffled once. Primary scans that rotating queue and takes
 the first start clear of enemy proximity/vision, teammate proximity/vision, nearby flags,
-the recent-use tail, the last killer, and NCP's flag-carrier/robbed-base protections. A start
-is moved to the queue tail only after a pawn successfully spawns there; preview choices do
-not consume it.
+the recent-use tail, the last killer, and NCP's flag-carrier/robbed-base protections. Both
+primary and secondary also exclude that player's last successfully used start and any
+start within **100 Unreal units (1 metre), measured in 3D**, of its saved location. A
+teammate spawning elsewhere does not lift this per-player exclusion. A start is moved
+to the queue tail and the player's history is updated only after a pawn successfully
+spawns there; preview choices and failed spawns do not consume it.
 
 If every primary candidate is blocked, secondary chooses the non-cycle start with the
 greatest capped weighted distance from all living players. Teammates contribute less and
-enemy flag carriers contribute more. If secondary is disabled or no tagged team start is
-available, Epic's selector is used.
+enemy flag carriers contribute more. If secondary is disabled, stock spawn ratings choose
+among the same filtered candidates, so cached stock choices cannot bypass the exclusion.
+
+If the per-player exclusion removes every non-cycle candidate, the selector first admits
+distinct starts from the team queue's recent-use tail. Only when **every valid own-team
+start** is the player's previous start or within that 100-unit radius may it repeat that
+location. These exceptional selections emit an unconditional `NCPlusCTF spawn emergency`
+Warning, even with `LogSpawnChoices=false`: `reason=team-cycle-exhausted` relaxes only
+team rotation; `reason=no-distinct-team-start` permits the previous spot as a last resort.
+The warning includes the selected pass, previous/chosen starts and positions, and which
+exclusion was relaxed. No tagged team pool falls back to Epic's selector with an explicit
+`reason=no-usable-team-pool` warning. The small-game threshold and legacy selector remain
+unchanged.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -469,9 +492,9 @@ available, Epic's selector is used.
 | `SpawnFriendlyBlockRange` | float | `150` | A teammate this close blocks primary. |
 | `SpawnFriendlyVisionBlockRange` | float | `150` | A teammate with clear LOS inside this range blocks primary. |
 | `SpawnFlagBlockRange` | float | `750` | An enemy flag carrier or an unheld home/dropped flag this close blocks primary. |
-| `SpawnMinCycleDistance` | int | `1` | Number of most recently used team starts excluded from both primary and secondary. |
+| `SpawnMinCycleDistance` | int | `1` | Number of most recently used team starts normally excluded from both passes. Relaxed before the per-player previous-spawn exclusion if necessary; see emergency policy above. |
 | `SpawnExtrapolateMovement` | bool | `true` | Project remote players by half RTT (capped at 250 ms RTT) for distance/LOS checks. |
-| `SpawnSecondaryEnabled` | bool | `true` | Use the weighted-distance fallback when primary finds no safe start. |
+| `SpawnSecondaryEnabled` | bool | `true` | Use the weighted-distance fallback when primary finds no safe start. `false` uses stock ratings within the filtered team candidates. |
 | `SpawnSecondaryMaxDistance` | float | `2000` | Cap each player's distance contribution to a secondary candidate. |
 | `SpawnSecondaryOwnTeamWeight` | float | `0.2` | Secondary distance multiplier for teammates. |
 | `SpawnSecondaryCarrierWeight` | float | `2.0` | Secondary distance multiplier for enemy flag carriers. |
@@ -479,7 +502,7 @@ available, Epic's selector is used.
 | `SpawnKillerAvoidRadius` | float | `2500` | Last killer inside this range blocks primary. `0` = off. |
 | `SpawnFlagCarrierLOSAvoidRadius` | float | `3500` | Extends the primary LOS exclusion specifically for the enemy carrying your flag. `0` = off. |
 | `SpawnRobbedBaseAvoidCount` | float | `2` | Size of the nearest-own-base set whose one rotating member is blocked while your flag is out. Kept as a float for compatibility; fractional values are truncated. |
-| `LogSpawnChoices` | bool | `false` | Log primary/secondary route, block counts, selected start, and actual spawned location. |
+| `LogSpawnChoices` | bool | `false` | Log selection route, block counts (including `previousExcluded`), selected start, and actual spawned location. Emergency selection warnings are always emitted. |
 
 Legacy-only controls used when `SpawnUseNewCTFSelection=false` remain supported:
 `SpawnWeightedRandom`, `SpawnRandomBase`, `SpawnRandomSpread`, `SpawnTieBandWidth`,
@@ -519,15 +542,19 @@ cvars.** Most are live‑toggleable; none are cheat‑gated.
 | `ncp.HitscanSearchPadding` | `40` | Extra radius (uu) at every claimed-target ±15/30/45 ms time-search rung. Set `45` for the previous behavior. |
 | `ncp.HitscanRescueLeadGate` | `0` | Rescue lead gate, evaluated **per accepted time-search rung**: a rung may not credit a capsule position more than `ncp.HitscanMaxRescueLeadUU` ahead of the render-epoch estimate (`half ACK-RTT + ncp.HitAttribRenderExtraMs`) along the target's historical motion. `0` = shadow — verdicts appear as `rescueLead=` fields on `[HitAttrib]` lines (**requires `ncp.HitAttribDebug=1`**; without it shadow mode emits nothing), no behavior change. `1` = enforce — over-lead rungs are skipped (a deeper rung may still accept); if no rung survives, only the **claimed-target search** is denied — any primary hit or world impact stands unchanged. Shooters with no server RTT measurement fail closed (`blocked-no-timing`). Note this bounds credited **positions**, not aim: for steady movers it behaves like a target-speed threshold, and above the 250 ms rewind cap the epoch gap grows so honest fast movement at extreme RTT can exceed the cap. Count `rescueLead=shadow-fail` (measured over-cap rescues only — `no-timing` rows are excluded by construction) across a shadow night before enforcing. |
 | `ncp.HitscanMaxRescueLeadUU` | `40` | The credited-lead cap (uu) for the rescue lead gate. Under default epochs this doubles as a ~1150 uu/s steady-speed threshold (dodges block, runs pass). The 2026-08 pug corpus motivates 40; **calibrate from shadow-night `rescueLeadUU`/`rescueRayAheadUU` data before enforcing**, raise if honest high-ping regulars lose rescues, lower only with data. |
-| `ncp.UnclaimedRenderGate` | `1` | Server rejects a hitscan hit the shooter's own client never claimed, by reconstructing what that shooter actually had rendered. This is the "gifted shots at high ping" fix. Shipped to production **on 327** (backported), not new in 328. **Leave at `1`** — if honest aim is being demoted, widen `ncp.UnclaimedRenderSlack` rather than disabling the gate. |
-| `ncp.UnclaimedRenderSlack` | `20` | Extra tolerance (uu) the render check allows before demoting a hit. Raise if live logs show demotes clustered on honest body aim. |
+| `ncp.UnclaimedRenderGate` | `1` | An unclaimed exact-hitscan pawn hit must intersect the server's **estimated** render-time capsule. The 328 history/posture tightening requires bracketed position history without teleport discontinuities and known historical posture; missing evidence rejects the hit. Ages beyond 250 ms reject instead of being clamped. `0` disables this entire gate's enforcement; with `ncp.HitAttribDebug=1`, failures still log. Claimed routes are unaffected. See [history, posture and probe details](Docs/unclaimed-render-validation.md). |
+| `ncp.UnclaimedRenderSlack` | `20` | Extra tolerance (uu) around the reconstructed capsule. This cannot override missing history or ambiguous posture. Existing server overrides are unchanged. |
+| `ncp.UnclaimedRenderProbeMs` | `10` | **Diagnostic only**, requires `ncp.HitAttribDebug=1`. After the central unclaimed check passes, sample the same target this many ms younger and older (default ±10 ms; configurable 0..50 per side, `0` disables). Logs agreement or unavailable evidence, never rejects a hit. This exploratory interval is not a calibrated client timing window. |
 | `ncp.HitAttribRenderExtraMs` | `30` | Extra time (ms) added to the exact-hitscan render-position estimate (`half RTT + extra`). Used by the unclaimed Shock/Sniper render gate, hit-attribution telemetry, **and the rescue lead gate's render epoch** (changing it moves that gate's enforcement geometry); it no longer tunes Link/Minigun. This remains an estimate, not a client-supplied frame timestamp. |
 | `ncp.RenderCredit` | `1` | Legacy name for render-authoritative targeting on opted-in, claimless fire (NCP Link beam and Minigun primary). At `1`, the estimated **render-time capsule replaces raw rewind history as the sole target-selection sample**; it is not `raw OR render`. Ray, spread, world clipping, and timing estimate remain server-owned. `0` is the live rollback to raw-rewind-only behavior. Link/Minigun use server ACK-derived RTT rather than trusting client-reported `ExactPing`; pawn damage fails closed during the connection's brief RTT/history warm-up. With `ncp.HitAttribDebug=1`, `[RenderAuthority]` accepted-target lines appear under `Log LogUTWeaponFix Verbose`; this is high-volume for a held beam. |
 | `ncp.RenderCreditExtraMs` | `15` | Link/Minigun-only presentation-delay estimate added beyond half the server-observed RTT. Kept separate from `ncp.HitAttribRenderExtraMs` because claimless continuous/spread fire uses the client proxy-prediction path. Lower values sample a newer target position; changing this does not move the Shock/Sniper unclaimed-render epoch. |
 | `ncp.RenderCreditSlack` | `0` | Extra radius (uu) around the render-authoritative capsule. Keep at `0` unless evidence shows the server-side render estimate needs spatial tolerance. |
 | `ncp.SlideGraceMs` | `250` | **New in 328.** Window after a floor slide starts during which validation accepts the standing capsule. A slide shrinks the server capsule instantly, but the shooter still sees a standing body for one replication interp plus the anim blend — without this, shots through the visible torso were server-side air. `0` = off (pre-328 behaviour). |
 | `ncp.HitscanSlideSearchExtraMs` | `15` | **Hotfix 10.** One additional claimed-target time-search rung (ms, clamped 0–15) beyond the standard ±45, granted **only** when server-recorded posture history proves the target was mid-slide at that exact epoch. The extra rung uses the physical slide capsule with **zero** search padding, requires ACK-derived timing and continuous non-teleport history, and never exceeds the tolerance the server already grants a fire RPC. `0` = standard search only. Hitscan validation now also reconstructs slide/stand posture from history at every rung — a target standing at the shot's epoch is validated standing even if they're sliding now, and vice versa. |
+| `ncp.ProjectileOriginRewind` | `0` | **Hotfix 11.** Experimental server-side shooter-origin rewind for projectile spawns: `1` = spawn from the shooter's rewound historical position, `0` = stock origin (default). A fire-mode sentinel bug had kept this path dormant since it was written; Hotfix 11 fixed the sentinel and gated the rewind behind this cvar so shipped projectile origins are unchanged. **Leave at `0`**: the client move is replicated before the fire input is applied, so the rewind moves the origin *behind* the shooter by speed × RTT/2 and the fake/authoritative divergence grows with ping. Dogfood only. |
+| `ncp.FireProvenance` | `0` | **Hotfix 12.** Firing-authority diagnostics. On a dedicated server a NetcodePlus firing state can now only be entered by an accepted, numbered client request (the stock 0.2 s held-button sync is filtered for those modes, Start and Stop). `1` logs the full `[NCFireAuth]` trail — SYNC / ACCEPT / RESERVATION_BUSY / BLOCK_ENTRY / BLOCK_SHOT / SHOT / SPAWN / STOP / CANCEL — at Warning level. Turn on for one session when investigating "my shot didn't fire" reports; **high volume on a populated server**. `0` = off (default). |
 | `ncp.HitAttribDebug` | `0` | Per‑shot hit‑attribution telemetry (`[HitAttrib]` log lines). Diagnostic only — **high volume on a populated server**, leave `0` unless investigating a specific report. |
+| `ncp.ShotOriginDebug` | `0` | Server precision-shot origin diagnostics. `1` logs `[NCShotOrigin]` with the actual firing origin, delayed marker identity/age/position, accepted RPC route and server queue time. No added rewind or protocol change. Marker age is not packet latency. See [capture instructions and field definitions](SHOT-ORIGIN-DIAGNOSTICS.md); disable after the repro. |
 | `ncp.ShockServerTickHz` | `0` | Server shock‑core tick rate (0 = 240 Hz; >0 = that Hz, 30–720; read at spawn). |
 | `ncp.CTFReplayMinDemoSeconds` | `200` | Min server‑demo age before the end‑of‑match decisive‑cap replay fires (0 = always — not advised; can crash the killcam in an early match). Requires a replay server (§8). |
 | `ncp.CTFReplayBuildupSeconds` | `8` | Seconds of run‑up shown before the featured cap. |
@@ -569,6 +596,7 @@ These are set by players, not the server, but admins should know them for troubl
 | `ncp.ShockConverge` | `1` | Client fake→real shock‑ball convergence interp (the ~700 ms, 60 uu‑capped pull of the rendered fake toward the real). `0` = fake renders its own predicted path. |
 | `ncp.ShockHandoff` | `1` | Client stuck‑ball handoff: when the real ball stops, destroy the fake and reveal the real so the shooter sees the stop. `0` = no reveal. |
 | `ncp.WarmupSpawns` | `1` | Warmup‑only spawn‑point markers (team‑colored, facing tick + distance) in CTF / iCTF, as a learning aid. `0` = off. |
+| `ncp.HighPollingMouseCoalesce` | `0` | Opt‑in (launcher exposes it as *Experimental: batch high‑polling mouse input*). Coalesces captured gameplay mouse motion to one delivery per rendered frame — identical summed deltas and sample count, minus Slate's per‑packet routing overhead. Worthwhile at 4–8 kHz polling; a wash at 1 kHz. UI/cursor/focus‑loss paths keep stock semantics. |
 | `ncp.KillcamAudioGuard` | `1` | **Hotfix 10.** Pauses looping audio owned by the *hidden* killcam world (fixes weapon/ambient loops leaking over live play indefinitely); resumes only if that killcam is shown. `0` = stock behaviour. |
 | `ncp.FriendlyTargetProbeHz` | `240` | **Hotfix 10.** Rate cap on the crosshair friendly/name trace — stock performed one 50,000‑uu complex trace **every rendered frame** (700/s at 700 fps). Camera cuts, view‑target changes, and discontinuity‑sized pose jumps refresh instantly, so the FF indicator never looks stale on a real cut. `0` = stock every‑frame probing; range 30–1000. Purely visual — no effect on firing, aim, input, or hit validation. |
 
@@ -810,6 +838,9 @@ CTF respawn + small‑game tuning is in Mod.ini `[UTPUGS_STATS]` (`CTFRespawnWai
 `CTFSmallGameMaxPlayers`). For tournaments add `?Tournament=1` for ServerShield.
 
 ### 11.3 Wipeout — 4v4
+
+Wipeout keeps super-health pickups (health vials and the keg of health) and its
+custom candy pickups. Ordinary health packs are still removed by the gamemode.
 
 ```json
 {
