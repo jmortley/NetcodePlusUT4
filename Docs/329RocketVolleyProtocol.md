@@ -37,13 +37,22 @@ no RPCs, replicated properties or class members and is a client-DLL-only fix
 compatible with the existing 329 server protocol.
 
 This also handles alt already held on an outgoing NCP weapon before the switch
-key (the existing GhostFix handoff carries it), and held input that reaches the
-launcher at spawn. The spawn verifier can alternatively replay a held button
-directly through `StartFire`, which already uses this protocol. A cancelled switch
-back to a lowering launcher uses the same recovery **if a held bit survives**.
-It does not capture a fresh alt press during the launcher's own put-down:
-`CanBeginLoadedVolleyInput()` still rejects Unequipping/pending-weapon input before
-it can reach this state. Do not claim that separate input-latching case is fixed.
+key (the pawn's held bit survives PutDown; with `ncp.GhostFix` 1, which is off by
+default, PutDown re-derives it from the physical hold), and held input that
+reaches the launcher at spawn. The spawn verifier can alternatively replay a held
+button directly through `StartFire`, which already uses this protocol. A cancelled
+switch back to a lowering launcher uses the same recovery when a held bit survives.
+
+An alt press during the launcher's own put-down (Unequipping, or any pending
+switch to another weapon) belongs to the incoming weapon. The launcher's mode-1
+`StartFire` hands it to `AUTWeaponFix::StartFire`, whose swap-away branch only
+latches the pawn's held bit and returns before any fire RPC, as stock and 328 did.
+Previously the loaded path rejected it in `CanBeginLoadedVolleyInput()` and dropped
+it, so rockets-to-shock with alt pressed during the switch fired nothing until a
+re-press. A genuine mode-1 release while switching away clears that latch and the
+GhostFix held flag, mirroring `AUTWeaponFix::StopFire` without its legacy stop
+RPCs, so a released tap cannot ghost-fire the incoming weapon. This adds no RPCs
+or members and only runs on the owning client.
 
 Native switch regressions execute the production charged `BeginState`, `EndState`
 and volley methods with stock-style synchronous state dispatch. They check one

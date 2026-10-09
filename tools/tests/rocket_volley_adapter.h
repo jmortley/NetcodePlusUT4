@@ -133,6 +133,7 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     TArray<State*> FiringState{ };TArray<RocketMode> RocketFireModes;
     bool bDisableAltLoading=false,bAllowGrenades=true,bAllowAltModes=true,SpiralRocketClass=true;
     bool bDrawRocketModeString=false,bHandlingRetry=false;
+    bool bFireHeldByPlayer[2]={false,false}; // AUTWeaponFix's GhostFix held flags.
     uint8 CurrentFireMode=1;int32 CurrentRocketFireMode=0,NumLoadedRockets=0,NumLoadedBarrels=0,Ammo=9;
     uint8 CurrentlyFiringMode=255;TArray<uint8> FireModeActiveState;
     int BeginCalls=0,EndCalls=0,GotoCalls=0,Refund=0;float EarliestFireTime=0,TestRemaining=0;

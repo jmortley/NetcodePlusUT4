@@ -136,6 +136,16 @@ void AUTPlusWeap_RocketLauncher::StartFire(uint8 FireModeNum)
         Super::StartFire(FireModeNum);
         return;
     }
+    AUTWeapon* const IncomingWeapon = UTOwner ? UTOwner->GetPendingWeapon() : nullptr;
+    if (UTOwner && (CurrentState == UnequippingState || (IncomingWeapon && IncomingWeapon != this)))
+    {
+        // Alt pressed while this launcher is being put away belongs to the incoming
+        // weapon, as in stock and 328. AUTWeaponFix's swap-away branch latches the
+        // pawn's held bit and returns before any fire RPC; the loaded path below
+        // would reject the press (CanBeginLoadedVolleyInput) and drop it.
+        Super::StartFire(FireModeNum);
+        return;
+    }
     if (bPendingLoadedVolleyInput)
     {
         TryDrainLoadedVolleyInput(); // Repeated presses do not extend the deadline.
@@ -274,6 +284,16 @@ void AUTPlusWeap_RocketLauncher::StopFire(uint8 FireModeNum)
     {
         Super::StopFire(FireModeNum);
         return;
+    }
+    if (!bHandlingRetry)
+    {
+        // Mirror AUTWeaponFix::StopFire without its legacy stop RPCs: a genuine
+        // release ends held alt intent even mid-switch, so a press latched for
+        // the incoming weapon (see StartFire) cannot ghost-fire it.
+        bFireHeldByPlayer[1] = false;
+        AUTWeapon* const IncomingWeapon = UTOwner ? UTOwner->GetPendingWeapon() : nullptr;
+        if (UTOwner && (CurrentState == UnequippingState || (IncomingWeapon && IncomingWeapon != this)))
+            UTOwner->SetPendingFire(1, false);
     }
     if (bPendingLoadedVolleyInput)
     {

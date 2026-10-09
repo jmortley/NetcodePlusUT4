@@ -223,3 +223,72 @@ static void TestHeldAltSwitchRecovery()
         assert(F.Weapon.GotoCalls == 0 && F.Weapon.SentBegins.Num() == 0);
     }
 }
+
+// Alt pressed while the launcher itself is being put away belongs to the
+// incoming weapon. The launcher hands it to AUTWeaponFix's swap-away latch
+// (counted here as StockStartCalls) and never opens a loaded volley for it.
+static void TestOutgoingLauncherAltHandoff()
+{
+    // Lowering, a requested switch (incl. a deferred mid-burst put-down), and a
+    // switch before ownership: all hand off; none buffer, allocate or send.
+    for (int Switch = 0; Switch != 3; ++Switch)
+    {
+        FHeldAltSwitchFixture F;
+        AUTPlusWeap_RocketLauncher Incoming;
+        if (Switch == 0) F.Weapon.CurrentState = F.Weapon.UnequippingState;
+        else F.Pawn.PendingWeapon = &Incoming;
+        if (Switch == 2) F.Weapon.LoadedOwnershipEpoch = 0;
+        F.Weapon.StartFire(1);
+        assert(F.Weapon.StockStartCalls == 1 && F.Weapon.StockStopCalls == 0);
+        assert(!F.Weapon.HasLoadedVolley() && F.Weapon.SentBegins.Num() == 0);
+        assert(!F.Weapon.bPendingLoadedVolleyInput && F.Weapon.LastClientLoadedVolleyId == 40);
+        assert(F.Weapon.BeginCalls == 0 && F.Weapon.TestLoadStarts == 0);
+    }
+
+    // Switching back before the launcher is down: the latched bit (AUTWeaponFix's
+    // swap branch, simulated) re-enters through the held-switch recovery.
+    {
+        FHeldAltSwitchFixture F;
+        AUTPlusWeap_RocketLauncher Incoming;
+        F.Weapon.CurrentState = F.Weapon.UnequippingState;
+        F.Pawn.PendingWeapon = &Incoming;
+        F.Weapon.StartFire(1);
+        assert(F.Weapon.StockStartCalls == 1 && F.Weapon.SentBegins.Num() == 0);
+        F.Pawn.PendingWeapon = nullptr; // stock LocalSwitchWeapon switch-back
+        F.FinishRaise();                // latched bit still held through BringUp
+        F.AssertOneClientCharge();
+    }
+
+    // A genuine release during the put-down clears that latch and the GhostFix
+    // flag, with or without an older queued volley, and sends no stock Stop. A
+    // queued volley still receives its existing numbered release.
+    for (bool QueuedVolley : {false, true})
+    {
+        FHeldAltSwitchFixture F;
+        AUTPlusWeap_RocketLauncher Incoming;
+        if (QueuedVolley) F.Weapon.ResetLoadedVolley(41);
+        F.Weapon.CurrentState = F.Weapon.UnequippingState;
+        F.Pawn.PendingWeapon = &Incoming;
+        F.Weapon.StartFire(1);
+        F.Pawn.SetPendingFire(1, true);       // AUTWeaponFix swap-away latch
+        F.Weapon.bFireHeldByPlayer[1] = true; // its flag when ncp.GhostFix=1
+        F.Weapon.StopFire(1);
+        assert(!F.Pawn.IsPendingFire(1) && !F.Weapon.bFireHeldByPlayer[1]);
+        assert(F.Weapon.StockStartCalls == 1 && F.Weapon.StockStopCalls == 0);
+        assert(F.Weapon.SentReleases.Num() == (QueuedVolley ? 1 : 0));
+        assert(F.Weapon.EndCalls == (QueuedVolley ? 0 : 1));
+    }
+
+    // Outside a switch a release keeps the 329 queued-volley rule: the held bit
+    // was already cleared when the Begin queued, and the release is retained.
+    {
+        FHeldAltSwitchFixture F;
+        F.Weapon.TestRemaining = 0.2f;
+        F.Weapon.StartFire(1);
+        assert(F.Weapon.StockStartCalls == 0 && F.Weapon.SentBegins.Num() == 1);
+        assert(!F.Pawn.IsPendingFire(1) && F.Weapon.LoadedVolleyBeginHandle.Active);
+        F.Weapon.StopFire(1);
+        assert(F.Weapon.SentReleases.Num() == 1 && F.Weapon.EndCalls == 0);
+        assert(F.Weapon.HasLoadedVolley() && F.Weapon.StockStopCalls == 0);
+    }
+}
