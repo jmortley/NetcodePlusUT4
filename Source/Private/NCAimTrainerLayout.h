@@ -11,6 +11,7 @@ namespace NCAimTrainerLayout
     constexpr float WiggleSafetyMargin = 15.f;
     constexpr float HeadWiggleRange = 80.f;
     constexpr float PopupLongStrafeRange = 220.f;
+    constexpr float InstagibStrafeRange = 400.f;
 
     struct FSeat
     {
@@ -118,7 +119,7 @@ namespace NCAimTrainerLayout
         return Index == 4 ? 3 : Index == 1 ? 2 : 1;
     }
 
-    inline FSeat PopupSeat(int Index, int Variant = 0)
+    inline FSeat PopupSeat(int Index, int Variant = 0, bool bInstagib = false)
     {
         switch (Index)
         {
@@ -137,15 +138,15 @@ namespace NCAimTrainerLayout
         case 4:
             // The right alternative stays in front of the tall platform so
             // the fixed-position trainee can actually see the whole target.
-            if (Variant == 1) { return { -600.f, -300.f, 1450.f, 50.f, 100.f, 0.f }; }
+            if (Variant == 1) { return { -600.f, -300.f, bInstagib ? 1400.f : 1450.f, 50.f, bInstagib ? 160.f : 100.f, 0.f }; }
             // The deep left corridor gives forward/backward dodges room while
             // retaining clear separation from the foreground dodger's X plane.
-            if (Variant == 2) { return { 800.f, 1400.f, -1550.f, 25.f, 150.f, 0.f }; }
-            return { -600.f, -300.f, -1450.f, 50.f, 180.f, 0.f };
+            if (Variant == 2) { return { 800.f, 1400.f, bInstagib ? -1300.f : -1550.f, 25.f, bInstagib ? 320.f : 150.f, 0.f }; }
+            return { -600.f, -300.f, bInstagib ? -1300.f : -1450.f, 50.f, bInstagib ? 320.f : 180.f, 0.f };
         default:
             // Forward slide runway and a wider occasional strafe share this
             // low platform. Tighter spawn jitter leaves room for the full capsule.
-            return { 1000.f, 2200.f, -850.f, 10.f, 180.f, PopupPlatform(0).Height };
+            return { 1000.f, 2200.f, -850.f, 10.f, bInstagib ? InstagibStrafeRange : 180.f, PopupPlatform(0).Height };
         }
     }
 

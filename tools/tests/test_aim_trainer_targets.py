@@ -242,6 +242,7 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     void HideTarget();
     void ResetTargetMovement();
     void ReverseStrafe();
+    void ConfigurePopupStrafe(const FVector&,float,float);
     bool TryTrainerDodge(float);
     bool TryTrainerPopupDodge(int32,const FVector&,const FVector&,bool=false);
     bool TryTrainerSlideForward();
@@ -267,7 +268,22 @@ ANCAimTrainerTarget ActivePopup() {
 CASES = r'''
 int main(int argc,char**argv) {
     Require(argc==2,"case required"); const std::string name(argv[1]);
-    if(name=="reverse") {
+    if(name=="popup_anchor") {
+        ANCAimTrainerTarget target;
+        target.ActivateTarget(FVector(-1000,450,103),true);
+        const int teleports=target.Teleports;
+        target.ConfigurePopupStrafe(FVector(-1000,0,103),800.f,.1f);
+        Require(target.StrafeCenter.Y==0.f && target.Position.Y==450.f && target.StrafeDirection==-1.f
+            &&target.StrafeRange==800.f && target.Teleports==teleports,"random start shifted the safe lane or teleported after configuration");
+        target.Position.Y=805.f; target.ConfigurePopupStrafe(FVector(-1000,0,103),800.f,.9f); target.Tick(.016f);
+        Require(target.LastInput.Y==-1.f,"random direction overrode native boundary braking");
+        target.ActivateTarget(FVector(1500,-850,103),false); target.StartWiggle(400.f);
+        target.ConfigurePopupStrafe(FVector(1500,-850,103),350.f,.9f);
+        Require(target.WiggleRange==350.f && target.StrafeRange==350.f && target.Move.MaxWalkSpeed==500.f,
+            "varied walking band changed native speed or did not survive posture recovery");
+        target.Role=1; target.ConfigurePopupStrafe(FVector(),40.f,0.f);
+        Require(target.StrafeRange==350.f,"client reconfigured authority target movement");
+    } else if(name=="reverse") {
         for(int guard=0;guard<4;++guard) {
             auto target=Active();
             if(guard==0) target.Role=1;
@@ -360,10 +376,10 @@ int main(int argc,char**argv) {
         Require(target.bTrainerWiggle&&target.bTrainerStrafe&&target.StrafeRange==20.f
                 &&target.Move.MaxWalkSpeed==500.f&&target.Move.Mode==MOVE_Walking,"wiggle changed profile speed or movement mode");
         target.StartWiggle(1000.f);
-        Require(target.StrafeRange==220.f,"wiggle exceeded maximum range or clipped wider left lanes");
-        target.Position.Y=520.f; target.Tick(.016f);
+        Require(target.StrafeRange==400.f,"wiggle exceeded maximum range or clipped wider left lanes");
+        target.Position.Y=700.f; target.Tick(.016f);
         Require(target.LastInput.Y==-1.f,"wiggle did not reverse at right edge");
-        target.Position.Y=80.f; target.ReverseStrafe();
+        target.Position.Y=-100.f; target.ReverseStrafe();
         Require(target.StrafeDirection==1.f,"wiggle reverse ignored local left edge");
         target.Tick(.016f); Require(target.LastInput.Y==1.f,"wiggle tick escaped local left edge");
         Require(!target.TryTrainerDodge(.8f)&&target.DodgeCalls==0,"headshot wiggle performed a dodge");
@@ -1189,6 +1205,7 @@ class AimTrainerTargetTests(unittest.TestCase):
             "void ANCAimTrainerTarget::HideTarget",
             "void ANCAimTrainerTarget::ResetTargetMovement",
             "void ANCAimTrainerTarget::ReverseStrafe",
+            "void ANCAimTrainerTarget::ConfigurePopupStrafe",
             "bool ANCAimTrainerTarget::TryTrainerDodge",
             "bool ANCAimTrainerTarget::TryTrainerPopupDodge",
             "bool ANCAimTrainerTarget::TryTrainerSlideForward",
@@ -1239,6 +1256,7 @@ class AimTrainerTargetTests(unittest.TestCase):
     def test_controllerless_landing_acceleration_expires_at_stock_deadline(self): self.run_case("landing_recovery")
     def test_wiggle_rejects_invalid_width_hidden_target_and_client_requests(self): self.run_case("wiggle_guards")
     def test_wiggle_boundaries_speed_and_no_dodge_reset_on_next_appearance(self): self.run_case("wiggle_boundaries")
+    def test_random_popup_start_preserves_fixed_lane_and_native_movement(self): self.run_case("popup_anchor")
     def test_target_lifecycle_preserves_selected_movement_and_capsule_profile(self): self.run_case("profile_lifecycle")
     def test_strafe_brakes_with_native_speed_without_teleporting_or_speed_caps(self): self.run_case("braking_lane")
     def test_crouch_guards_and_failed_request_rollback(self): self.run_case("crouch_guards")

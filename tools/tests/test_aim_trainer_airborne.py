@@ -24,6 +24,7 @@ ADAPTER = r'''
 using int32 = int;
 constexpr int ROLE_Authority = 3;
 struct FMath {
+    static float Min(float a,float b) { return std::min(a,b); }
     static bool IsFinite(float value) { return std::isfinite(value); }
     static float Abs(float value) { return std::fabs(value); }
 };
@@ -107,13 +108,15 @@ template<class T> const T* UClass::GetDefaultObject() const {
     return static_cast<const T*>(Kind==1?&instagib:&team);
 }
 struct ANCAimTrainerGame {
+    FNCAimTrainerSpawnBalance AirborneSpawnBalance;
     struct { int TargetsExpired=0, Phase=2, Scenario=9; } Progress;
     struct World { float Now=10.f; float GetTimeSeconds() const { return Now; } } TheWorld;
     struct {
         float Roll=.5f;
         int SlotChoice=0;
-        float FRand() const { return Roll; }
-        float FRandRange(float low,float high) const { return low+(high-low)*Roll; }
+        unsigned Seed=0;
+        float FRand() { if(!Seed) return Roll; Seed=1664525u*Seed+1013904223u; return float(Seed>>8)/16777216.f; }
+        float FRandRange(float low,float high) { return low+(high-low)*FRand(); }
         int RandRange(int low,int high) const { return low+std::min(SlotChoice,high-low); }
     } Schedule;
     struct Terminal { int Slot, Appearance; bool Hit; };
@@ -190,7 +193,83 @@ CASES = r'''
 int main(int argc,char** argv) {
     Require(argc==2,"case missing"); const std::string name(argv[1]);
     using namespace NCAimTrainerLayout;
-    if(name=="falls") {
+    if(name=="adaptive_history") {
+        FNCAimTrainerSpawnBalance balance;
+        for(int i=0;i<3;++i) balance.RecordHit(-800.f);
+        Require(balance.Weight(0)==1.f,"spawn balancing reacted before enough evidence");
+        balance.RecordHit(-800.f);
+        Require(Near(balance.Weight(0),.2f) && balance.Weight(1)==1.f && balance.Weight(2)==1.f,
+            "farmed side was not reduced independently of other zones");
+        for(int i=0;i<4;++i) balance.RecordHit(800.f);
+        Require(balance.Weight(0)==1.f && balance.Weight(2)==1.f,"balanced hits did not restore normal opportunities");
+        for(int i=0;i<4;++i) balance.RecordHit(800.f);
+        Require(Near(balance.Weight(2),.2f) && balance.Weight(0)==1.f && balance.Count==8,
+            "bounded recent history did not forget earlier left hits");
+        balance.Reset();
+        Require(balance.Count==0 && balance.Next==0 && balance.Weight(2)==1.f,"new run inherited farming history");
+        for(int i=0;i<8;++i) balance.RecordHit(0.f);
+        Require(Near(balance.Weight(1),.2f),"center camping bypassed balancing");
+    } else if(name=="adaptive_schedule") {
+        for(bool leftOnly:{false,true}) {
+            int spawned[3]={}, skipped=0;
+            for(int sample=0;sample<1000;++sample) {
+                Fixture f; f.Game.Schedule.Roll=(sample+.5f)/1000.f;
+                f.Game.ActivateAirborneSlot(0,10.f);
+                for(int hit=0;hit<8;++hit) f.Game.AirborneSpawnBalance.RecordHit(-800.f);
+                if(leftOnly) for(int slot=3;slot<6;++slot) {
+                    f.Targets[slot].Visible=true; f.Targets[slot].Position=f.Game.ArenaOrigin+FVector(1700,0,1600);
+                    f.Game.TargetExpiry[slot]=70.f;
+                }
+                f.At(10.f);
+                int count=0;
+                for(int slot=1;slot<6;++slot) if(f.Targets[slot].Activations) {
+                    ++count; ++spawned[FNCAimTrainerSpawnBalance::DropSide(slot)];
+                }
+                Require(count<=1 && f.Game.NextPopupTime>10.f,"adaptive selection bypassed global cadence");
+                if(count==0) ++skipped;
+                f.At(10.f);
+                int repeated=0; for(int slot=1;slot<6;++slot) repeated+=f.Targets[slot].Activations;
+                Require(repeated==count,"skipped adaptive opportunity busy-looped");
+            }
+            if(leftOnly) Require(spawned[0]==200 && skipped==800,"only eligible farmed lane was renormalized back to full rate");
+            else Require(spawned[0]==80 && spawned[1]==200 && spawned[2]==400 && skipped==320,
+                "weighted selection did not reduce farmed side while preserving untouched side opportunities");
+        }
+        Fixture f;
+        for(int i=0;i<8;++i) f.Game.AirborneSpawnBalance.RecordHit(-1000.f);
+        f.Game.Schedule.Roll=.9f; f.Game.Schedule.SlotChoice=0;
+        f.Game.ActivateAirborneSlot(0,10.f);
+        Require(f.Targets[0].Position.Y>f.Game.ArenaOrigin.Y,"jumper respawn ignored farmed launch side");
+    } else if(name=="trajectory_bounds") {
+        int diagonal=0,vertical=0;
+        for(int scenario:{7,8,9,10}) for(float gravity:{-980.f,-1960.f}) {
+            Fixture f; f.Game.Progress.Scenario=scenario; f.Game.Schedule.Seed=9073;
+            const bool rockets=scenario==10;
+            for(int sample=0;sample<2000;++sample) {
+                const int slot=1+sample%5;
+                auto& target=f.Targets[slot]; target.NativeGravityZ=gravity;
+                if(scenario==7) { target.Class=&IGClass; target.Shape.HalfHeight=103.f; }
+                f.Game.ActivateAirborneSlot(slot,10.f);
+                target.Velocity.X==0.f?++vertical:++diagonal;
+                const float duration=f.Game.TargetExpiry[slot]-10.f;
+                const float contact=FallSeconds(target,f.Game.ArenaOrigin,AirborneHazardHeight(rockets));
+                Require(Near(duration,std::max(.75f,contact-1.f)),"native preset lost shortened exposure or minimum opportunity");
+                for(int step=0;step<=20;++step) {
+                    const FVector p=BallisticPosition(target,f.Game.ArenaOrigin,duration*step/20.f);
+                    Require(std::fabs(p.X)+40.f<3200.f && std::fabs(p.Y)+40.f<1800.f
+                        && p.Z+target.Shape.HalfHeight<2000.f,"diagonal fall intersects arena wall or ceiling");
+                    for(int pad=0;pad<2;++pad) {
+                        const FBlock block=AirborneJumpPad(pad,rockets);
+                        const bool overlap=std::fabs(p.X-block.CenterX)<block.SizeX*.5f+40.f
+                            &&std::fabs(p.Y-block.CenterY)<block.SizeY*.5f+40.f
+                            &&p.Z-target.Shape.HalfHeight<block.Height;
+                        Require(!overlap,"diagonal target lands on a pad before its planned expiry");
+                    }
+                }
+            }
+        }
+        Require(diagonal>8500 && diagonal<10500 && vertical>5500,"independent draws did not mix diagonal and ordinary falls");
+    } else if(name=="falls") {
         for(int scenario:{7,8,9,10}) for(float roll:{0.f,.2f,.8f,1.f}) {
             Fixture f; f.Game.Progress.Scenario=scenario; f.Game.Schedule.Roll=roll;
             const bool rockets=scenario==10;
@@ -205,19 +284,23 @@ int main(int argc,char** argv) {
                         && Near(p.Y,seat.CenterY-seat.SpawnJitterY+2.f*seat.SpawnJitterY*roll)
                         && Near(p.Z,AirborneDropHeight(AirborneDropMinZ+(AirborneDropMaxZ-AirborneDropMinZ)*roll,rockets,sideWall)),
                         "fall position ignored the independently selected seat and random range");
-                const float drift=sideWall?(index==1?1.f:-1.f)*(20.f+45.f*roll):-80.f+160.f*roll;
+                const bool diagonal=roll<.6f;
+                const float sign=p.Y < -250.f ? 1.f : p.Y > 250.f ? -1.f : roll<.5f?-1.f:1.f;
+                const float drift=diagonal?sign*(220.f+120.f*roll):sideWall?(index==1?1.f:-1.f)*(20.f+45.f*roll):-80.f+160.f*roll;
                 const float launchScale=AirborneLaunchScale(rockets);
                 Require(Near(f.Targets[index].Velocity.Y,drift*launchScale)
+                        && Near(f.Targets[index].Velocity.X,diagonal?(roll<.5f?-1.f:1.f)*(60.f+60.f*roll)*launchScale:0.f)
                         && Near(f.Targets[index].Velocity.Z,(150.f+150.f*roll)*rate*launchScale),"fall drift lost variation");
                 const float apex=p.Z+f.Targets[index].Velocity.Z*f.Targets[index].Velocity.Z
                     /(-2.f*f.Targets[index].Move.GravityZ);
                 Require(apex+f.Targets[index].Shape.HalfHeight<2000.f,
                         "fall target's full capsule reaches the ceiling at its native ballistic apex");
                 Require(f.Targets[index].Activations==1 && f.Targets[index].Launches==1
-                        && f.Game.LocalAppearances[index]==1 && f.Game.TargetExpiry[index]==70.f
+                        && f.Game.LocalAppearances[index]==1 && f.Game.TargetExpiry[index]>10.f && f.Game.TargetExpiry[index]<70.f
                         && f.Targets[index].HeadScale==1.f && !f.Game.IsAtAirborneHazard(&f.Targets[index]),
                         "fall activation failed to reset hitbox, appearance or native flight");
                 const float time=FallSeconds(f.Targets[index],f.Game.ArenaOrigin,AirborneHazardHeight(rockets));
+                Require(Near(f.Game.TargetExpiry[index]-10.f,std::max(.75f,time-1.f)),"fall lost shortened lifetime or minimum opportunity");
                 const float finalY=p.Y+f.Targets[index].Velocity.Y*time;
                 Require(std::fabs(finalY)+40.f<1800.f && p.X+40.f<3200.f,
                         "native-gravity fall drift carries a full capsule outside the room before lava");
@@ -310,24 +393,19 @@ int main(int argc,char** argv) {
                         BallisticPosition(newTarget,compact.Game.ArenaOrigin,newSampleTime),rearOffset,rearRaise);
                 }
                 const FVector end=BallisticPosition(newTarget,compact.Game.ArenaOrigin,newTime);
-                const FVector justAbove=BallisticPosition(newTarget,compact.Game.ArenaOrigin,newTime-.01f);
-                if(!sideWall) {
-                    newTarget.Position=compact.Game.ArenaOrigin+BallisticPosition(newTarget,compact.Game.ArenaOrigin,oldTime*timeScale);
-                    compact.At(10.f+oldTime*timeScale);
-                    Require(newTarget.Visible && compact.Game.Progress.TargetsExpired==0,
-                            "raised rear fall expired at the previous lower spawn's landing time");
-                }
+                const float expiry=compact.Game.TargetExpiry[index];
+                Require(Near(expiry,10.f+std::max(.75f,newTime-1.f)),"raised rocket fall did not retain height with the shorter exposure");
+                const FVector justAbove=BallisticPosition(newTarget,compact.Game.ArenaOrigin,expiry-10.f-.01f);
                 newTarget.Position=compact.Game.ArenaOrigin+justAbove;
-                compact.At(10.f+newTime-.01f);
+                compact.At(expiry-.01f);
                 Require(newTarget.Visible && compact.Game.Progress.TargetsExpired==0,
-                        "rocket drop expired before physical goo contact");
+                        "rocket drop expired before its shortened deadline");
                 Require(Near(end.Z-newTarget.Shape.HalfHeight,211.5f),
                         "full-size rocket target did not reach the goo at its native ballistic endpoint");
-                newTarget.Position=compact.Game.ArenaOrigin+FVector(end.X,end.Y,211.5f+108.f);
-                compact.At(10.f+newTime);
+                compact.At(expiry);
                 Require(!newTarget.Visible && compact.Game.Progress.TargetsExpired==1
                         && compact.Game.Terminals.size()==1 && compact.Game.Terminals[0].Appearance==1,
-                        "rocket fall did not retire exactly once on actual goo contact");
+                        "rocket fall did not retire exactly once at its deadline above goo");
             }
         }
     } else if(name=="rocket_compact_jumper") {
@@ -364,10 +442,10 @@ int main(int argc,char** argv) {
                 "airborne start did not randomly select just one falling slot plus jumper");
         Require(Near(f.Game.NextPopupTime,10.65f),"next fall did not use varied spawn interval");
         f.At(10.1f); Require(f.VisibleFalls()==1,"fall spawned before cadence elapsed");
-        f.At(30.f); Require(f.VisibleFalls()==2,"slow frame spawned a catch-up burst");
-        f.At(30.f); Require(f.VisibleFalls()==2,"same-tick retry bypassed fall cadence");
-        f.Game.Schedule.SlotChoice=0; f.At(31.f);
-        Require(f.Targets[1].Visible && f.VisibleFalls()==3,"eligible slot randomization always preferred one station");
+        f.At(30.f); Require(f.VisibleFalls()==1 && f.Game.Progress.TargetsExpired==1,"slow frame spawned a catch-up burst or retained expired drop");
+        f.At(30.f); Require(f.VisibleFalls()==1,"same-tick retry bypassed fall cadence");
+        f.Game.Schedule.Roll=0.f; f.At(30.66f);
+        Require(f.Targets[1].Visible && f.VisibleFalls()==2,"eligible slot randomization always preferred one station");
     } else if(name=="hazard_reuse") {
         for(int scenario:{9,10}) {
         Fixture f;
@@ -536,7 +614,8 @@ class AimTrainerAirborneTests(unittest.TestCase):
             "void ANCAimTrainerGame::UpdateAirborneTargets",
         )
         source = directory / "airborne.cpp"
-        source.write_text("\n".join([ADAPTER] + headers + [native_function(game, item) for item in signatures] + [CASES]), encoding="utf-8")
+        balance = f'#include "{(PLUGIN / "Source/Public/NCAimTrainerSpawnBalance.h").as_posix()}"'
+        source.write_text("\n".join([balance, ADAPTER] + headers + [native_function(game, item) for item in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("airborne.exe" if os.name == "nt" else "airborne")
         command = ([compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
                     f"/Fe{cls.executable}", f"/Fo{directory / 'airborne.obj'}"] if msvc else
@@ -550,7 +629,7 @@ class AimTrainerAirborneTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
-for _case in ("falls", "sidewall_mix", "flight_rates", "rocket_compact_falls", "rocket_compact_jumper", "stagger", "hazard_reuse", "landed_fall", "hazard_bounds", "jumper_arc", "jumper_failure", "deadline",
+for _case in ("adaptive_history", "adaptive_schedule", "trajectory_bounds", "falls", "sidewall_mix", "flight_rates", "rocket_compact_falls", "rocket_compact_jumper", "stagger", "hazard_reuse", "landed_fall", "hazard_bounds", "jumper_arc", "jumper_failure", "deadline",
               "rocket_classes", "rocket_owner_type_role", "rocket_age"):
     setattr(AimTrainerAirborneTests, "test_" + _case, lambda self, case=_case: self.run_case(case))
 

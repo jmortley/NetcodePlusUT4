@@ -332,7 +332,7 @@ void ANCAimTrainerTarget::StartWiggle(float HalfWidth)
     if (Role != ROLE_Authority || !bTrainerVisible || bTrainerAirborne || !FMath::IsFinite(HalfWidth) || HalfWidth <= 0.f) { return; }
     bTrainerStrafe = true;
     bTrainerWiggle = true;
-    StrafeRange = FMath::Clamp(HalfWidth, 20.f, NCAimTrainerLayout::PopupLongStrafeRange);
+    StrafeRange = FMath::Clamp(HalfWidth, 20.f, NCAimTrainerLayout::InstagibStrafeRange);
     WiggleRange = StrafeRange;
     PopupLongStrafeEndTime = 0.f;
     GetCharacterMovement()->SetMovementMode(MOVE_Walking);
@@ -410,6 +410,18 @@ void ANCAimTrainerTarget::ReverseStrafe()
         || bRecenterWiggleAfterDodge || !GetCharacterMovement()->IsMovingOnGround()) { return; }
     const float Offset = GetActorLocation().Y - StrafeCenter.Y;
     StrafeDirection = Offset >= StrafeRange ? -1.f : Offset <= -StrafeRange ? 1.f : -StrafeDirection;
+}
+
+void ANCAimTrainerTarget::ConfigurePopupStrafe(const FVector& Center, float HalfWidth, float DirectionRoll)
+{
+    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || bTrainerAirborne
+        || Center.ContainsNaN() || !FMath::IsFinite(HalfWidth) || HalfWidth <= 0.f) { return; }
+    // Spawn offset and walking anchor are separate: varying the starting side
+    // must not move the safe lane toward a wall. Preserve native speed/braking.
+    StrafeCenter = Center;
+    StrafeRange = FMath::Clamp(HalfWidth, 20.f, bTrainerWiggle ? NCAimTrainerLayout::InstagibStrafeRange : 800.f);
+    if (bTrainerWiggle) { WiggleRange = StrafeRange; }
+    StrafeDirection = DirectionRoll < 0.5f ? -1.f : 1.f;
 }
 
 bool ANCAimTrainerTarget::TryTrainerDodge(float DirectionRoll)

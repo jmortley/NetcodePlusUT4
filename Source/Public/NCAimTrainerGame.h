@@ -4,6 +4,7 @@
 #include "UTDMGameMode.h"
 #include "NCAimTrainerPlayerController.h"
 #include "NCAimTrainerLocalSession.h"
+#include "NCAimTrainerSpawnBalance.h"
 #include "NCAimTrainerGame.generated.h"
 
 class ANCAimTrainerTarget;
@@ -50,6 +51,7 @@ private:
     UPROPERTY() AUTWeapon* RunWeapon = nullptr;
     FNCAimTrainerProgress Progress;
     FRandomStream Schedule;
+    FNCAimTrainerSpawnBalance AirborneSpawnBalance;
     FVector ArenaOrigin = FVector(0.f, 0.f, 50000.f);
     float PhaseStartedAt = 0.f;
     float LastTraceTime = 0.f;

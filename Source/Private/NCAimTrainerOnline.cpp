@@ -162,9 +162,8 @@ namespace
 
 int32 FNCAimTrainerOnline::PresetRevisionForScenario(int32 Scenario)
 {
-	// Reward-only airborne runs must not share their older penalized boards.
-	// Other UT3 presets keep the same rankings and submission version.
-	return NCAimTrainerScenarioPolicy::IsAirborneScenario(Scenario) ? AirbornePresetRevision : PresetRevision;
+	return NCAimTrainerScenarioPolicy::IsAirborneScenario(Scenario)
+		|| Scenario == NCAimTrainerScenarioId::InstagibPopup ? AirbornePresetRevision : PresetRevision;
 }
 
 const TCHAR* FNCAimTrainerOnline::ScenarioSlug(int32 Scenario)

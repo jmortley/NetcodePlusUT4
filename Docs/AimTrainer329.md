@@ -4,6 +4,44 @@ An opt-in game mode with real animated UT character targets, eleven 60-second
 scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
 
+## Airborne and instagib movement variety (2026-10-09)
+
+The four Airborne presets and instagib pop-up now use fresh revision-16 boards,
+for fixed/movement practice and local/approved-server results. Tracking,
+headshots, and Sniper/LG/SACTF pop-up keep their existing boards and behavior.
+The matching Django change accepts local checkpoints and server submissions;
+deploy it before the new plugin builds. No database migration or map recook is
+required. Older scores remain archived; revision numbers stay out of the UI.
+
+- Airborne falls choose diagonal momentum on 60% of appearances, mixing forward
+  and backward drift with inward lateral travel in the outer lanes. The remaining
+  falls retain their smaller drift. Existing gravity, fall rates, spawn heights,
+  compact rocket layout and native pad-to-pad trajectory are retained.
+- Falling appearances expire one second before their calculated goo-contact
+  time, with a 0.75-second minimum window for short drops. Touching goo or an
+  unexpected platform still retires them immediately. Both hit acceptance and
+  target cleanup honor the new authority deadline; this never deducts points.
+- Airborne uses the last eight confirmed hits, measured left/center/right at
+  impact. After four hits, a zone receiving over half the hits gradually loses
+  spawn opportunities, reaching 20% of its normal rate for exclusive farming.
+  Balanced recent hits restore normal chances. A skipped opportunity respects
+  the spawn timer even if the farmed side is the only free lane. Jumper respawns
+  also favor the opposite launch pad; an active jump is never redirected.
+- Instagib floor targets have wider, individually varied walking bands. Their
+  decisions mix 20% short (0.30-0.55s), 35% medium (0.65-0.95s), and 45% long
+  (1.05-1.50s) holds; 40% of decisions continue the current direction. Native
+  acceleration and boundary braking still apply. The head peek and high right
+  platform retain their established movement constraints.
+- The instagib front target starts at varying depths and lateral positions in
+  its safe floor lane, with a fresh initial direction, varied dodge delays, and
+  occasional skipped dodge decisions. Timed targets favor ordinary strafing
+  over special moves rather than repeating a wiggle-then-dodge sequence.
+
+Native regression tests cover expiry and duplicate-hit guards, trajectory bounds,
+recent-hit history, adaptive spawn opportunities, native action dispatch, lane
+geometry, and unchanged tracking behavior. Packaged 4.15 movement and rendering
+still need a playtest after rebuilding.
+
 ## Airborne, hard tracking and target presentation (2026-10-09)
 
 - **Link tracking / hard** uses the NCP Link Gun and a target with 30% higher
@@ -65,8 +103,9 @@ It does not enable aim assistance or replace the controller in other modes.
   mesh; model selection cannot replace its skeleton, size or animation class.
 
 The shared UT3 animation change reset all eleven presets at revision 14.
-The four Airborne presets now advance to revision 15 for positive-only scoring
-and the compact rocket layout; the other seven remain at 14. This applies to
+The four Airborne presets advanced to revision 15 for positive-only scoring
+and the compact rocket layout; the later movement refresh above advances only
+Airborne and instagib pop-up to 16. This applies to
 both movement settings and score sources. Previous results stay archived under
 their original versions and never mix
 with these boards. Deploy matching Django code before testing

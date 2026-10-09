@@ -27,6 +27,7 @@ struct FMath {
     static int RoundToInt(float n) { return int(std::lround(n)); }
 };
 struct AActor { virtual ~AActor() = default; };
+struct FVector { float Y=0.f; };
 struct AUTPlayerState : AActor {
     float StoredShots = 0.f;
     float LightningShots = 0.f;
@@ -64,6 +65,8 @@ struct AUTWeap_LinkGun_NCP : AUTWeaponFix {
 template<class T, class U> T* Cast(U* p) { return dynamic_cast<T*>(p); }
 struct FDamageEvent { int DamageTypeClass = 5; };
 struct ANCAimTrainerTarget : AActor {
+    FVector Position;
+    FVector GetActorLocation() const { return Position; }
     bool Visible = true;
     int Hidden = 0;
     float AppearanceTime = 0;
@@ -80,6 +83,8 @@ struct TargetsAdapter : std::vector<ANCAimTrainerTarget*> {
     }
 };
 struct ANCAimTrainerGame {
+    FVector ArenaOrigin;
+    FNCAimTrainerSpawnBalance AirborneSpawnBalance;
     struct {
         int Phase = 2, Scenario = 1, Hits = 0, Headshots = 0, Score = 0, Shots = 0, TargetsExpired = 0;
         float TrackingSeconds = 0.f, FiringSeconds = 0.f, Accuracy = 0.f;
@@ -138,7 +143,22 @@ int main(int argc, char** argv) {
     Require(argc == 2, "case missing");
     const std::string name(argv[1]);
     using namespace NCAimTrainerScoring;
-    if (name == "precision") {
+    if (name == "airborne_balance") {
+        Fixture f; f.Game.Progress.Scenario=7; f.Game.ArenaOrigin.Y=50000.f;
+        f.Target.Position.Y=49200.f;
+        for(int i=0;i<4;++i) {
+            f.Target.Visible=true; f.PlayerState.StoredShots=float(i+1);
+            Require(f.Hit()>0.f && f.Hit()==0.f && f.Game.AirborneSpawnBalance.Count==i+1,
+                "confirmed appearance did not count exactly once for balancing");
+        }
+        Require(std::fabs(f.Game.AirborneSpawnBalance.Weight(0)-.2f)<.0001f,"balance used world position or target ID instead of hit side");
+        f.Target.Visible=true; f.Game.TheWorld.Now=f.Game.TargetExpiry[0];
+        Require(f.Hit()==0.f && f.Game.AirborneSpawnBalance.Count==4,"hit after shortened expiry influenced balancing");
+        f.Game.TheWorld.Now=1.f; f.Game.AtAirborneHazard=true;
+        Require(f.Hit()==0.f && f.Game.AirborneSpawnBalance.Count==4,"hazard contact influenced balancing");
+        f.Game.AtAirborneHazard=false; f.Game.Progress.Scenario=2;
+        Require(f.Hit()>0.f && f.Game.AirborneSpawnBalance.Count==4,"popup scoring affected airborne preferences");
+    } else if (name == "precision") {
         Require(HeadshotScore(6, 10) == 600, "headshot points still subtract misses");
         Require(HeadshotScore(0, 8) == 0 && HeadshotScore(200, 200) == 20000,
                 "headshot score zero or maximum drifted");
@@ -542,7 +562,8 @@ class AimTrainerScoringTests(unittest.TestCase):
         scoring = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScoring.h").as_posix() + '"'
         source = directory / "trainer.cpp"
         policy = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix() + '"'
-        source.write_text("\n".join((ADAPTER, scoring, policy,
+        balance = '#include "' + (PLUGIN / "Source/Public/NCAimTrainerSpawnBalance.h").as_posix() + '"'
+        source.write_text("\n".join((balance, ADAPTER, scoring, policy,
                                     native_function(weapon, "float AUTWeapon::GetWeaponShotsStats"),
                                     native_function(game, "float ANCAimTrainerGame::RecordTargetHit"),
                                     native_function(game, "void ANCAimTrainerGame::UpdateShotCount"),
@@ -567,6 +588,7 @@ class AimTrainerScoringTests(unittest.TestCase):
     def test_rocket_formula_accuracy_and_untrusted_bounds(self): self.run_case("rocket_scoring")
     def test_rocket_splash_multiple_targets_identity_gate_and_hazard_retirement(self): self.run_case("rocket_damage")
     def test_airborne_rewards_ignore_misses_and_expiry_but_keep_accuracy_and_precision_head_bonus(self): self.run_case("airborne_scoring")
+    def test_airborne_balance_counts_only_confirmed_current_hits_in_arena_coordinates(self): self.run_case("airborne_balance")
     def test_precision_popup_first_body_hit_and_sniper_lightning_head_bonus(self): self.run_case("precision_popup")
     def test_sactf_headshots_require_actual_rifle_head_type_and_award100(self): self.run_case("sactf_headshots")
     def test_sactf_popup_retires_body_hits_and_awards150_only_for_real_heads(self): self.run_case("sactf_popup")

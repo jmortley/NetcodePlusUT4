@@ -57,6 +57,22 @@ namespace NCAimTrainerScenarioPolicy
         return UnitRoll(PatternRoll) < 0.6f ? 0.24f + 0.18f * Jitter : 0.45f + 0.30f * Jitter;
     }
 
+    inline float InstagibStrafeHoldSeconds(int Slot, float PatternRoll, float JitterRoll, int Variant = 0)
+    {
+        if (Slot != 0 && Slot != 4 && Slot != 5)
+        {
+            return PopupStrafeHoldSeconds(Slot, PatternRoll, JitterRoll, Variant);
+        }
+        const float Pattern = UnitRoll(PatternRoll), Jitter = UnitRoll(JitterRoll);
+        // Independent choices, rather than a short-wiggle/long-run cycle.
+        return Pattern < 0.2f ? 0.30f + 0.25f * Jitter
+            : Pattern < 0.55f ? 0.65f + 0.30f * Jitter : 1.05f + 0.45f * Jitter;
+    }
+
+    inline bool ReverseInstagibStrafe(float Roll) { return UnitRoll(Roll) < 0.6f; }
+    inline float InstagibDodgeDelay(float Roll) { return 1.1f + 2.4f * UnitRoll(Roll); }
+    inline float InstagibFirstDodgeDelay(float Roll) { return 0.45f + 1.4f * UnitRoll(Roll); }
+
     enum EPopupAction { PopupStrafe, PopupSlide, PopupLongStrafe, PopupForwardDodge, PopupBackwardDodge, PopupDodgeSlide };
 
     inline int PopupAction(int Slot, int Variant, float Roll)
@@ -74,6 +90,21 @@ namespace NCAimTrainerScenarioPolicy
             if (Choice < 0.80f && Slot == 0) { return PopupLongStrafe; }
         }
         else if (Slot == 4 && Choice < 0.45f) { return PopupSlide; }
+        return PopupStrafe;
+    }
+
+    inline int InstagibPopupAction(int Slot, int Variant, float Roll)
+    {
+        if (Slot == 2) { return PopupSlide; }
+        const float Choice = UnitRoll(Roll);
+        if (Slot == 0 || (Slot == 4 && Variant != 1))
+        {
+            if (Choice < 0.12f) { return PopupForwardDodge; }
+            if (Choice < 0.24f) { return PopupBackwardDodge; }
+            if (Choice < 0.32f) { return PopupDodgeSlide; }
+            if (Choice < 0.44f && !(Slot == 4 && Variant == 2)) { return PopupSlide; }
+        }
+        else if (Slot == 4 && Choice < 0.2f) { return PopupSlide; }
         return PopupStrafe;
     }
 

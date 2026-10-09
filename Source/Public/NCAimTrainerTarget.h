@@ -42,6 +42,7 @@ public:
     float GetAppearanceTime() const { return AppearanceTime; }
     bool HasCharacterAssets() const;
     void ReverseStrafe();
+    void ConfigurePopupStrafe(const FVector& Center, float HalfWidth, float DirectionRoll);
     bool TryTrainerDodge(float DirectionRoll);
     /** Guarded native diagonal dodge, optionally holding slide through a backward landing. */
     bool TryTrainerPopupDodge(int32 Slot, const FVector& Direction, const FVector& ArenaOrigin, bool bSlideOnLanding = false);

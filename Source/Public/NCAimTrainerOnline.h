@@ -9,8 +9,8 @@ class UWorld;
 class NETCODEPLUS_API FNCAimTrainerOnline
 {
 public:
-	// UT3 animation boards stay at 14; reward-only airborne scoring starts at 15.
-	enum { PresetRevision = 14, AirbornePresetRevision = 15 };
+	// Only airborne and IG pop-up advance for the anti-farming movement retune.
+	enum { PresetRevision = 14, AirbornePresetRevision = 16 };
 	static int32 PresetRevisionForScenario(int32 Scenario);
 	static const TCHAR* ScenarioSlug(int32 Scenario);
 	static void Submit(UWorld* World, const FNCAimTrainerResult& Result,
