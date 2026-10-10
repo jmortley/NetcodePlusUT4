@@ -89,7 +89,9 @@ template<class T> struct TSubclassOf {
     TSubclassOf() = default;
     TSubclassOf(UClass* value) : Value(value) {}
     TSubclassOf& operator=(UClass* value) { Value = value; return *this; }
-    explicit operator bool() const { return Value != nullptr; }
+    // UE4.15 converts both ways. A bool-only adapter hides ambiguous mixed
+    // UClass*/TSubclassOf conditional expressions in the production selector.
+    operator UClass*() const { return Value; }
     UClass* operator->() const { return Value; }
     UClass* operator*() const { return Value; }
 };
@@ -915,7 +917,7 @@ class AimTrainerStartupTests(unittest.TestCase):
         source.write_text(translation, encoding="utf-8")
         executable = directory / (name + (".exe" if os.name == "nt" else ""))
         if cls.msvc:
-            command = [cls.compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
+            command = [cls.compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", "/Zc:ternary", str(source),
                        f"/Fe{executable}", f"/Fo{directory / (name + '.obj')}"]
         else:
             command = [cls.compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror", "-pedantic", str(source), "-o", str(executable)]

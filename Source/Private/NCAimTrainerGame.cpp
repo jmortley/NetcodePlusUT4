@@ -340,13 +340,25 @@ bool ANCAimTrainerGame::ConfigurePawn()
         SniperClass = LoadClass<AUTWeapon>(nullptr,
             TEXT("/Game/Blueprints/Netcode/UTNPSniper.UTNPSniper_C"), nullptr, LOAD_NoWarn);
     }
-    TSubclassOf<AUTWeapon> DesiredClass = NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario)
-        ? LoadClass<AUTWeapon>(nullptr, TEXT("/Game/Blueprints/Netcode/NPFlakCannon.NPFlakCannon_C"), nullptr, LOAD_NoWarn)
-        : NCAimTrainerScenarioPolicy::IsShockDefense(Progress.Scenario)
-        ? LoadClass<AUTWeapon>(nullptr, TEXT("/Game/Blueprints/Netcode/UTNPShockRifle.UTNPShockRifle_C"), nullptr, LOAD_NoWarn)
-        : NCAimTrainerScenarioPolicy::IsRocketScenario(Progress.Scenario) ? RocketClass : NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario) ? LinkClass : NCAimTrainerScenarioPolicy::IsInstagibScenario(Progress.Scenario) ? InstagibClass
-        : NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario) ? SACTFSniperClass
-        : Progress.bUseLightningGun ? LightningClass : SniperClass;
+    // LoadClass returns UClass*, whereas the cached classes are TSubclassOf.
+    // Assign explicitly: UE4.15 allows both conversions, so mixing them in a
+    // conditional expression is ambiguous on conforming compilers.
+    TSubclassOf<AUTWeapon> DesiredClass;
+    if (NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario))
+    {
+        DesiredClass = LoadClass<AUTWeapon>(nullptr,
+            TEXT("/Game/Blueprints/Netcode/NPFlakCannon.NPFlakCannon_C"), nullptr, LOAD_NoWarn);
+    }
+    else if (NCAimTrainerScenarioPolicy::IsShockDefense(Progress.Scenario))
+    {
+        DesiredClass = LoadClass<AUTWeapon>(nullptr,
+            TEXT("/Game/Blueprints/Netcode/UTNPShockRifle.UTNPShockRifle_C"), nullptr, LOAD_NoWarn);
+    }
+    else if (NCAimTrainerScenarioPolicy::IsRocketScenario(Progress.Scenario)) { DesiredClass = RocketClass; }
+    else if (NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario)) { DesiredClass = LinkClass; }
+    else if (NCAimTrainerScenarioPolicy::IsInstagibScenario(Progress.Scenario)) { DesiredClass = InstagibClass; }
+    else if (NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario)) { DesiredClass = SACTFSniperClass; }
+    else { DesiredClass = Progress.bUseLightningGun ? LightningClass : SniperClass; }
     if (!DesiredClass || DesiredClass->HasAnyClassFlags(CLASS_Abstract))
     {
         return FailSetup(NCAimTrainerScenarioPolicy::IsRocketScenario(Progress.Scenario)
