@@ -128,6 +128,7 @@ struct LightningGun : AUTPlusSniper {
 struct SACTFSniper : AUTPlusSniper {
     SACTFSniper() { ShotsStatsName = 3; HeadshotDamageType = 33; BeamRefire = .7f; }
 };
+struct AUTPlusFlakCannon : AUTWeapon { static UClass* StaticClass() { static UClass Type{9}; return &Type; } };
 struct AUTPlusShockRifle : AUTWeapon {
     bool bTrackImpressive = true;
     static UClass* StaticClass() { return &InstagibType; }
@@ -700,7 +701,7 @@ int main(int argc, char** argv) {
             f.Game.SetMovementPractice(requestor,true);
             f.Game.AbortTraining(requestor);
         }
-        f.Game.SelectScenario(&f.Player,11,false);
+        f.Game.SelectScenario(&f.Player,13,false);
         Require(f.Game.Progress.Phase == 0 && f.Game.Progress.Scenario == 1
                 && f.Game.Progress.bUseLightningGun && !f.Game.Progress.bMovementPractice
                 && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning

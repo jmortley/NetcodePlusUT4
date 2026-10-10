@@ -5,6 +5,7 @@
 #include "NCAimTrainerPlayerController.h"
 #include "NCAimTrainerLocalSession.h"
 #include "NCAimTrainerSpawnBalance.h"
+#include "NCAimTrainerDrillPolicy.h"
 #include "NCAimTrainerGame.generated.h"
 
 class ANCAimTrainerTarget;
@@ -53,6 +54,11 @@ private:
     FRandomStream Schedule;
     FNCAimTrainerSpawnBalance AirborneSpawnBalance;
     int32 HeadshotClearedSlots = 0;
+    NCAimTrainerDrillPolicy::FAttempt Drill;
+    int32 FlakAttemptShot = 0;
+    TArray<TWeakObjectPtr<AActor>> FlakPellets;
+    float NextDrillAction = 0.f;
+    bool bDrillDodgeQueued = false;
     FVector ArenaOrigin = FVector(0.f, 0.f, 50000.f);
     float PhaseStartedAt = 0.f;
     float LastTraceTime = 0.f;
@@ -106,6 +112,12 @@ private:
     bool IsAtAirborneHazard(const ANCAimTrainerTarget* Target) const;
     bool IsCurrentRocketDamage(const ANCAimTrainerTarget* Target, const FDamageEvent& Event, AActor* Causer) const;
     void ClearTrainerProjectiles();
+    void UpdateDrillShots();
+    void UpdateDrillTargets(float Now);
+    void ActivateDrillTarget(float Now);
+    float RecordDrillHit(ANCAimTrainerTarget* Target, float Damage, const FDamageEvent& Event, AActor* Causer);
+    void RetireDrillTarget(bool bSuccess, float Now);
+    void PublishDrillStatus();
     float PracticeLaneX() const;
     float PracticeFloorZ() const;
     void UpdateTargets(float Now);

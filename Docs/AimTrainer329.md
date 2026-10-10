@@ -1,8 +1,58 @@
 # NetcodePlus Aim Trainer (UE 4.15 / 329)
 
-An opt-in game mode with real animated UT character targets, eleven 60-second
+An opt-in game mode with real animated UT character targets, thirteen 60-second
 scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
+
+## Flak Hexagon and Shock Defense (2026-10-10)
+
+Two fixed-position, primary-only drills use new revision-20 boards. Existing
+scenario IDs, board versions and historical scores stay unchanged. The picker
+adds `=` for Flak Hexagon and `\` for Shock Defense; both can be clicked.
+
+**Flak Hexagon:** the player stands at the center of a six-sided room. One target
+spawns in a random sector within half its normal dodge travel (at most 320 units).
+It mixes lateral cuts, inward/outward strafes, occasional crouches and frequent
+full-strength native dodges. The larger hexagon leaves space to dodge away;
+only the initial spawn is restricted to half a dodge from the player.
+The outer room and inward-turn thresholds are 10% closer than the initial
+full-dodge layout, with the same native dodge strength and timing.
+Each appearance allows one primary volley. Distinct pellets from that volley
+must total **at least 100 damage** to kill and award 100 points. A partial hit
+does not score. The volley has 0.35 seconds to resolve, then a failed attempt
+retires the target. Replacement waits 0.18 seconds and clears old projectiles;
+the shot counter, projectile owner/class, appearance time and per-pellet identity
+prevent a previous volley from scoring against a new target. Accuracy is lethal
+volleys divided by shots. Misses do not subtract points.
+
+**Shock Defense:** one carrier with a cosmetic flag approaches the capture pad
+400 units in front of the player through a walled lane. Random short strafes and
+crouch feints lead into steep diagonal dodges. Some routes approach a side wall
+and attempt one real native wall dodge back into the lane. Wall contact and
+normal UT cooldowns are required; no free midair impulse is added. Decisions
+come from the run's random stream, never the trainee's aim or crosshair.
+Accepted primary beams use their native point-damage momentum, grounded force-Z
+and UT damped impulse. Targets remain alive and moving. Five consecutive hits
+reset the carrier to the start; a miss breaks the streak, and a capture resets
+the carrier and streak. A beam cancels a pending wall dodge and briefly blocks
+new dodges so that neither route can erase its queued knockback.
+The HUD shows the current streak, stops and captures. Score is
+`max(0, 100 * hits - 25 * misses - 100 * captures)`.
+
+The configured weapons are `NPFlakCannon` (1.0-second primary) and
+`UTNPShockRifle` (0.7-second primary), verified against the existing cooked-asset
+audit and native defaults. Altered refire timing makes the run practice-only.
+Target animation, held shock attachment and forced-color preferences reuse the
+other scenarios' target presentation. The visible carrier flag has no combat
+objective state and cannot intercept shots.
+
+Deploy the matching Django update before the rebuilt client/server plugin.
+It accepts `flak_hexagon` and `shock_defense` for local and approved-server boards,
+enforces one terminal flak result per shot and carries shock streak state across
+checkpoints. No database migration or map recook is needed. The rooms are built
+from runtime geometry. Native adapter tests cover scoring, attempt isolation,
+streaks, native impulse routing and movement gates; packaged playtesting is still
+required for animation, collision, networking and difficulty.
 
 ## Pop-up evasion (2026-10-09)
 

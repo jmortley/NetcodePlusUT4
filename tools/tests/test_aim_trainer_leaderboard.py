@@ -43,7 +43,7 @@ struct FNCAimTrainerProgress { uint8 Scenario = 0, Phase = 0; bool bMovementPrac
 using Completion = std::function<void(bool, const TArray<FNCAimTrainerLeaderboardRow>&)>;
 struct Request { UWorld* World; int Scenario; bool Local, Movement; Completion Callback; };
 struct FNCAimTrainerOnline {
-    enum { PresetRevision = 14, AirbornePresetRevision = 16, PopupPresetRevision = 19, HeadshotPresetRevision = 18 };
+    enum { PresetRevision = 14, AirbornePresetRevision = 16, PopupPresetRevision = 19, HeadshotPresetRevision = 18, DrillPresetRevision = 20 };
     static int32 PresetRevisionForScenario(int32 scenario);
     static const char* ScenarioSlug(int32 scenario);
     static std::vector<Request> Requests;
@@ -203,19 +203,19 @@ void MovementBoards() {
 void AllScenarioBoards() {
     ANCAimTrainerPlayerController pc;
     const char* slugs[] = {"strafe", "headshots", "instagib", "precision_popup", "sactf_headshots", "sactf_popup",
-                          "strafe_hard", "airborne_ig", "airborne_sniper", "airborne_sactf", "airborne_rockets"};
+                          "strafe_hard", "airborne_ig", "airborne_sniper", "airborne_sactf", "airborne_rockets", "flak_hexagon", "shock_defense"};
     for (int movement = 0; movement < 2; ++movement) {
         pc.TrainerProgress.bMovementPractice = movement != 0;
         for (int local = 0; local < 2; ++local) {
             for (uint8 scenario = 0; scenario < NCAimTrainerScenarioId::ScenarioCount; ++scenario) {
                 pc.TrainerProgress.Scenario = scenario;
                 pc.SelectTrainerLeaderboardSource(local != 0);
-                const int key = scenario + 11 * local + 22 * movement;
+                const int key = scenario + 13 * local + 26 * movement;
                 Require(Requests() == key + 1, "scenario/source/movement cache keys collide");
                 const auto& req = FNCAimTrainerOnline::Requests[key];
                 Require(req.Scenario == scenario && req.Local == (local != 0)
                         && req.Movement == (movement != 0), "cache key decoded wrong request");
-                Require(FNCAimTrainerOnline::PresetRevisionForScenario(req.Scenario) == (scenario == 1 || scenario == 4 ? 18 : scenario == 2 || scenario == 3 || scenario == 5 ? 19 : scenario >= 7 ? 16 : 14),
+                Require(FNCAimTrainerOnline::PresetRevisionForScenario(req.Scenario) == (scenario >= 11 ? 20 : scenario == 1 || scenario == 4 ? 18 : scenario == 2 || scenario == 3 || scenario == 5 ? 19 : scenario >= 7 ? 16 : 14),
                         "airborne score reset selected the wrong scenario/source/movement board");
                 Require(std::string(FNCAimTrainerOnline::ScenarioSlug(req.Scenario)) == slugs[scenario],
                         "scenario ID selected the wrong backend slug");
@@ -223,25 +223,25 @@ void AllScenarioBoards() {
         }
     }
     // Arrive in reverse order, with the current view on the airborne rocket board.
-    for (int key = 43; key >= 0; --key) Reply(key, true, 1000 + key);
-    Require(pc.GetTrainerLeaderboard()[0].Score == 1043, "late callbacks replaced selected rocket board");
+    for (int key = 51; key >= 0; --key) Reply(key, true, 1000 + key);
+    Require(pc.GetTrainerLeaderboard()[0].Score == 1051, "late callbacks replaced selected rocket board");
     for (int movement = 0; movement < 2; ++movement) {
         pc.TrainerProgress.bMovementPractice = movement != 0;
         for (int local = 0; local < 2; ++local) {
             for (uint8 scenario = 0; scenario < NCAimTrainerScenarioId::ScenarioCount; ++scenario) {
                 pc.TrainerProgress.Scenario = scenario;
                 pc.SelectTrainerLeaderboardSource(local != 0);
-                Require(pc.GetTrainerLeaderboard()[0].Score == 1000 + scenario + 11 * local + 22 * movement,
-                        "one of 44 boards lost its own score");
+                Require(pc.GetTrainerLeaderboard()[0].Score == 1000 + scenario + 13 * local + 26 * movement,
+                        "one of 52 cache slots lost its own score");
             }
         }
     }
-    Require(Requests() == 44, "browsing cached scenarios generated extra requests");
+    Require(Requests() == 52, "browsing cached scenarios generated extra requests");
     pc.ClientTrainerLeaderboardSubmitted_Implementation(4, true, true);
-    Require(Requests() == 44, "inactive SACTF headshot invalidation fetched eagerly");
+    Require(Requests() == 52, "inactive SACTF headshot invalidation fetched eagerly");
     pc.TrainerProgress.Scenario = 4;
     pc.RefreshTrainerLeaderboard();
-    Require(Requests() == 45 && FNCAimTrainerOnline::Requests[44].Scenario == 4,
+    Require(Requests() == 53 && FNCAimTrainerOnline::Requests[52].Scenario == 4,
             "SACTF headshot submission did not invalidate exact board");
 }
 void Lifecycle() {

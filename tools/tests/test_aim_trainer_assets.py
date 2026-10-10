@@ -245,6 +245,7 @@ struct ANCAimTrainerTarget : AUTCharacter {
     void BeginPlay();
     void UpdateWeaponAttachment();
     bool HasCharacterAssets() const;
+    void UpdateDrillFlag() {}
     void OnRep_TrainerVisible();
 };
 struct ANCAimTrainerCharacter : AUTCharacter {

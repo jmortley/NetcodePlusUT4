@@ -54,7 +54,7 @@ constexpr int32 INDEX_NONE = -1;
 constexpr int ROLE_Authority = 3;
 constexpr int NAME_Playing = 1, NAME_Spectating = 2;
 #define UE_SERVER 0
-enum class FKey { Other, F6, M, One, Two, Three, Four, Five, Six, Seven, Eight, Nine, Zero, Hyphen, Subtract, NumPadSeven, NumPadEight, NumPadNine, NumPadZero, NumPadOne, NumPadTwo, NumPadThree, NumPadFour, NumPadFive, NumPadSix, Enter };
+enum class FKey { Other, F6, M, One, Two, Three, Four, Five, Six, Seven, Eight, Nine, Zero, Hyphen, Subtract, Equals, Backslash, NumPadSeven, NumPadEight, NumPadNine, NumPadZero, NumPadOne, NumPadTwo, NumPadThree, NumPadFour, NumPadFive, NumPadSix, Enter };
 using EKeys = FKey;
 enum EInputEvent { IE_Pressed, IE_Released, IE_Repeat };
 struct FPlatformTime { static double Now; static double Seconds() { return Now; } };
@@ -315,7 +315,7 @@ void MenuControls() {
         Require(pc.Selects == count, "new preset repeated key selected twice");
     }
     const int selects = pc.Selects;
-    pc.SelectTrainerScenario(11);
+    pc.SelectTrainerScenario(13);
     pc.SelectTrainerScenario(255);
     Require(pc.Selects == selects, "invalid scenario sent");
 }
@@ -385,7 +385,7 @@ void FireGates() {
                 Require(pawn.Fires[0] == before, "stock fire did not remain deferred");
                 pc.ApplyDeferredFireInputs();
                 const int expectedPrimary = phase == 2 && !NCAimTrainerScenarioPolicy::IsTrackingScenario(scenario) ? 1 : 0;
-                const int expectedAlt = phase == 2 ? 1 : 0;
+                const int expectedAlt = phase == 2 && !NCAimTrainerScenarioPolicy::IsDrillScenario(scenario) ? 1 : 0;
                 Require(pawn.Fires[0] == before + expectedPrimary && pawn.Fires[1] == beforeAlt + expectedAlt,
                         "trainer fire never reached pawn or escaped its phase/scenario gate");
                 Require(pc.DeferredFireInputs.empty(), "deferred fire queue did not drain");

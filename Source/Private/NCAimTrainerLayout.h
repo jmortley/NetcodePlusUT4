@@ -83,7 +83,7 @@ namespace NCAimTrainerLayout
         return { bRockets ? -800.f : -1800.f, 0.f, bRockets ? 400.f : 1000.f, 3600.f, 320.f };
     }
 
-    inline float PracticeLaneX(int Scenario) { return AirborneFiringLedge(Scenario == 10).CenterX; }
+    inline float PracticeLaneX(int Scenario) { return Scenario == 11 ? 0.f : AirborneFiringLedge(Scenario == 10).CenterX; }
 
     inline FBlock AirborneJumpPad(int Index, bool bRockets = false)
     {

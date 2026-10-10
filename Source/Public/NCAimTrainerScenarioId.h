@@ -16,7 +16,9 @@ namespace NCAimTrainerScenarioId
         AirbornePrecision = 8,
         AirborneSACTF = 9,
         AirborneRockets = 10,
-        ScenarioCount = 11,
+        FlakHexagon = 11,
+        ShockDefense = 12,
+        ScenarioCount = 13,
         LeaderboardCount = ScenarioCount * 4
     };
 }

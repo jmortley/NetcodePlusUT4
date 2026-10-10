@@ -140,6 +140,7 @@ struct ANCAimTrainerTarget : AUTCharacter {
     void SetActorHiddenInGame(bool hidden) { Hidden=hidden; }
     void SetActorEnableCollision(bool enabled) { Collision=enabled; }
     void ForceNetUpdate() { ++NetUpdates; }
+    void UpdateDrillFlag() {}
     void OnRep_TrainerVisible();
     float TakeDamage(float,const FDamageEvent&,AController*,AActor*);
     void PlayTakeHitEffects_Implementation() override;

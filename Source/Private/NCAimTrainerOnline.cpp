@@ -162,7 +162,8 @@ namespace
 
 int32 FNCAimTrainerOnline::PresetRevisionForScenario(int32 Scenario)
 {
-	return NCAimTrainerScenarioPolicy::IsHeadshotScenario(Scenario) ? HeadshotPresetRevision
+	return NCAimTrainerScenarioPolicy::IsDrillScenario(Scenario) ? DrillPresetRevision
+		: NCAimTrainerScenarioPolicy::IsHeadshotScenario(Scenario) ? HeadshotPresetRevision
 		: NCAimTrainerScenarioPolicy::IsPopupScenario(Scenario) ? PopupPresetRevision
 		: NCAimTrainerScenarioPolicy::IsAirborneScenario(Scenario) ? AirbornePresetRevision : PresetRevision;
 }
@@ -182,6 +183,8 @@ const TCHAR* FNCAimTrainerOnline::ScenarioSlug(int32 Scenario)
 	case 8: return TEXT("airborne_sniper");
 	case 9: return TEXT("airborne_sactf");
 	case 10: return TEXT("airborne_rockets");
+	case 11: return TEXT("flak_hexagon");
+	case 12: return TEXT("shock_defense");
 	default: return TEXT("");
 	}
 }

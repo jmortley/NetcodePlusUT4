@@ -86,11 +86,11 @@ int main() {
     ANCAimTrainerPlayerController pc;
     ANCAimTrainerHUD hud; hud.PlayerOwner=&pc;
     hud.DrawModePicker(&pc);
-    Require(hud.TrainerButtons.size()==13, "picker does not expose eleven presets plus movement and start");
-    for (int i=0;i<11;++i) {
+    Require(hud.TrainerButtons.size()==15, "picker does not expose thirteen presets plus movement and start");
+    for (int i=0;i<13;++i) {
         const auto& button=hud.TrainerButtons[i];
         Require(button.Action==i, "picker renumbered a preset");
-        Require(button.Min.X>=90 && button.Max.X<=1190 && button.Min.Y>=200 && button.Max.Y<=330, "picker card escaped its panel");
+        Require(button.Min.X>=90 && button.Max.X<=1190 && button.Min.Y>=200 && button.Max.Y<=356, "picker card escaped its panel");
         for (int j=0;j<i;++j) {
             const auto& other=hud.TrainerButtons[j];
             Require(button.Min.X>=other.Max.X || button.Max.X<=other.Min.X || button.Min.Y>=other.Max.Y || button.Max.Y<=other.Min.Y,
@@ -100,7 +100,7 @@ int main() {
         Require(hud.OverrideMouseClick(EKeys::LeftMouseButton,IE_Pressed), "picker did not consume click");
         Require(pc.Selection==i && pc.Starts==0 && pc.Backs==0, "preset click collided with a control action");
     }
-    Require(hud.BoardY>=400 && hud.BoardY+210<hud.TrainerButtons.back().Min.Y, "leaderboard overlaps picker controls");
+    Require(hud.BoardY>=400 && hud.BoardY+210<=hud.TrainerButtons.back().Min.Y, "leaderboard overlaps picker controls");
     const auto& start=hud.TrainerButtons.back();
     hud.MouseX=start.Min.X+1; hud.MouseY=start.Min.Y+1;
     hud.OverrideMouseClick(EKeys::LeftMouseButton,IE_Pressed);
@@ -116,7 +116,7 @@ int main() {
         "result controls collide with scenario IDs");
     hud.MouseX=hud.TrainerButtons[0].Min.X+1; hud.MouseY=hud.TrainerButtons[0].Min.Y+1;
     hud.OverrideMouseClick(EKeys::LeftMouseButton,IE_Pressed);
-    Require(pc.Backs==1 && pc.Selection==10, "back control selected rockets");
+    Require(pc.Backs==1 && pc.Selection==12, "back control selected rockets");
 }
 '''
 

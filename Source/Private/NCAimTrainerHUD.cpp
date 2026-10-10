@@ -28,6 +28,8 @@ namespace
 		case 8: return TEXT("AIRBORNE / SNIPER-LG");
 		case 9: return TEXT("AIRBORNE / SACTF");
 		case 10: return TEXT("AIRBORNE / ROCKETS");
+		case 11: return TEXT("FLAK / HEXAGON");
+		case 12: return TEXT("SHOCK / DEFENSE");
 		default: return TEXT("LINK TRACKING");
 		}
 	}
@@ -204,7 +206,7 @@ void ANCAimTrainerHUD::DrawLeaderboard(ANCAimTrainerPlayerController* PC, float 
 void ANCAimTrainerHUD::DrawModePicker(ANCAimTrainerPlayerController* PC)
 {
 	const FNCAimTrainerProgress& Progress = PC->GetTrainerProgress();
-	Panel(90.f, 126.f, 1100.f, 551.f, TrainerPanel);
+	Panel(90.f, 112.f, 1100.f, 578.f, TrainerPanel);
 	Label(TEXT("CHOOSE YOUR PRACTICE"), 120.f, 151.f, 27.f, TrainerInk);
 	Label(TEXT("REAL UT CHARACTERS. 60-SECOND RUNS. CHOOSE YOUR WEAPON AND CHALLENGE."), 120.f, 188.f, 14.f, TrainerMuted);
 	const TCHAR* Descriptions[] = {
@@ -218,22 +220,31 @@ void ANCAimTrainerHUD::DrawModePicker(ANCAimTrainerPlayerController* PC)
 		TEXT("Hitscan Airborne: instagib. Hit jump-pad and falling targets before they reach the goo."),
 		TEXT("Hitscan Airborne: your Sniper/LG preference. 100 per hit, +50 per headshot."),
 		TEXT("Hitscan Airborne: SACTF sniper. 100 per hit, +50 per headshot."),
-		TEXT("Airborne rockets: 100 per target hit, -25 per landing. Hit rate counts targets hit versus landed.")
+		TEXT("Airborne rockets: 100 per target hit. Hit rate counts targets hit versus landed."),
+		TEXT("One flak primary shot per target. Deal at least 100 damage with that volley to earn 100 points."),
+		TEXT("Shock primary: keep the flag carrier off the pad. Five consecutive hits reset it; a miss breaks the streak.")
 	};
 	for (int32 Mode = 0; Mode < NCAimTrainerScenarioId::ScenarioCount; ++Mode)
 	{
 		const float X = 120.f + float(Mode % 4) * 265.f;
-		const float Y = 207.f + float(Mode / 4) * 42.f;
-		const FString Key = Mode < 9 ? FString::FromInt(Mode + 1) : Mode == 9 ? TEXT("0") : TEXT("-");
+		const float Y = 207.f + float(Mode / 4) * 38.f;
+		const FString Key = Mode < 9 ? FString::FromInt(Mode + 1) : Mode == 9 ? TEXT("0") : Mode == 10 ? TEXT("-") : Mode == 11 ? TEXT("=") : TEXT("\\");
 		Button(Mode, FString::Printf(TEXT("[%s] %s"), *Key, ScenarioName(uint8(Mode))), X, Y, 245.f, 35.f, Progress.Scenario == Mode);
 	}
-	Label(Descriptions[FMath::Clamp(int32(Progress.Scenario), 0, int32(NCAimTrainerScenarioId::ScenarioCount) - 1)], 120.f, 335.f, 14.f, TrainerMuted, 1040.f);
-	Button(MovementAction, Progress.bMovementPractice ? TEXT("[M] MOVEMENT: ON / SEPARATE BOARD") : TEXT("[M] MOVEMENT: OFF / FIXED POSITION"),
-		120.f, 360.f, 475.f, 30.f, Progress.bMovementPractice);
-	Label(TEXT("Strafe left/right, dodge, jump and crouch. No forward/back."), 615.f, 367.f, 13.f, TrainerMuted, 545.f);
-	DrawLeaderboard(PC, 405.f);
-	Button(StartAction, TEXT("ENTER  /  START RUN"), 799.f, 623.f, 361.f, 43.f, true);
-	Label(TEXT("Choose with 1-9, 0 or -.  ESC opens the game menu."), 120.f, 638.f, 14.f, TrainerMuted, 650.f);
+	Label(Descriptions[FMath::Clamp(int32(Progress.Scenario), 0, int32(NCAimTrainerScenarioId::ScenarioCount) - 1)], 120.f, 365.f, 14.f, TrainerMuted, 1040.f);
+	if (NCAimTrainerScenarioPolicy::IsDrillScenario(Progress.Scenario))
+	{
+		Label(TEXT("FIXED POSITION  /  PRIMARY FIRE ONLY"), 120.f, 397.f, 14.f, TrainerAccent);
+	}
+	else
+	{
+		Button(MovementAction, Progress.bMovementPractice ? TEXT("[M] MOVEMENT: ON / SEPARATE BOARD") : TEXT("[M] MOVEMENT: OFF / FIXED POSITION"),
+			120.f, 390.f, 475.f, 30.f, Progress.bMovementPractice);
+		Label(TEXT("Strafe left/right, dodge, jump and crouch. No forward/back."), 615.f, 397.f, 13.f, TrainerMuted, 545.f);
+	}
+	DrawLeaderboard(PC, 427.f);
+	Button(StartAction, TEXT("ENTER  /  START RUN"), 799.f, 637.f, 361.f, 43.f, true);
+	Label(TEXT("Choose a challenge above.  ESC opens the game menu."), 120.f, 652.f, 14.f, TrainerMuted, 650.f);
 }
 
 void ANCAimTrainerHUD::DrawResults(ANCAimTrainerPlayerController* PC)
@@ -244,6 +255,10 @@ void ANCAimTrainerHUD::DrawResults(ANCAimTrainerPlayerController* PC)
 	Label(FString::FromInt(Progress.Score), 640.f, 181.f, 63.f, TrainerInk, 700.f, true);
 	const FString Detail = NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario)
 		? FString::Printf(TEXT("%.2f s ON TARGET / %.2f s FIRED     %.1f%% ACCURACY"), Progress.TrackingSeconds, Progress.FiringSeconds, Progress.Accuracy)
+		: NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario)
+		? FString::Printf(TEXT("%d KILLS / %d SHOTS     %.1f%% LETHAL VOLLEYS"), Progress.Hits, Progress.Shots, Progress.Accuracy)
+		: NCAimTrainerScenarioPolicy::IsShockDefense(Progress.Scenario)
+		? FString::Printf(TEXT("%d HITS / %d SHOTS     %.1f%% ACCURACY     %d CAPTURES"), Progress.Hits, Progress.Shots, Progress.Accuracy, Progress.TargetsExpired)
 		: NCAimTrainerScenarioPolicy::IsRocketScenario(Progress.Scenario)
 		? FString::Printf(TEXT("%d TARGETS HIT / %d LANDED     %.1f%% TARGET HIT RATE"), Progress.Hits, Progress.TargetsExpired, Progress.Accuracy)
 		: FString::Printf(TEXT("%d / %d HITS     %.1f%% ACCURACY     %d EXPIRED"), Progress.Hits, Progress.Shots, Progress.Accuracy, Progress.TargetsExpired);
@@ -255,7 +270,10 @@ void ANCAimTrainerHUD::DrawResults(ANCAimTrainerPlayerController* PC)
 	Panel(120.f, 340.f, 1040.f, 1.f, FLinearColor(0.10f, 0.16f, 0.19f, 1.f));
 	DrawLeaderboard(PC, 362.f);
 	Button(BackAction, TEXT("F6  /  CHOOSE SCENARIO"), 120.f, 610.f, 361.f, 43.f, false);
-	Button(MovementAction, Progress.bMovementPractice ? TEXT("[M] MOVEMENT: ON") : TEXT("[M] MOVEMENT: OFF"), 506.f, 610.f, 267.f, 43.f, Progress.bMovementPractice);
+	if (!NCAimTrainerScenarioPolicy::IsDrillScenario(Progress.Scenario))
+	{
+		Button(MovementAction, Progress.bMovementPractice ? TEXT("[M] MOVEMENT: ON") : TEXT("[M] MOVEMENT: OFF"), 506.f, 610.f, 267.f, 43.f, Progress.bMovementPractice);
+	}
 	Button(StartAction, TEXT("ENTER  /  PLAY AGAIN"), 799.f, 610.f, 361.f, 43.f, true);
 }
 
@@ -291,6 +309,16 @@ void ANCAimTrainerHUD::DrawHUD()
 		if (NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario))
 		{
 			Label(FString::Printf(TEXT("HOLD EITHER FIRE BUTTON  /  BEAM ON TARGET  %.2f s"), Progress.TrackingSeconds), 640.f, 103.f, 16.f, TrainerAccent, 0.f, true);
+		}
+		else if (NCAimTrainerScenarioPolicy::IsShockDefense(Progress.Scenario))
+		{
+			Label(PC->GetTrainerOnlineStatus(), 640.f, 103.f, 16.f, TrainerAccent, 1050.f, true);
+			Label(TEXT("100 PER HIT  /  -25 PER MISS  /  -100 PER CAPTURE"), 640.f, 129.f, 12.f, TrainerMuted, 0.f, true);
+		}
+		else if (NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario))
+		{
+			Label(FString::Printf(TEXT("%d KILLS / %d SHOTS  |  ONE PRIMARY SHOT  |  100 DAMAGE TO KILL"), Progress.Hits, Progress.Shots),
+				640.f, 103.f, 16.f, TrainerAccent, 0.f, true);
 		}
 		else
 		{

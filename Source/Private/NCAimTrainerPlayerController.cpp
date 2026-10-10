@@ -135,6 +135,8 @@ bool ANCAimTrainerPlayerController::InputKey(FKey Key, EInputEvent EventType, fl
 			if (Key == EKeys::Nine || Key == EKeys::NumPadNine) { Scenario = 8; }
 			if (Key == EKeys::Zero || Key == EKeys::NumPadZero) { Scenario = 9; }
 			if (Key == EKeys::Hyphen || Key == EKeys::Subtract) { Scenario = 10; }
+			if (Key == EKeys::Equals) { Scenario = 11; }
+			if (Key == EKeys::Backslash) { Scenario = 12; }
 			if (Scenario != INDEX_NONE)
 			{
 				if (EventType == IE_Pressed) { SelectTrainerScenario(uint8(Scenario)); }
@@ -160,6 +162,7 @@ void ANCAimTrainerPlayerController::OnFire()
 void ANCAimTrainerPlayerController::OnAltFire()
 {
 	if (TrainerProgress.Phase != 2) { return; }
+	if (NCAimTrainerScenarioPolicy::IsDrillScenario(TrainerProgress.Scenario)) { return; }
 	if (NCAimTrainerScenarioPolicy::IsTrackingScenario(TrainerProgress.Scenario)) { SetTrackingFireHeld(false, true); }
 	else { Super::OnAltFire(); }
 }

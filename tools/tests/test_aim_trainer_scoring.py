@@ -115,6 +115,8 @@ struct ANCAimTrainerGame {
     bool HasTrackingContact() const;
     bool IsTrackingBeamFiring() const;
     void UpdateTrackingSample(float);
+    void UpdateDrillShots() {}
+    float RecordDrillHit(ANCAimTrainerTarget*,float,const FDamageEvent&,AActor*) { return 0.f; }
     void UpdateShotCount();
     void InvalidateLocalRun() {}
     void RecordLocalShotCount() {}
@@ -564,6 +566,7 @@ class AimTrainerScoringTests(unittest.TestCase):
         source = directory / "trainer.cpp"
         policy = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix() + '"'
         policy += '\n#include "' + (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix() + '"'
+        policy += '\n#include "' + (PLUGIN / "Source/Public/NCAimTrainerDrillPolicy.h").as_posix() + '"'
         balance = '#include "' + (PLUGIN / "Source/Public/NCAimTrainerSpawnBalance.h").as_posix() + '"'
         source.write_text("\n".join((balance, ADAPTER, scoring, policy,
                                     native_function(weapon, "float AUTWeapon::GetWeaponShotsStats"),

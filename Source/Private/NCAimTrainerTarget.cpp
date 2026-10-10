@@ -200,6 +200,7 @@ void ANCAimTrainerTarget::OnRep_TrainerVisible()
     // Attachments are separate actors and do not inherit the pawn's hidden flag.
     if (WeaponAttachment) { WeaponAttachment->SetActorHiddenInGame(!bTrainerVisible); }
     SetActorEnableCollision(bTrainerVisible);
+    UpdateDrillFlag();
     if (!bTrainerVisible)
     {
         // These pawns are reused. Stopping the curve alone leaves its previous
@@ -357,6 +358,9 @@ bool ANCAimTrainerTarget::StartPopupLongStrafe(float HalfWidth, float HoldSecond
 
 void ANCAimTrainerTarget::ResetTargetMovement()
 {
+    DrillMovementMode = 0;
+    bDrillWallDodgePending = false;
+    DrillDodgeBlockedUntil = DrillWallDodgeUntil = NextDrillWallAttempt = 0.f;
     GetCharacterMovement()->StopMovementImmediately();
     GetCharacterMovement()->PendingLaunchVelocity = FVector::ZeroVector;
     SetTrainerSpeedScale(1.f);
@@ -704,6 +708,7 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
             // input must not countersteer either a forward or a lateral slide.
             AddMovementInput(TrainerSlideDirection, 1.f, true);
         }
+        else if (DrillMovementMode != 0) { TickDrillMovement(DeltaSeconds); }
         else if (bPopupEvasion)
         {
             // Apply the chosen two-dimensional input continuously. Decisions
@@ -740,6 +745,7 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
     if (GetNetMode() != NM_DedicatedServer && GetWorld()->GetTimeSeconds() >= NextTrainerTintTime)
     {
         UpdateTrainerTint();
+        UpdateDrillFlag();
         NextTrainerTintTime = GetWorld()->GetTimeSeconds() + 0.25f;
     }
 }
@@ -834,6 +840,17 @@ ANCAimTrainerArena::ANCAimTrainerArena(const FObjectInitializer& ObjectInitializ
         Cover.Add(AddBlock(FName(*FString::Printf(TEXT("PopupPlatform%d"), Index)),
             FVector(Block.CenterX, Block.CenterY, Block.Height * 0.5f), FVector(Block.SizeX, Block.SizeY, Block.Height)));
     }
+    for (int32 Side = 0; Side < 6; ++Side)
+    {
+        const float Angle = float(Side) * PI / 3.f;
+        UStaticMeshComponent* Wall = AddBlock(FName(*FString::Printf(TEXT("FlakHexWall%d"), Side)),
+            FVector(990.f * FMath::Cos(Angle), 990.f * FMath::Sin(Angle), 350.f), FVector(40.f, 1170.f, 700.f));
+        Wall->SetRelativeRotation(FRotator(0.f, float(Side) * 60.f, 0.f));
+        Cover.Add(Wall);
+    }
+    Cover.Add(AddBlock(TEXT("ShockLaneLeft"), FVector(400.f, -640.f, 350.f), FVector(4400.f, 80.f, 700.f)));
+    Cover.Add(AddBlock(TEXT("ShockLaneRight"), FVector(400.f, 640.f, 350.f), FVector(4400.f, 80.f, 700.f)));
+    Cover.Add(AddBlock(TEXT("ShockCapturePoint"), FVector(-1400.f, 0.f, 3.f), FVector(240.f, 360.f, 6.f)));
     const NCAimTrainerLayout::FBlock Ledge = NCAimTrainerLayout::AirborneFiringLedge();
     AirbornePlatforms.Add(AddBlock(TEXT("AirborneFiringLedge"),
         FVector(Ledge.CenterX, Ledge.CenterY, Ledge.Height * 0.5f), FVector(Ledge.SizeX, Ledge.SizeY, Ledge.Height)));
@@ -934,7 +951,9 @@ void ANCAimTrainerArena::OnRep_Scenario()
     for (int32 Index = 0; Index < Cover.Num(); ++Index)
     {
         UStaticMeshComponent* Block = Cover[Index];
-        const bool bEnabled = Index < NCAimTrainerLayout::HeadSlotCount ? Scenario == 1 : Scenario == 2;
+        const int32 HexStart = NCAimTrainerLayout::HeadSlotCount + NCAimTrainerLayout::PopupPlatformCount;
+        const bool bEnabled = Index < NCAimTrainerLayout::HeadSlotCount ? Scenario == 1
+            : Index < HexStart ? Scenario == 2 : Index < HexStart + 6 ? Scenario == 5 : Scenario == 6;
         Block->SetHiddenInGame(!bEnabled);
         Block->SetCollisionEnabled(bEnabled ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
     }

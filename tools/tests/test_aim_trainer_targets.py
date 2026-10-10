@@ -32,6 +32,8 @@ struct FMath {
     static float Clamp(float value,float low,float high) { return value<low?low:value>high?high:value; }
     static float Min(float a,float b) { return a<b?a:b; }
     static float Max(float a,float b) { return a>b?a:b; }
+    static float Abs(float a) { return std::abs(a); }
+    static float Sign(float a) { return a>0.f?1.f:a<0.f?-1.f:0.f; }
 };
 enum MovementMode { MOVE_None, MOVE_Walking, MOVE_Falling, MOVE_Flying, MOVE_Swimming };
 struct FVector {
@@ -45,6 +47,8 @@ struct FVector {
     FVector operator*(float scale) const { return FVector(X*scale,Y*scale,Z*scale); }
     FVector operator+(const FVector& other) const { return FVector(X+other.X,Y+other.Y,Z+other.Z); }
     FVector operator-(const FVector& other) const { return FVector(X-other.X,Y-other.Y,Z-other.Z); }
+    FVector& operator+=(const FVector& other) { X+=other.X;Y+=other.Y;Z+=other.Z;return *this; }
+    FVector& operator-=(const FVector& other) { X-=other.X;Y-=other.Y;Z-=other.Z;return *this; }
     FVector& operator*=(float scale) { X*=scale;Y*=scale;Z*=scale;return *this; }
     bool IsNearlyZero() const { return std::abs(X)+std::abs(Y)+std::abs(Z)<.00001f; }
     FVector GetClampedToMaxSize(float maximum) const {
@@ -55,6 +59,18 @@ struct FVector {
 };
 const FVector FVector::ZeroVector;
 FVector operator*(float scale,const FVector& vector) { return vector*scale; }
+struct TestDamageType { virtual ~TestDamageType()=default; TestDamageType* GetDefaultObject() { return this; } };
+struct UUTDamageType : TestDamageType { bool bForceZMomentum=true; float ForceZMomentumPct=.4f; };
+struct FDamageEvent {
+    TestDamageType* DamageTypeClass=nullptr;
+    virtual ~FDamageEvent()=default;
+    virtual bool IsOfType(int) const { return false; }
+};
+struct FUTPointDamageEvent : FDamageEvent {
+    static const int ClassID=101;
+    FVector Momentum;
+    bool IsOfType(int id) const override { return id==ClassID; }
+};
 struct FRotator { float Pitch,Yaw,Roll; FRotator(float p,float y,float r):Pitch(p),Yaw(y),Roll(r){} };
 enum class ETeleportType { TeleportPhysics };
 struct UCharacterMovementComponent {
@@ -99,6 +115,9 @@ struct UUTCharacterMovement : UCharacterMovementComponent {
     int CurrentMultiJumpCount=0,CurrentWallDodgeCount=0;
     int TimerResets=0;
     FVector Velocity,Acceleration;
+    FVector AppliedImpulse;
+    int ImpulseCalls=0;
+    void AddDampedImpulse(FVector impulse,bool self) { if(self)std::abort();AppliedImpulse=impulse;++ImpulseCalls; }
     struct {
         bool Walkable=true;
         struct { FVector ImpactNormal=FVector(0.f,0.f,1.f); } HitResult;
@@ -158,7 +177,7 @@ struct ATeamArenaCharacter : AUTCharacter {
         ++Launches; Move.PendingLaunchVelocity=velocity; LaunchXYOverride=xyOverride; LaunchZOverride=zOverride;
     }
     bool DodgeAllowed = true, Hidden = false, Collision = true, HasPendingInput = false;
-    bool SimulateNativeDodge=false;
+    bool SimulateNativeDodge=false, WallContact=false;
     int GetNetMode() const { return NM_DedicatedServer; }
     float HeadRadius=18.f,HeadScale=1.f;
     float HeadScaleUsed=0.f,HeadPrediction=-1.f;
@@ -176,11 +195,12 @@ struct ATeamArenaCharacter : AUTCharacter {
     FVector GetActorLocation() const { return Position; }
     FVector GetVelocity() const { return Move.Velocity; }
     World* GetWorld() { return &TheWorld; }
+    const World* GetWorld() const { return &TheWorld; }
     FVector GetHeadLocation(float) override { ++CapsuleHeadQueries; return FVector(0,0,188); }
     void Tick(float) { ++SuperTicks; }
     bool Dodge(FVector direction, FVector cross) {
         ++DodgeCalls; LastDodgeDirection=direction; LastDodgeCross=cross;
-        const bool success=DodgeAllowed&&!bIsCrouched&&Move.CanDodge();
+        const bool success=DodgeAllowed&&!bIsCrouched&&Move.CanDodge()&&(!Move.IsFalling()||WallContact);
         if(success&&SimulateNativeDodge) {
             Move.Mode=MOVE_Falling;Move.bIsDodging=true;
             Move.Velocity=Move.DodgeImpulseHorizontal*direction+(Move.Velocity|cross)*cross;
@@ -228,10 +248,23 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     FVector PopupMoveMinimum,PopupMoveMaximum,PopupMoveDirection;
     bool bPopupEvasion=false,bPopupNeedsDecision=false;
     float TrainerHeadshotScale=1.f,NextTrainerTintTime=0.f,TrainerFlightRate=1.f;
+    int DrillMovementMode=0;
+    FVector DrillOrigin;
+    float DrillStrafeSide=1.f,DrillAdvance=.4f,DrillDodgeBlockedUntil=0.f;
+    bool bDrillWallDodgePending=false;
+    float DrillWallDodgeUntil=0.f,NextDrillWallAttempt=0.f;
+    void TickDrillMovement(float);
+    void ConfigureDrillMovement(bool,const FVector&);
+    void ChooseDrillStrafe(float,float);
+    bool CanStartTrainerDrillAction() const;
+    bool TryTrainerDrillDodge(float);
+    bool TryTrainerDrillWallDodge();
+    void ApplyTrainerShockMomentum(const FDamageEvent&);
     void UpdateTrainerTint() {}
     void SetTrainerHeadshotScale(float);
     void OnRep_TrainerHeadshotScale();
     struct History { int Count=7; void Reset() { Count=0; } } SavedPositions, SavedCapsulePostures;
+    void UpdateDrillFlag() {}
     void OnRep_TrainerVisible();
     void ActivateTarget(const FVector&,bool);
     void ActivateAirborneTarget(const FVector&,const FVector&,float=1.f);
@@ -274,7 +307,80 @@ ANCAimTrainerTarget ActivePopup() {
 CASES = r'''
 int main(int argc,char**argv) {
     Require(argc==2,"case required"); const std::string name(argv[1]);
-    if(name=="popup_travel") {
+    if(name=="drill_momentum") {
+        auto target=Active();target.ConfigureDrillMovement(true,FVector::ZeroVector);
+        UUTDamageType damage;FUTPointDamageEvent beam;beam.DamageTypeClass=&damage;beam.Momentum=FVector(72900,0,0);
+        target.ApplyTrainerShockMomentum(beam);
+        Require(target.Move.ImpulseCalls==1&&target.Move.AppliedImpulse.X==72900.f
+            &&std::abs(target.Move.AppliedImpulse.Z-29160.f)<.01f,"shock impulse or native grounded Z force changed");
+        target.Move.Mode=MOVE_Falling;target.ApplyTrainerShockMomentum(beam);
+        Require(target.Move.ImpulseCalls==2&&target.Move.AppliedImpulse.Z==0,"ground-only force-Z applied in flight");
+        FDamageEvent other;target.ApplyTrainerShockMomentum(other);
+        beam.Momentum.X=std::numeric_limits<float>::quiet_NaN();target.ApplyTrainerShockMomentum(beam);
+        Require(target.Move.ImpulseCalls==2,"invalid damage event applied momentum");
+        beam.Momentum=FVector(72900,0,0);target.DrillMovementMode=1;target.ApplyTrainerShockMomentum(beam);
+        target.DrillMovementMode=2;target.Role=1;target.ApplyTrainerShockMomentum(beam);
+        Require(target.Move.ImpulseCalls==2,"non-shock drill or client applied authoritative impulse");
+    } else if(name=="drill_movement") {
+        auto flak=Active();flak.Position=FVector(300,0,108);flak.SimulateNativeDodge=true;
+        flak.ConfigureDrillMovement(false,FVector::ZeroVector);
+        Require(flak.TryTrainerDrillDodge(.1f),"close flak dodge did not start");
+        Require(std::abs(flak.Move.Velocity.Size2D()-1500.f)<.01f&&flak.Move.Velocity.Z==500.f
+            &&flak.Move.DodgeImpulseHorizontal==1500.f&&flak.Move.DodgeImpulseVertical==500.f,
+            "flak drill shortened a native dodge or changed its defaults");
+        auto shock=Active();shock.Position=FVector(1800,0,108);shock.ConfigureDrillMovement(true,FVector::ZeroVector);
+        shock.Move.Velocity=FVector(400,0,100);
+        Require(!shock.TryTrainerDrillDodge(.2f)&&shock.Move.Velocity.X==400.f,"carrier dodge erased shock knockback");
+        shock.Move.Velocity=FVector(-400,0,0);shock.SimulateNativeDodge=true;
+        Require(shock.TryTrainerDrillDodge(.2f)&&shock.Move.Velocity.X<0&&shock.Move.Velocity.Y<0
+            &&std::abs(shock.LastDodgeDirection.Y)>=.64f,"carrier did not make a steep diagonal dodge");
+        auto blocked=Active();blocked.Role=1;blocked.ConfigureDrillMovement(true,FVector::ZeroVector);
+        Require(blocked.DrillMovementMode==0&&!blocked.TryTrainerDrillDodge(.5f),"client started authoritative drill movement");
+        flak.HideTarget();Require(flak.DrillMovementMode==0,"pooled target retained drill motion");
+    } else if(name=="drill_approaches") {
+        auto target=Active();target.Position=FVector(1000,0,108);target.ConfigureDrillMovement(true,FVector::ZeroVector);
+        for(float side:{.1f,.9f}) for(float depth:{0.f,.3f,.7f,1.f}) {
+            target.ChooseDrillStrafe(side,depth);target.TickDrillMovement(.016f);
+            Require(target.LastInput.X<0.f&&std::abs(target.LastInput.Y)>=.79f,"carrier fell back to straight-lining");
+            Require((target.LastInput.Y<0.f)==(side<.5f),"carrier ignored random lateral choice");
+        }
+        target.Position.Y=540.f;target.Move.Velocity.Y=500.f;
+        target.ChooseDrillStrafe(.9f,.5f);target.TickDrillMovement(.016f);
+        Require(target.LastInput.Y<0.f,"carrier did not brake away from lane wall");
+        auto flak=Active();flak.ConfigureDrillMovement(false,FVector::ZeroVector);flak.Position=FVector(400,0,108);
+        flak.ChooseDrillStrafe(.1f,1.f);flak.TickDrillMovement(.016f);
+        Require(flak.LastInput.X>0.f&&flak.LastInput.Y<0.f,"flak target cannot create spacing");
+        flak.Position.X=900.f;flak.TickDrillMovement(.016f);
+        Require(flak.LastInput.X<0.f,"flak target did not steer back inside enlarged hexagon");
+        const float previous=flak.DrillStrafeSide;flak.bRecenterWiggleAfterDodge=true;
+        flak.ChooseDrillStrafe(.9f,0.f);Require(flak.DrillStrafeSide==previous,"midair feint changed dodge intent");
+    } else if(name=="drill_wall_dodge") {
+        auto target=Active();target.Position=FVector(1000,350,108);target.SimulateNativeDodge=true;
+        target.ConfigureDrillMovement(true,FVector::ZeroVector);
+        Require(target.TryTrainerDrillDodge(.05f)&&target.bDrillWallDodgePending&&target.Move.Velocity.Y>0,
+            "carrier did not take its optional route toward the wall");
+        const int groundCalls=target.DodgeCalls;target.TheWorld.Time+=.1f;
+        Require(!target.TryTrainerDrillWallDodge()&&target.DodgeCalls==groundCalls,"carrier tried a mid-lane air dodge");
+        target.Position.Y=555.f;const FVector before=target.Move.Velocity;
+        Require(!target.TryTrainerDrillWallDodge()&&target.DodgeCalls==groundCalls+1
+            &&target.Move.Velocity.X==before.X&&target.Move.Velocity.Y==before.Y,"failed native wall trace added impulse");
+        target.WallContact=true;target.TheWorld.Time+=.05f;target.Move.DodgeAllowed=false;
+        Require(!target.TryTrainerDrillWallDodge(),"wall dodge bypassed native cooldown");
+        target.Move.DodgeAllowed=true;
+        Require(target.TryTrainerDrillWallDodge()&&target.LastDodgeDirection.X<0.f&&target.LastDodgeDirection.Y<0.f
+            &&!target.bDrillWallDodgePending,"native wall dodge did not kick diagonally back into lane");
+        Require(!target.TryTrainerDrillWallDodge(),"one route generated repeated airborne wall dodges");
+        target.bDrillWallDodgePending=true;target.DrillWallDodgeUntil=target.TheWorld.Time+1.f;
+        target.Move.Velocity=FVector(-500,200,200);
+        FUTPointDamageEvent beam;beam.Momentum=FVector(72900,0,0);target.ApplyTrainerShockMomentum(beam);
+        Require(!target.bDrillWallDodgePending&&!target.TryTrainerDrillWallDodge(),"beam failed to cancel queued wall dodge");
+        target.Move.Mode=MOVE_Walking;target.Move.bIsDodging=false;target.bRecenterWiggleAfterDodge=false;
+        Require(!target.TryTrainerDrillDodge(.5f),"dodge erased beam impulse before its movement tick");
+        target.TheWorld.Time+=.41f;
+        Require(target.TryTrainerDrillDodge(.3f),"shock recovery blocked dodges permanently");
+        target.HideTarget();Require(!target.bDrillWallDodgePending&&target.DrillDodgeBlockedUntil==0.f,
+            "pooled target kept a wall route or hit cooldown");
+    } else if(name=="popup_travel") {
         for(float dt:{.008f,.016f,.032f}) for(int slot:{0,1,4,5}) for(int variant:{0,1,2}) {
             const auto area=NCAimTrainerLayout::PopupEvasionArea(slot,variant);
             const FVector minimum(area.MinX,area.MinY,0),maximum(area.MaxX,area.MaxY,0);
@@ -1330,6 +1436,7 @@ class AimTrainerTargetTests(unittest.TestCase):
         cls.addClassCleanup(cls.temporary.cleanup)
         directory = Path(cls.temporary.name)
         native = (PLUGIN / "Source/Private/NCAimTrainerTarget.cpp").read_text(encoding="utf-8-sig")
+        drill_native = (PLUGIN / "Source/Private/NCAimTrainerDrillTarget.cpp").read_text(encoding="utf-8-sig")
         movement = (PLUGIN.parents[1] / "Source/UnrealTournament/Private/UTCharacterMovement.cpp").read_text(encoding="utf-8-sig")
         policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()
         layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix()
@@ -1364,11 +1471,18 @@ class AimTrainerTargetTests(unittest.TestCase):
             "void ANCAimTrainerTarget::NotifyBlockedHeadShot",
         )
         source = directory / "trainer_targets.cpp"
-        source.write_text("\n".join([ADAPTER, f'#include "{policy}"', f'#include "{layout}"']
+        source.write_text("\n".join([ADAPTER, f'#include "{policy}"', f'#include "{layout}"',
+            f'#include "{(PLUGIN / "Source/Public/NCAimTrainerDrillPolicy.h").as_posix()}"']
             + [native_function(movement,"float UUTCharacterMovement::GetMaxAcceleration").replace("MovementMode", "Mode"),
                native_function(movement,"void UUTCharacterMovement::PerformFloorSlide"),
                native_function(movement,"void UUTCharacterMovement::ProcessLanded")]
-            + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
+            + [native_function(native, s) for s in signatures]
+            + [native_function(drill_native, s) for s in ("void ANCAimTrainerTarget::ConfigureDrillMovement",
+                "bool ANCAimTrainerTarget::CanStartTrainerDrillAction",
+                "void ANCAimTrainerTarget::ChooseDrillStrafe", "bool ANCAimTrainerTarget::TryTrainerDrillWallDodge",
+                "void ANCAimTrainerTarget::TickDrillMovement", "bool ANCAimTrainerTarget::TryTrainerDrillDodge",
+                "void ANCAimTrainerTarget::ApplyTrainerShockMomentum")]
+            + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_targets.exe" if os.name == "nt" else "trainer_targets")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
@@ -1383,6 +1497,10 @@ class AimTrainerTargetTests(unittest.TestCase):
         result = subprocess.run([str(self.executable), name], env=self.environment, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_drill_dodges_preserve_native_knockback_and_full_flak_impulse(self): self.run_case("drill_movement")
+    def test_drill_random_strafes_allow_spacing_and_bound_the_carrier_lane(self): self.run_case("drill_approaches")
+    def test_carrier_wall_dodge_requires_native_contact_and_preserves_beam_knockback(self): self.run_case("drill_wall_dodge")
+    def test_shock_drill_applies_native_point_event_momentum_only_on_authority(self): self.run_case("drill_momentum")
     def test_popup_evasion_keeps_moving_in_two_dimensions_inside_safe_bounds(self): self.run_case("popup_travel")
     def test_popup_evasion_areas_allow_varied_native_dodges_and_defer_decisions_through_recovery(self): self.run_case("popup_evasion_dodges")
     def test_left_popup_dodger_checks_full_native_landing_path(self): self.run_case("popup_left_dodge")

@@ -58,6 +58,12 @@ public:
     /** Native lateral slide for the tracking target; turns inward near lane edges. */
     bool TryTrainerTrackingSlide(float DirectionRoll);
     bool IsTrainerSliding() const;
+    void ConfigureDrillMovement(bool bShock, const FVector& Origin);
+    void ChooseDrillStrafe(float SideRoll, float DepthRoll);
+    bool CanStartTrainerDrillAction() const;
+    bool TryTrainerDrillDodge(float DirectionRoll);
+    bool TryTrainerDrillWallDodge();
+    void ApplyTrainerShockMomentum(const FDamageEvent& Event);
 
 private:
     UPROPERTY(ReplicatedUsing=OnRep_TrainerVisible)
@@ -86,6 +92,18 @@ private:
     bool bPopupNeedsDecision = false;
     FVector TrainerSlideDirection = FVector::ZeroVector;
     float AppearanceTime = 0.f;
+    int32 DrillMovementMode = 0;
+    FVector DrillOrigin = FVector::ZeroVector;
+    float DrillStrafeSide = 1.f;
+    float DrillAdvance = 0.4f;
+    float DrillDodgeBlockedUntil = 0.f;
+    bool bDrillWallDodgePending = false;
+    float DrillWallDodgeUntil = 0.f;
+    float NextDrillWallAttempt = 0.f;
+    TWeakObjectPtr<class UStaticMeshComponent> DrillFlagPole;
+    TWeakObjectPtr<class UStaticMeshComponent> DrillFlagBanner;
+    void TickDrillMovement(float DeltaSeconds);
+    void UpdateDrillFlag();
     struct FTrainerMaterialTint
     {
         TWeakObjectPtr<UMaterialInstanceDynamic> Material;

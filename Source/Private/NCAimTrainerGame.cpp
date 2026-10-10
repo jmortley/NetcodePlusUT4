@@ -9,6 +9,7 @@
 #include "TeamArenaCharacter.h"
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
+#include "UTPlusFlakCannon.h"
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTProjectile.h"
 #include "NCAimTrainerAirbornePolicy.h"
@@ -339,7 +340,11 @@ bool ANCAimTrainerGame::ConfigurePawn()
         SniperClass = LoadClass<AUTWeapon>(nullptr,
             TEXT("/Game/Blueprints/Netcode/UTNPSniper.UTNPSniper_C"), nullptr, LOAD_NoWarn);
     }
-    TSubclassOf<AUTWeapon> DesiredClass = NCAimTrainerScenarioPolicy::IsRocketScenario(Progress.Scenario) ? RocketClass : NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario) ? LinkClass : NCAimTrainerScenarioPolicy::IsInstagibScenario(Progress.Scenario) ? InstagibClass
+    TSubclassOf<AUTWeapon> DesiredClass = NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario)
+        ? LoadClass<AUTWeapon>(nullptr, TEXT("/Game/Blueprints/Netcode/NPFlakCannon.NPFlakCannon_C"), nullptr, LOAD_NoWarn)
+        : NCAimTrainerScenarioPolicy::IsShockDefense(Progress.Scenario)
+        ? LoadClass<AUTWeapon>(nullptr, TEXT("/Game/Blueprints/Netcode/UTNPShockRifle.UTNPShockRifle_C"), nullptr, LOAD_NoWarn)
+        : NCAimTrainerScenarioPolicy::IsRocketScenario(Progress.Scenario) ? RocketClass : NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario) ? LinkClass : NCAimTrainerScenarioPolicy::IsInstagibScenario(Progress.Scenario) ? InstagibClass
         : NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario) ? SACTFSniperClass
         : Progress.bUseLightningGun ? LightningClass : SniperClass;
     if (!DesiredClass || DesiredClass->HasAnyClassFlags(CLASS_Abstract))
@@ -352,7 +357,9 @@ bool ANCAimTrainerGame::ConfigurePawn()
             ? TEXT("Cannot start: the SACTF sniper is unavailable. Install the MutSaCTF content pak.")
             : TEXT("Cannot start: the selected NCP rifle is unavailable. Install the NCWepMut content pak."));
     }
-    if ((NCAimTrainerScenarioPolicy::IsRocketScenario(Progress.Scenario) && !DesiredClass->IsChildOf(AUTPlusWeap_RocketLauncher::StaticClass()))
+    if ((NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario) && !DesiredClass->IsChildOf(AUTPlusFlakCannon::StaticClass()))
+        || (NCAimTrainerScenarioPolicy::IsShockDefense(Progress.Scenario) && !DesiredClass->IsChildOf(AUTPlusShockRifle::StaticClass()))
+        || (NCAimTrainerScenarioPolicy::IsRocketScenario(Progress.Scenario) && !DesiredClass->IsChildOf(AUTPlusWeap_RocketLauncher::StaticClass()))
         || (NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario) && !DesiredClass->IsChildOf(AUTWeap_LinkGun_NCP::StaticClass()))
         || (NCAimTrainerScenarioPolicy::IsInstagibScenario(Progress.Scenario) && !DesiredClass->IsChildOf(AUTPlusShockRifle::StaticClass()))
         || ((NCAimTrainerScenarioPolicy::IsSniperScenario(Progress.Scenario)) && !DesiredClass->IsChildOf(AUTPlusSniper::StaticClass())))
@@ -445,7 +452,7 @@ void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 
     const bool bMovementPractice = Progress.bMovementPractice;
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
-    Progress.bMovementPractice = bMovementPractice;
+    Progress.bMovementPractice = bMovementPractice && !NCAimTrainerScenarioPolicy::IsDrillScenario(Scenario);
     Progress.bUseLightningGun = bUseLightningGun && !NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario);
     HideAllTargets();
     if (Arena) { Arena->SetScenario(uint8(NCAimTrainerScenarioPolicy::ArenaScenario(Scenario))); }
@@ -456,6 +463,7 @@ void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 
 
 void ANCAimTrainerGame::SetMovementPractice(ANCAimTrainerPlayerController* PC, bool bEnabled)
 {
+    if (NCAimTrainerScenarioPolicy::IsDrillScenario(Progress.Scenario)) { bEnabled = false; }
     if (!IsTrainee(PC) || Progress.Phase == 1 || Progress.Phase == 2 || Progress.bMovementPractice == bEnabled) { return; }
     ResetLocalSession();
     const uint8 Scenario = Progress.Scenario;
@@ -546,6 +554,14 @@ void ANCAimTrainerGame::BeginActiveRun()
     NextTrackingSlideTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(Schedule.FRand());
     NextPopupTime = PhaseStartedAt;
     const float Refire = RunWeapon ? RunWeapon->GetRefireTime(0) : 1.f;
+    if (NCAimTrainerScenarioPolicy::IsDrillScenario(Progress.Scenario)
+        && (!FMath::IsFinite(Refire) || !FMath::IsNearlyEqual(Refire,
+            NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario) ? 1.f : 0.7f)))
+    {
+        bRankedRun = false;
+        UnrankedReason = TEXT("Practice only: primary refire timing differs from the drill preset.");
+        InvalidateLocalRun();
+    }
     const float MinimumRefire = NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario) ? 0.7f : 1.f;
     PopupRefireSeconds = FMath::IsFinite(Refire) ? FMath::Max(MinimumRefire, Refire) : MinimumRefire;
     if (NCAimTrainerScenarioPolicy::IsInstagibScenario(Progress.Scenario) && (!FMath::IsFinite(Refire) || !FMath::IsNearlyEqual(Refire, 1.f)))
@@ -585,6 +601,9 @@ void ANCAimTrainerGame::BeginActiveRun()
 
 void ANCAimTrainerGame::HideAllTargets()
 {
+    Drill = NCAimTrainerDrillPolicy::FAttempt();
+    FlakAttemptShot = 0;
+    FlakPellets.Empty();
     AirborneSpawnBalance.Reset();
     HeadshotClearedSlots = 0;
     NextTrackingSlideTime = 0.f;
@@ -761,6 +780,15 @@ void ANCAimTrainerGame::UpdateShotCount()
     }
     Progress.Shots = FMath::RoundToInt(RawShots);
     RecordLocalShotCount();
+    if (NCAimTrainerScenarioPolicy::IsDrillScenario(Progress.Scenario))
+    {
+        UpdateDrillShots();
+        Progress.Score = NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario)
+            ? NCAimTrainerDrillPolicy::FlakScore(Progress.Hits)
+            : NCAimTrainerDrillPolicy::ShockScore(Progress.Hits, Progress.Shots, Progress.TargetsExpired);
+        Progress.Accuracy = Progress.Shots > 0 ? 100.f * Progress.Hits / Progress.Shots : 0.f;
+        return;
+    }
     if (NCAimTrainerScenarioPolicy::IsRocketScenario(Progress.Scenario))
     {
         Progress.Score = NCAimTrainerScoring::RocketScore(Progress.Hits, Progress.TargetsExpired);
@@ -785,6 +813,7 @@ float ANCAimTrainerGame::RecordTargetHit(ANCAimTrainerTarget* Target, float Dama
     const int32 Slot = Targets.IndexOfByKey(Target);
     const float Now = GetWorld()->GetTimeSeconds();
     if (Slot == INDEX_NONE || !Target->IsAvailable() || Now >= PhaseStartedAt + 60.f || Now >= TargetExpiry[Slot]) { return 0.f; }
+    if (NCAimTrainerScenarioPolicy::IsDrillScenario(Progress.Scenario)) { return RecordDrillHit(Target, Damage, Event, Causer); }
     if (NCAimTrainerScenarioPolicy::IsAirborneScenario(Progress.Scenario) && IsAtAirborneHazard(Target)) { return 0.f; }
     const bool bRocket = NCAimTrainerScenarioPolicy::IsRocketScenario(Progress.Scenario);
     if (bRocket ? !IsCurrentRocketDamage(Target, Event, Causer) : Causer != RunWeapon) { return 0.f; }
@@ -1099,6 +1128,7 @@ void ANCAimTrainerGame::UpdateAirborneTargets(float Now)
 
 void ANCAimTrainerGame::UpdateTargets(float Now)
 {
+    if (NCAimTrainerScenarioPolicy::IsDrillScenario(Progress.Scenario)) { UpdateDrillTargets(Now); return; }
     if (NCAimTrainerScenarioPolicy::IsAirborneScenario(Progress.Scenario)) { UpdateAirborneTargets(Now); return; }
     if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario)) { UpdatePopupDodger(Now); }
     const int32 ActiveSlots = NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario) ? 1 : NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario)

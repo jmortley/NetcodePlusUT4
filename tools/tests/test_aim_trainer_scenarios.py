@@ -191,6 +191,11 @@ struct ANCAimTrainerGame {
     bool IsAtAirborneHazard(const ANCAimTrainerTarget*) const { return false; }
     bool IsCurrentRocketDamage(const ANCAimTrainerTarget*,const FDamageEvent&,AActor*) const { return false; }
     void UpdateAirborneTargets(float) {}
+    NCAimTrainerDrillPolicy::FAttempt Drill;
+    int FlakAttemptShot=0;
+    struct { void Empty() {} } FlakPellets;
+    void UpdateDrillTargets(float) {}
+    float RecordDrillHit(ANCAimTrainerTarget*,float,const FDamageEvent&,AActor*) { return 0.f; }
     void HideAllTargets();
     void ActivateSlot(int32, float);
     void UpdateTargets(float);
@@ -1240,6 +1245,7 @@ class AimTrainerScenarioTests(unittest.TestCase):
         directory = Path(cls.temporary.name)
         policy = f'#include "{(PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()}"'
         policy += f'\n#include "{(PLUGIN / "Source/Public/NCAimTrainerSpawnBalance.h").as_posix()}"'
+        policy += '\n#include "' + (PLUGIN / "Source/Public/NCAimTrainerDrillPolicy.h").as_posix() + '"'
         layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").read_text(encoding="utf-8-sig")
         game = (PLUGIN / "Source/Private/NCAimTrainerGame.cpp").read_text(encoding="utf-8-sig")
         signatures = (

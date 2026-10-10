@@ -13,12 +13,15 @@ namespace NCAimTrainerScenarioPolicy
     inline bool IsInstagibScenario(int Scenario) { return Scenario == 2 || Scenario == 7; }
     inline bool IsAirborneScenario(int Scenario) { return Scenario >= 7 && Scenario <= 10; }
     inline bool IsRocketScenario(int Scenario) { return Scenario == 10; }
+    inline bool IsFlakScenario(int Scenario) { return Scenario == NCAimTrainerScenarioId::FlakHexagon; }
+    inline bool IsShockDefense(int Scenario) { return Scenario == NCAimTrainerScenarioId::ShockDefense; }
+    inline bool IsDrillScenario(int Scenario) { return IsFlakScenario(Scenario) || IsShockDefense(Scenario); }
     inline bool IsHeadshotScenario(int Scenario) { return Scenario == 1 || Scenario == 4; }
     inline bool IsPopupScenario(int Scenario) { return Scenario == 2 || Scenario == 3 || Scenario == 5; }
     inline bool IsSACTFScenario(int Scenario) { return Scenario == 4 || Scenario == 5 || Scenario == 9; }
     inline bool IsSniperScenario(int Scenario) { return Scenario == 1 || Scenario == 3 || Scenario == 8 || IsSACTFScenario(Scenario); }
     inline bool HasHeadshotBonus(int Scenario) { return Scenario == 3 || Scenario == 5 || Scenario == 8 || Scenario == 9; }
-    inline int ArenaScenario(int Scenario) { return IsRocketScenario(Scenario) ? 4 : IsAirborneScenario(Scenario) ? 3 : IsTrackingScenario(Scenario) ? 0 : IsHeadshotScenario(Scenario) ? 1 : 2; }
+    inline int ArenaScenario(int Scenario) { return IsFlakScenario(Scenario) ? 5 : IsShockDefense(Scenario) ? 6 : IsRocketScenario(Scenario) ? 4 : IsAirborneScenario(Scenario) ? 3 : IsTrackingScenario(Scenario) ? 0 : IsHeadshotScenario(Scenario) ? 1 : 2; }
 
     inline float UnitRoll(float Roll)
     {
