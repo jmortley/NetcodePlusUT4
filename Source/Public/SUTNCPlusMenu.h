@@ -77,6 +77,9 @@ private:
 	TArray<TSharedPtr<FString>> CharacterOverlayDistanceOptions;
 	bool bShowClutchOverlay = true;
 	bool bExpandedSpectatorSlideout = true;
+	FKey AimTrainerRestartKey = EKeys::R;
+	bool bAimTrainerRestartKeyEdited = false;
+	bool bAimTrainerRestartKeyRejected = false;
 
 	// ── Home HUD display toggles ── opt-in, default off (NCPlusDisplaySettings); applied on Save.
 	bool bHideFriendlyCrosshairSign = false;

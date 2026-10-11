@@ -9,6 +9,33 @@
 #include "UTCharacterMovement.h"
 #include "Components/CapsuleComponent.h"
 
+void ANCAimTrainerGame::QueueFlakHitFeedback(float Damage, const FVector& HitLocation)
+{
+    const float Now = GetWorld()->GetTimeSeconds();
+    if (PendingFlakHitDamage > 0.f && Now >= FlakHitFeedbackAt) { FlushFlakHitFeedback(); }
+    if (PendingFlakHitDamage <= 0.f)
+    {
+        // Match normal NCP pellet grouping. Keep the first impact's deadline
+        // and position so later pellets cannot delay the cue or move its number.
+        FlakHitFeedbackAt = Now + NCAimTrainerDrillPolicy::FlakHitGroupSeconds;
+        FlakHitFeedbackLocation = HitLocation;
+    }
+    PendingFlakHitDamage += Damage;
+}
+
+void ANCAimTrainerGame::FlushFlakHitFeedback()
+{
+    const float Damage = PendingFlakHitDamage;
+    const FVector HitLocation = FlakHitFeedbackLocation;
+    PendingFlakHitDamage = FlakHitFeedbackAt = 0.f;
+    FlakHitFeedbackLocation = FVector::ZeroVector;
+    if (Trainee && Progress.Phase == 2 && NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario)
+        && FMath::IsFinite(Damage) && Damage > 0.f)
+    {
+        Trainee->NotifyTrainerFlakHit(Damage, HitLocation);
+    }
+}
+
 void ANCAimTrainerGame::PublishDrillStatus()
 {
     if (!Trainee || Progress.Phase != 2) { return; }
@@ -72,6 +99,9 @@ void ANCAimTrainerGame::RetireDrillTarget(bool bSuccess, float Now)
     if (!Target->IsAvailable()) { return; }
     if (NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario))
     {
+        // Send the accepted burst before hiding/reusing this target and before
+        // NextTarget clears the attempt's damage total.
+        FlushFlakHitFeedback();
         if (bSuccess) { ++Progress.Hits; }
         else { ++Progress.TargetsExpired; }
         RecordLocalTarget(0, bSuccess);
@@ -90,6 +120,7 @@ void ANCAimTrainerGame::RetireDrillTarget(bool bSuccess, float Now)
 void ANCAimTrainerGame::UpdateDrillTargets(float Now)
 {
     if (!Targets.IsValidIndex(0) || !Targets[0] || Now >= PhaseStartedAt + 60.f) { return; }
+    if (PendingFlakHitDamage > 0.f && Now >= FlakHitFeedbackAt) { FlushFlakHitFeedback(); }
     ANCAimTrainerTarget* Target = Targets[0];
     if (!Target->IsAvailable())
     {
@@ -171,6 +202,8 @@ float ANCAimTrainerGame::RecordDrillHit(ANCAimTrainerTarget* Target, float Damag
             || Now - Drill.ShotAt > NCAimTrainerDrillPolicy::FlakResolveSeconds
             || FlakPellets.Num() >= 32 || FlakPellets.Contains(Pellet)) { return 0.f; }
         FlakPellets.Add(Pellet);
+        QueueFlakHitFeedback(Damage, Target->GetActorLocation()
+            + FVector(0.f, 0.f, 1.15f * Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()));
         Drill.FlakDamage += Damage;
         if (Drill.FlakDamage >= NCAimTrainerDrillPolicy::FlakKillDamage) { RetireDrillTarget(true, Now); }
     }
@@ -190,8 +223,8 @@ float ANCAimTrainerGame::RecordDrillHit(ANCAimTrainerTarget* Target, float Damag
         NextDrillAction = FMath::Max(NextDrillAction, Now + 0.4f);
         if (bStopped) { RetireDrillTarget(true, Now); }
         PublishDrillStatus();
+        Trainee->NotifyTrainerHit(Damage);
     }
-    Trainee->NotifyTrainerHit(Damage);
     UpdateShotCount();
     return Damage;
 }

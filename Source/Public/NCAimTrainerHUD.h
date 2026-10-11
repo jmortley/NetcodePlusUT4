@@ -21,6 +21,8 @@ public:
 	virtual bool ShouldDrawMinimap() override;
 	virtual EInputMode::Type GetInputMode_Implementation() const override;
 	virtual bool OverrideMouseClick(FKey Key, EInputEvent EventType) override;
+	void UpdateTrainerDamageNumbers();
+	void AddFlakDamageNumber(int32 Damage, const FVector& HitLocation);
 
 private:
 	struct FTrainerButton

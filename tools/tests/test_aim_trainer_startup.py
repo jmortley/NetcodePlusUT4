@@ -1,8 +1,9 @@
 """Run actual trainer startup functions against a minimal UE lifecycle adapter.
 
 The adapter exposes the stock first-frame deferral and records inventory work.
-It covers standalone map startup and a later joining player; it does not replace
-a packaged playtest of Unreal's attachment actors or cooked weapon assets.
+It also exercises restart cleanup with the real abort, start, target-reset, and
+local-session-reset methods. Session creation is a recorded service boundary;
+these tests do not replace HTTP integration or a packaged gameplay test.
 """
 import os
 from pathlib import Path
@@ -34,12 +35,14 @@ using FString = std::string;
 constexpr int CLASS_Abstract = 1, LOAD_NoWarn = 1, NAME_None = 0, NAME_Spectating = 1;
 constexpr int MOVE_None = 0, MOVE_Walking = 1, NM_Standalone = 0;
 struct FVector {
+    static const FVector ZeroVector;
     float X, Y, Z;
     FVector(float x, float y, float z) : X(x), Y(y), Z(z) {}
     FVector operator+(const FVector& b) const { return FVector(X+b.X, Y+b.Y, Z+b.Z); }
     FVector operator-(const FVector& b) const { return FVector(X-b.X, Y-b.Y, Z-b.Z); }
     float SizeSquared() const { return X*X+Y*Y+Z*Z; }
 };
+const FVector FVector::ZeroVector(0.f,0.f,0.f);
 struct FMath {
     static bool IsFinite(float n) { return std::isfinite(n); }
     static float Abs(float n) { return std::abs(n); }
@@ -52,7 +55,11 @@ struct Text : std::string {
     Text ToLower() const { Text result(*this); std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) { return char(std::tolower(c)); }); return result; }
 };
 enum class EGuidFormats { DigitsWithHyphens };
-struct FGuid { static FGuid NewGuid() { return FGuid(); } Text ToString(EGuidFormats) { return Text("unique-run"); } };
+struct FGuid {
+    int Id;
+    static FGuid NewGuid() { static int next=0; return FGuid{++next}; }
+    Text ToString(EGuidFormats) { Text result("unique-run-"); result+=std::to_string(Id); return result; }
+};
 int GetTypeHash(const Text&) { return 123; }
 struct FRotator {
     float Pitch=0.f, Yaw=0.f, Roll=0.f;
@@ -116,7 +123,8 @@ struct AUTWeapon {
     int Ammo = 0, MaxAmmo = 100, ShotsStatsName = 1;
     float BeamRefire = .12f;
     float GetRefireTime(int) const { return BeamRefire; }
-    void StopFire(int) {}
+    int Stops[2] = {};
+    void StopFire(int mode) { ++Stops[mode]; }
 };
 struct AUTPlusWeap_RocketLauncher : AUTWeapon { static UClass* StaticClass() { return &RocketType; } };
 struct AUTPlusSniper : AUTWeapon {
@@ -253,6 +261,7 @@ struct FActorSpawnParameters { ESpawnActorCollisionHandlingMethod SpawnCollision
 template<class T> struct TArray : std::vector<T> {
     int Num() const { return int(this->size()); }
     void Add(T value) { this->push_back(value); }
+    void Empty() { this->clear(); }
     template<class Predicate> void RemoveAll(Predicate predicate) {
         this->erase(std::remove_if(this->begin(), this->end(), predicate), this->end());
     }
@@ -323,7 +332,19 @@ struct BaseGame {
 struct FNCAimTrainerProgress {
     uint8 Scenario = 0, Phase = 0;
     bool bMovementPractice = false, bUseLightningGun = false;
+    int32 Score=0, Shots=0, Hits=0, Headshots=0, TargetsExpired=0;
+    float Accuracy=0.f, TrackingSeconds=0.f, FiringSeconds=0.f;
     float RemainingSeconds = 60;
+};
+struct LocalSessionAdapter {
+    int Cancels=0;
+    void Cancel() { ++Cancels; }
+};
+template<class T> struct TSharedPtr {
+    std::shared_ptr<T> Value;
+    bool IsValid() const { return bool(Value); }
+    T* operator->() const { return Value.get(); }
+    void Reset() { Value.reset(); }
 };
 struct ANCAimTrainerGame : BaseGame {
     using Super = BaseGame;
@@ -351,13 +372,30 @@ struct ANCAimTrainerGame : BaseGame {
     static int StaticClass() { return 1; }
     int GetClass() { return StaticClass(); }
     bool IsTrainee(const ANCAimTrainerPlayerController* pc) const { return pc && pc==Trainee; }
-    void HideAllTargets() {}
+    NCAimTrainerDrillPolicy::FAttempt Drill;
+    FNCAimTrainerSpawnBalance AirborneSpawnBalance;
+    int32 FlakAttemptShot=0, HeadshotClearedSlots=0;
+    float PendingFlakHitDamage=0.f, FlakHitFeedbackAt=0.f;
+    FVector FlakHitFeedbackLocation{0.f,0.f,0.f};
+    TArray<int> FlakPellets, PopupSpawnVariants, PopupDodgeActions;
+    TArray<float> NextCrouchTime, CrouchEndTime, PopupLastMoveHold;
+    TArray<float> NextPopupSlideTime, NextPopupLongStrafeTime, NextPopupDodgeTime;
+    float NextTrackingSlideTime=0.f;
+    void HideAllTargets();
     bool EnsureArena();
     bool FailSetup(const char* message) { SetupError = message; return false; }
     void PublishProgress() { ++Publishes; }
     void RefreshLeaderboard() { ++Fetches; }
-    void ResetLocalSession() {}
-    void StartLocalSession() {}
+    TSharedPtr<LocalSessionAdapter> LocalSession;
+    TArray<int> LocalEvents;
+    int32 LocalAppearances[6]={}, LocalNextCheckpoint=1, LocalLastShotCount=0;
+    bool bLocalAuthPending=false, bLocalRecording=false;
+    int SessionStarts=0;
+    Text RequestedRunId;
+    void ResetLocalSession();
+    // Service-boundary stand-in: authenticate asynchronously without changing
+    // the production cleanup state being asserted below.
+    void StartLocalSession() { ++SessionStarts; bLocalAuthPending=true; RequestedRunId=RunId; }
     bool ReadyToStartMatch_Implementation();
     void PostLogin(APlayerController*);
     void RestartPlayer(AController*) override;
@@ -371,6 +409,7 @@ struct ANCAimTrainerGame : BaseGame {
     void SelectScenario(ANCAimTrainerPlayerController*,uint8,bool=false);
     void SetMovementPractice(ANCAimTrainerPlayerController*,bool);
     void StartTraining(ANCAimTrainerPlayerController*,bool=false);
+    void RestartTraining(ANCAimTrainerPlayerController*,bool=false);
     void AbortTraining(ANCAimTrainerPlayerController*);
 };
 void Require(bool value, const char* why) {
@@ -519,6 +558,117 @@ int main(int argc, char** argv) {
             f.Game.Progress.Phase=2;
             f.Game.AbortTraining(&f.Player);
         }
+    } else if (name == "restart_countdown" || name == "restart_active" || name == "restart_results") {
+        // Exercise both retained LG preference and a projectile-bearing preset.
+        for (int scenario : {3,10}) {
+            Fixture run;
+            run.BeginWorld(); run.Game.PostLogin(&run.Player);
+            auto& game=run.Game;
+            game.SelectScenario(&run.Player,uint8(scenario),true);
+            game.SetMovementPractice(&run.Player,true);
+            game.StartTraining(&run.Player,true);
+            game.Progress.Phase=name=="restart_countdown" ? 1 : name=="restart_active" ? 2 : 3;
+            game.Progress.Score=900; game.Progress.Shots=12; game.Progress.Hits=9;
+            game.Progress.Headshots=4; game.Progress.TargetsExpired=3;
+            game.Progress.Accuracy=75.f; game.Progress.TrackingSeconds=6.f; game.Progress.FiringSeconds=9.f;
+            game.TrackedSeconds=6.0; game.FiredSeconds=9.0;
+            game.bPreviousContact=game.bPreviousFiring=true;
+            game.HeadshotClearedSlots=7; game.Drill.Streak=4; game.FlakAttemptShot=12;
+            game.PendingFlakHitDamage=80.f; game.FlakHitFeedbackAt=42.035f;
+            game.FlakHitFeedbackLocation=FVector(1.f,2.f,3.f);
+            game.FlakPellets.Add(17); game.AirborneSpawnBalance.RecordHit(-500.f);
+            game.NextTrackingSlideTime=23.f;
+            game.NextCrouchTime.Add(23.f); game.CrouchEndTime.Add(24.f); game.PopupLastMoveHold.Add(1.f);
+            game.NextPopupSlideTime.Add(25.f); game.NextPopupLongStrafeTime.Add(26.f); game.NextPopupDodgeTime.Add(27.f);
+            game.PopupSpawnVariants.Add(2); game.PopupDodgeActions.Add(3);
+            auto oldSession=std::make_shared<LocalSessionAdapter>();
+            game.LocalSession.Value=oldSession;
+            game.LocalEvents.Add(41); game.LocalAppearances[2]=5;
+            game.LocalNextCheckpoint=7; game.LocalLastShotCount=12;
+            game.bLocalRecording=true;
+            const Text oldRun=game.RunId;
+            const int oldStarts=game.SessionStarts, oldDiscards=game.SpawnedPawn.Discards;
+            const int oldClears=game.ProjectileClears, oldHides=game.Targets[0]->Hides;
+            AUTWeapon* oldWeapon=game.RunWeapon;
+            const int oldPrimaryStops=oldWeapon->Stops[0], oldAltStops=oldWeapon->Stops[1];
+            game.TheWorld.TimeSeconds=42.f;
+
+            game.RestartTraining(&run.Player,true);
+
+            Require(game.Progress.Phase==1 && game.Progress.RemainingSeconds==3.f && game.PhaseStartedAt==42.f,
+                    "restart did not begin a full new countdown");
+            Require(game.Progress.Scenario==scenario && game.Progress.bMovementPractice && game.Progress.bUseLightningGun
+                    && game.RunWeapon==(scenario==3 ? static_cast<AUTWeapon*>(&game.SpawnedPawn.Lightning)
+                                                   : static_cast<AUTWeapon*>(&game.SpawnedPawn.Rocket)),
+                    "restart lost scenario, movement, weapon preference, or selected weapon");
+            Require(!game.RunId.empty() && game.RunId!=oldRun && game.RequestedRunId==game.RunId
+                    && game.SessionStarts==oldStarts+1,
+                    "restart reused old run identity or did not request exactly one new session");
+            Require(oldSession->Cancels==1 && !game.LocalSession.IsValid() && game.LocalEvents.empty()
+                    && game.LocalAppearances[2]==0 && game.LocalNextCheckpoint==1 && game.LocalLastShotCount==0
+                    && !game.bLocalRecording && game.bLocalAuthPending,
+                    "restart left cancelled-run checkpoint events or recording state attached to new authentication");
+            Require(game.Progress.Score==0 && game.Progress.Shots==0 && game.Progress.Hits==0
+                    && game.Progress.Headshots==0 && game.Progress.TargetsExpired==0 && game.Progress.Accuracy==0.f
+                    && game.Progress.TrackingSeconds==0.f && game.Progress.FiringSeconds==0.f
+                    && game.TrackedSeconds==0.0 && game.FiredSeconds==0.0 && !game.bPreviousContact && !game.bPreviousFiring,
+                    "restart carried prior score or firing clocks into the next run");
+            Require(game.SpawnedPawn.Discards==oldDiscards+1 && game.ProjectileClears>oldClears
+                    && game.Targets[0]->Hides>oldHides && game.IsInsidePracticeLane(&game.SpawnedPawn),
+                    "restart retained old inventory, projectiles, visible targets, or displaced trainee");
+            if (name!="restart_results") {
+                Require(oldWeapon->Stops[0]==oldPrimaryStops+1 && oldWeapon->Stops[1]==oldAltStops+1,
+                        "interrupting countdown or active run did not stop both old weapon fire modes");
+            }
+            Require(game.HeadshotClearedSlots==0 && game.Drill.Streak==0 && game.FlakAttemptShot==0
+                    && game.PendingFlakHitDamage==0.f && game.FlakHitFeedbackAt==0.f
+                    && game.FlakHitFeedbackLocation.X==0.f && game.FlakHitFeedbackLocation.Y==0.f
+                    && game.FlakHitFeedbackLocation.Z==0.f
+                    && game.FlakPellets.empty() && game.AirborneSpawnBalance.Count==0 && game.NextTrackingSlideTime==0.f
+                    && game.NextCrouchTime[0]==0.f && game.CrouchEndTime[0]==0.f && game.PopupLastMoveHold[0]==0.f
+                    && game.NextPopupSlideTime[0]==0.f && game.NextPopupLongStrafeTime[0]==0.f
+                    && game.NextPopupDodgeTime[0]==0.f && game.PopupSpawnVariants[0]==0 && game.PopupDodgeActions[0]==0,
+                    "restart retained previous target appearance or movement schedule state");
+        }
+    } else if (name == "abort_flak_feedback") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player); f.Game.StartTraining(&f.Player);
+        f.Game.Progress.Phase=2; f.Game.Progress.Scenario=11;
+        f.Game.PendingFlakHitDamage=75.f; f.Game.FlakHitFeedbackAt=2.035f;
+        f.Game.FlakHitFeedbackLocation=FVector(8.f,9.f,10.f);
+        f.Game.AbortTraining(&f.Player);
+        Require(f.Game.Progress.Phase==0 && f.Game.PendingFlakHitDamage==0.f && f.Game.FlakHitFeedbackAt==0.f
+                && f.Game.FlakHitFeedbackLocation.X==0.f && f.Game.FlakHitFeedbackLocation.Y==0.f
+                && f.Game.FlakHitFeedbackLocation.Z==0.f,
+                "abort retained old-run flak feedback for the next run");
+    } else if (name == "restart_authority") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player); f.Game.StartTraining(&f.Player);
+        f.Game.Progress.Phase=2; f.Game.Progress.Score=800;
+        auto oldSession=std::make_shared<LocalSessionAdapter>();
+        f.Game.LocalSession.Value=oldSession;
+        const Text oldRun=f.Game.RunId;
+        const int starts=f.Game.SessionStarts, hides=f.Game.Targets[0]->Hides;
+        const int discards=f.Game.SpawnedPawn.Discards, clears=f.Game.ProjectileClears;
+        ANCAimTrainerPlayerController other;
+        for (auto* caller : {&other, static_cast<ANCAimTrainerPlayerController*>(nullptr)}) {
+            f.Game.RestartTraining(caller,true);
+            Require(f.Game.Progress.Phase==2 && f.Game.Progress.Score==800 && f.Game.RunId==oldRun
+                    && f.Game.SessionStarts==starts && oldSession->Cancels==0 && f.Game.LocalSession.IsValid()
+                    && f.Game.Targets[0]->Hides==hides && f.Game.SpawnedPawn.Discards==discards
+                    && f.Game.ProjectileClears==clears && !f.Game.Progress.bUseLightningGun,
+                    "non-trainee restart disturbed an existing run");
+        }
+    } else if (name == "restart_failed_setup") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player); f.Game.SelectScenario(&f.Player,3,true);
+        f.Game.StartTraining(&f.Player,true); f.Game.Progress.Phase=2;
+        auto oldSession=std::make_shared<LocalSessionAdapter>();
+        f.Game.LocalSession.Value=oldSession;
+        const int starts=f.Game.SessionStarts;
+        f.Game.LightningClass=nullptr; MissingLightningAsset=true;
+        f.Game.RestartTraining(&f.Player,true);
+        Require(f.Game.Progress.Phase==0 && f.Game.RunId.empty() && !f.Game.RunWeapon
+                && oldSession->Cancels==1 && !f.Game.LocalSession.IsValid() && !f.Game.bLocalAuthPending
+                && f.Game.SessionStarts==starts && !f.Game.SetupError.empty(),
+                "failed restart setup left a live old run or began an invalid checkpoint session");
     } else if (name == "lane_bounds") {
         f.BeginWorld(); f.Game.PostLogin(&f.Player);
         AUTCharacter& pawn=f.Game.SpawnedPawn;
@@ -901,11 +1051,17 @@ class AimTrainerStartupTests(unittest.TestCase):
             "void ANCAimTrainerGame::SelectScenario",
             "void ANCAimTrainerGame::SetMovementPractice",
             "void ANCAimTrainerGame::StartTraining",
+            "void ANCAimTrainerGame::RestartTraining",
             "void ANCAimTrainerGame::AbortTraining",
+            "void ANCAimTrainerGame::ResetLocalSession",
+            "void ANCAimTrainerGame::HideAllTargets",
         )
         layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix()
         policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()
-        cls.translation = "\n".join([ADAPTER, f'#include "{layout}"', f'#include "{policy}"']
+        drill = (PLUGIN / "Source/Public/NCAimTrainerDrillPolicy.h").as_posix()
+        balance = (PLUGIN / "Source/Public/NCAimTrainerSpawnBalance.h").as_posix()
+        cls.translation = "\n".join([f'#include "{drill}"', f'#include "{balance}"', ADAPTER,
+                                     f'#include "{layout}"', f'#include "{policy}"']
                                     + [native_function(native, s) for s in signatures] + [CASES])
         cls.configure_function = native_function(native, "bool ANCAimTrainerGame::ConfigurePawn")
         cls.executable = cls.compile_fixture("trainer_startup", cls.translation)
@@ -942,6 +1098,12 @@ class AimTrainerStartupTests(unittest.TestCase):
     def test_missing_sactf_content_fails_closed_and_recovers_after_mount(self): self.run_case("sactf_assets")
     def test_sactf_requires_sniper_native_base_and_own_shot_counter(self): self.run_case("sactf_content")
     def test_restart_clears_firing_and_contact_clocks(self): self.run_case("run_clock_reset")
+    def test_restart_during_countdown_cancels_old_session_and_restarts_same_preset(self): self.run_case("restart_countdown")
+    def test_restart_during_run_clears_score_targets_weapon_and_pending_recording(self): self.run_case("restart_active")
+    def test_restart_from_results_uses_fresh_run_and_preserves_selected_preset(self): self.run_case("restart_results")
+    def test_abort_discards_pending_flak_feedback(self): self.run_case("abort_flak_feedback")
+    def test_restart_cannot_interrupt_another_players_run(self): self.run_case("restart_authority")
+    def test_failed_restart_setup_cancels_old_run_without_starting_invalid_session(self): self.run_case("restart_failed_setup")
     def test_lane_accepts_crouching_jumping_but_rejects_escapes(self): self.run_case("lane_bounds")
     def test_each_scenario_equips_its_real_weapon(self): self.run_case("tracking_weapon")
     def test_headshot_selection_uses_exact_lightning_asset_and_independent_cache(self): self.run_case("lightning_select")

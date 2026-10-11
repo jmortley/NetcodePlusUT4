@@ -64,6 +64,7 @@ public:
 	bool HasTrainerInputFocus() const;
 	void SelectTrainerScenario(uint8 Scenario);
 	void StartTrainerRun();
+	void RestartTrainerRun();
 	void ReturnToTrainerMenu();
 	void ToggleTrainerMovementPractice();
 
@@ -74,6 +75,8 @@ public:
 	void SetTrainerOnlineStatus(const FString& Status);
 	/** Called only after the authority accepts a scoring hit on a practice target. */
 	void NotifyTrainerHit(float Damage);
+	/** One accepted flak pellet burst, with its captured location for HUD feedback. */
+	void NotifyTrainerFlakHit(float Damage, const FVector& HitLocation);
 
 	UFUNCTION(Server, Reliable, WithValidation)
 	void ServerTrainerSelectScenario(uint8 Scenario, bool bUseLightningGun);
@@ -91,6 +94,8 @@ public:
 	void ClientTrainerOnlineStatus(const FString& Status);
 	UFUNCTION(Client, Reliable)
 	void ClientTrainerConfirmedHit(int32 Damage);
+	UFUNCTION(Client, Reliable)
+	void ClientTrainerFlakHit(int32 Damage, FVector_NetQuantize HitLocation);
 
 private:
 	UPROPERTY(ReplicatedUsing=OnRep_TrainerProgress)

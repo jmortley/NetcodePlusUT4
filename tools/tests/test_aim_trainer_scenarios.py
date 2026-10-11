@@ -36,11 +36,13 @@ struct FMath {
     static float Abs(float v) { return std::fabs(v); }
 };
 struct FVector {
+    static const FVector ZeroVector;
     float X, Y, Z;
     FVector(float x=0, float y=0, float z=0) : X(x), Y(y), Z(z) {}
     FVector operator+(const FVector& other) const { return FVector(X + other.X, Y + other.Y, Z + other.Z); }
     float Size2D() const { return std::sqrt(X*X+Y*Y); }
 };
+const FVector FVector::ZeroVector;
 template<class T> struct TArray : std::vector<T> {
     using std::vector<T>::vector;
     int Num() const { return int(this->size()); }
@@ -193,6 +195,8 @@ struct ANCAimTrainerGame {
     void UpdateAirborneTargets(float) {}
     NCAimTrainerDrillPolicy::FAttempt Drill;
     int FlakAttemptShot=0;
+    float PendingFlakHitDamage=0.f, FlakHitFeedbackAt=0.f;
+    FVector FlakHitFeedbackLocation;
     struct { void Empty() {} } FlakPellets;
     void UpdateDrillTargets(float) {}
     float RecordDrillHit(ANCAimTrainerTarget*,float,const FDamageEvent&,AActor*) { return 0.f; }

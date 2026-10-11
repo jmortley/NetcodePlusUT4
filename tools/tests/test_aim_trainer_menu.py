@@ -12,6 +12,7 @@ from test_wipeout_healing import PLUGIN, find_compiler, native_function
 
 ADAPTER = r'''
 #include <algorithm>
+#include <cctype>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -28,6 +29,11 @@ struct FString : std::string {
     using std::string::string;
     FString(const std::string& s) : std::string(s) {}
     const char* operator*() const { return c_str(); }
+    FString ToUpper() const {
+        FString result=*this;
+        std::transform(result.begin(),result.end(),result.begin(),[](unsigned char c) { return char(std::toupper(c)); });
+        return result;
+    }
     static FString FromInt(int value) { return std::to_string(value); }
     static FString Printf(const char* format, ...) {
         char buffer[1024]; va_list args; va_start(args, format);
@@ -38,8 +44,22 @@ struct FMath { template<class T> static T Clamp(T x, T lo, T hi) { return std::m
 struct FLinearColor { FLinearColor(float=0, float=0, float=0, float=0) {} };
 FLinearColor TrainerPanel, TrainerInk, TrainerMuted, TrainerAccent;
 struct FVector2D { float X=0, Y=0; };
-enum class FKey { LeftMouseButton, Other };
-using EKeys = FKey;
+enum class EKeys { LeftMouseButton, Other, Invalid, Enter, R, T };
+struct FText { FString Value; FString ToString() const { return Value; } };
+struct FKey {
+    EKeys Value;
+    FKey(EKeys value=EKeys::Invalid) : Value(value) {}
+    bool IsValid() const { return Value!=EKeys::Invalid; }
+    bool operator==(FKey other) const { return Value==other.Value; }
+    bool operator!=(FKey other) const { return !(*this==other); }
+    FText GetDisplayName() const { return {Value==EKeys::R ? "R" : Value==EKeys::T ? "T" : "Enter"}; }
+};
+namespace NCAimTrainerInputSettings {
+    FKey RestartKey=EKeys::R;
+    FKey GetRestartKey() { return RestartKey; }
+}
+namespace NCPlusHUDDragMode { bool Active=false; bool IsActive() { return Active; } }
+namespace EInputMode { enum Type { EIM_GameAndUI, EIM_GameOnly }; }
 enum EInputEvent { IE_Pressed, IE_Released };
 struct FNCAimTrainerProgress {
     uint8 Scenario=0;
@@ -77,6 +97,7 @@ struct ANCAimTrainerHUD {
     void DrawModePicker(ANCAimTrainerPlayerController*);
     void DrawResults(ANCAimTrainerPlayerController*);
     bool OverrideMouseClick(FKey,EInputEvent);
+    EInputMode::Type GetInputMode_Implementation() const;
 };
 void Require(bool valid,const char* error) { if (!valid) { std::cerr<<error<<'\n'; std::exit(1); } }
 '''
@@ -114,9 +135,22 @@ int main() {
     Require(found, "rockets display shot accuracy instead of hit versus landed targets");
     Require(hud.TrainerButtons.size()==3 && hud.TrainerButtons[0].Action==BackAction && hud.TrainerButtons[2].Action==StartAction,
         "result controls collide with scenario IDs");
+    Require(hud.TrainerButtons.back().Text=="ENTER / R  /  PLAY AGAIN", "result replay omits default restart key");
+    for (EKeys key : {EKeys::T,EKeys::Invalid,EKeys::Enter}) {
+        NCAimTrainerInputSettings::RestartKey=key;
+        hud.TrainerButtons.clear(); hud.DrawResults(&pc);
+        Require(hud.TrainerButtons.back().Text==(key==EKeys::T ? "ENTER / T  /  PLAY AGAIN" : "ENTER  /  PLAY AGAIN"),
+                "replay advertises stale, unbound, or duplicate restart key");
+    }
     hud.MouseX=hud.TrainerButtons[0].Min.X+1; hud.MouseY=hud.TrainerButtons[0].Min.Y+1;
     hud.OverrideMouseClick(EKeys::LeftMouseButton,IE_Pressed);
     Require(pc.Backs==1 && pc.Selection==12, "back control selected rockets");
+    pc.Menu=false;
+    Require(hud.GetInputMode_Implementation()==EInputMode::EIM_GameOnly, "active run must capture mouse look");
+    NCPlusHUDDragMode::Active=true;
+    Require(hud.GetInputMode_Implementation()==EInputMode::EIM_GameAndUI, "active run recaptured mouse while F5 was open");
+    NCPlusHUDDragMode::Active=false;
+    Require(hud.GetInputMode_Implementation()==EInputMode::EIM_GameOnly, "closing F5 did not restore gameplay input");
 }
 '''
 
@@ -128,7 +162,8 @@ class AimTrainerMenuTests(unittest.TestCase):
         actions = re.search(r"enum \{ StartAction[^}]+\};", native).group()
         functions = [native_function(native, signature) for signature in (
             "const TCHAR* ScenarioName", "void ANCAimTrainerHUD::DrawModePicker",
-            "void ANCAimTrainerHUD::DrawResults", "bool ANCAimTrainerHUD::OverrideMouseClick")]
+            "void ANCAimTrainerHUD::DrawResults", "bool ANCAimTrainerHUD::OverrideMouseClick",
+            "EInputMode::Type ANCAimTrainerHUD::GetInputMode_Implementation")]
         with tempfile.TemporaryDirectory(prefix="ncp-aim-menu-") as temporary:
             directory = Path(temporary)
             source = directory / "menu.cpp"

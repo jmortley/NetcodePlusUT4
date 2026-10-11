@@ -5,6 +5,7 @@
 #include "NCPlusPerformanceSettings.h"
 #include "NCPlusICTFAudioSettings.h"
 #include "NCPlusDisplaySettings.h"
+#include "NCAimTrainerInputSettings.h"
 #include "NCClutchOverlay.h"
 #include "NCPlusSpectatorSlideOut.h"
 #include "NCReadyUp.h"
@@ -15,6 +16,7 @@
 #include "UTPlayerState.h"
 #include "HAL/PlatformProcess.h"
 #include "Widgets/Input/STextComboBox.h"
+#include "Widgets/Input/SInputKeySelector.h"
 #include "Widgets/Layout/SScrollBox.h"
 
 // Mod.ini section (iCTF tab)
@@ -297,6 +299,24 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 		CharacterOverlayDistanceOptions.IsValidIndex(OverlayDistanceIndex)
 			? CharacterOverlayDistanceOptions[OverlayDistanceIndex]
 			: nullptr;
+	const TSharedRef<SInputKeySelector> RestartKeySelector = SNew(SInputKeySelector)
+		.SelectedKey_Lambda([this]() { return FInputChord(AimTrainerRestartKey); })
+		.AllowModifierKeys(false)
+		.EscapeCancelsSelection(true)
+		.Font(RegularFont(14))
+		.ColorAndOpacity(FLinearColor::White)
+		.ToolTipText(FText::FromString(TEXT("Click, then press a key or extra mouse button. Escape cancels selection. Used only in the aim trainer.")))
+		.OnKeySelected_Lambda([this](const FInputChord& Chord)
+		{
+			bAimTrainerRestartKeyRejected = !NCAimTrainerInputSettings::IsAllowedRestartKey(Chord.Key);
+			if (!bAimTrainerRestartKeyRejected)
+			{
+				AimTrainerRestartKey = Chord.Key;
+				bAimTrainerRestartKeyEdited = true;
+			}
+		});
+	// UE4.15's Construct does not copy its KeySelectionText argument.
+	RestartKeySelector->SetKeySelectionText(FText::FromString(TEXT("Press a key...")));
 
 	return SNew(SBox)
 		.WidthOverride(620.f)
@@ -446,6 +466,65 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 						})
 					]
 				]
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 5, 0, 5).HAlign(HAlign_Center)
+			[
+				SNew(STextBlock).Text(FText::FromString(TEXT("Aim Trainer")))
+				.Font(BoldFont(18)).ColorAndOpacity(FLinearColor::White)
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(40, 0, 40, 3).HAlign(HAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 12, 0)
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Restart run")))
+					.Font(RegularFont(14)).ColorAndOpacity(FLinearColor::White)
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+				[
+					SNew(SBox).MinDesiredWidth(110.f)
+					[
+						RestartKeySelector
+					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+				[
+					SNew(SButton).Text(FText::FromString(TEXT("Unbind")))
+					.OnClicked_Lambda([this]()
+					{
+						AimTrainerRestartKey = EKeys::Invalid;
+						bAimTrainerRestartKeyEdited = true;
+						bAimTrainerRestartKeyRejected = false;
+						return FReply::Handled();
+					})
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(SButton).Text(FText::FromString(TEXT("Default (R)")))
+					.IsEnabled_Lambda([]() { return NCAimTrainerInputSettings::IsAllowedRestartKey(EKeys::R); })
+					.OnClicked_Lambda([this]()
+					{
+						AimTrainerRestartKey = EKeys::R;
+						bAimTrainerRestartKeyEdited = true;
+						bAimTrainerRestartKeyRejected = false;
+						return FReply::Handled();
+					})
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(24, 0, 24, 8).HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text_Lambda([this]()
+				{
+					return FText::FromString(bAimTrainerRestartKeyRejected
+						? TEXT("That key is reserved. Choose another keyboard key or extra mouse button.")
+						: (AimTrainerRestartKey.IsValid()
+							? TEXT("Restart the current scenario. Click Save to apply the binding.")
+							: TEXT("Restart is unbound. Click the empty box to choose a key. Save applies your changes.")));
+				})
+				.Font(RegularFont(10)).ColorAndOpacity(FLinearColor(0.7f, 0.7f, 0.7f, 1.f))
+				.AutoWrapText(true)
 			]
 
 			// Client-local render-cost control. The underlying OverlayMesh can carry
@@ -1594,6 +1673,9 @@ void SUTNCPlusMenu::LoadSettings()
 	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Full (6500)"))));
 	bShowClutchOverlay = NCClutchOverlay::IsEnabled();
 	bExpandedSpectatorSlideout = UNCPlusSpectatorSlideOut::IsMatchOverlayEnabled();
+	AimTrainerRestartKey = NCAimTrainerInputSettings::GetRestartKey();
+	bAimTrainerRestartKeyEdited = false;
+	bAimTrainerRestartKeyRejected = false;
 	bHideFriendlyCrosshairSign = NCPlusDisplaySettings::GetHideFriendlyCrosshairSign();
 	bHideTeammateOverheadTags = NCPlusDisplaySettings::GetHideTeammateOverheadTags();
 	bCollapseRepeatedKillNames = NCPlusDisplaySettings::GetCollapseRepeatedKillNames();
@@ -1721,6 +1803,10 @@ void SUTNCPlusMenu::SaveSettings()
 	NCPlusPerformanceSettings::SetCharacterOverlayDistance(CharacterOverlayDistance);
 	NCClutchOverlay::SetEnabled(bShowClutchOverlay);
 	UNCPlusSpectatorSlideOut::SetMatchOverlayEnabled(bExpandedSpectatorSlideout);
+	if (bAimTrainerRestartKeyEdited)
+	{
+		NCAimTrainerInputSettings::SetRestartKey(AimTrainerRestartKey);
+	}
 	// Client-local HUD display toggles; the setters persist and update the cached
 	// values the crosshair, teammate beacon and kill-message paths read. Only toggles
 	// clicked in this panel are written: nchud applies the same settings immediately

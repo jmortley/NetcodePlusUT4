@@ -4,6 +4,36 @@ An opt-in game mode with real animated UT character targets, thirteen 60-second
 scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
 
+## Restart binding (2026-10-11)
+
+Press **R** to restart the selected scenario during countdown, during a run, or
+from results. Change or unbind it in **F5 > Home > Aim Trainer** and click Save;
+the HUD displays the selected key. Enter still starts runs from the picker and
+replays from results. Menus, chat, and the console retain their input focus.
+
+Restart discards an unfinished run, stops held fire, clears its projectiles and
+local upload session, and starts a new three-second countdown with the selected
+scenario and movement option. Completed leaderboard scores are unaffected.
+The client preference is stored as `[NCAimTrainer] RestartKey=R` in the normal
+generated `Mod.ini`; `RestartKey=None` disables it. Both client and server need
+the updated plugin for mid-run restart. No pak recook or board reset is needed.
+
+## Flak hit feedback (2026-10-11)
+
+Flak Hexagon combines accepted pellet impacts within a fixed 35 ms window,
+matching normal NCP flak hitsound grouping. Its pitch uses that combined damage
+and the player's selected NCP sound, style and volume. A lethal hit flushes the
+pending burst immediately; partial hits do not wait for the 350 ms attempt timeout.
+Rejected or duplicate pellets produce no feedback, and restarting or leaving a
+run discards pending feedback. Scoring and the 100-damage kill threshold are unchanged.
+
+Only Flak Hexagon displays floating damage numbers. Each number uses the accepted
+burst damage at the captured impact-area position, so hiding or reusing the target
+cannot move the number to its next spawn. Numbers use UT's normal body-damage
+presentation and 255 display cap; other scenarios keep damage numbers hidden.
+This adds a trainer-only client feedback RPC, requiring matching updated client
+and server plugins. No pak recook or leaderboard reset is needed.
+
 ## Flak Hexagon and Shock Defense (2026-10-10)
 
 Two fixed-position, primary-only drills use new revision-20 boards. Existing

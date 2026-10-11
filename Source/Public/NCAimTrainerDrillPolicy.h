@@ -6,6 +6,7 @@ namespace NCAimTrainerDrillPolicy
 {
     constexpr float FlakKillDamage = 100.f;
     constexpr float FlakResolveSeconds = 0.35f;
+    constexpr float FlakHitGroupSeconds = 0.035f;
     constexpr float CaptureX = -1400.f;
     constexpr float RunnerStartX = 1800.f;
     constexpr float LaneHalfWidth = 550.f;

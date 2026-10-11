@@ -533,6 +533,16 @@ void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC, bool bU
     StartLocalSession();
 }
 
+void ANCAimTrainerGame::RestartTraining(ANCAimTrainerPlayerController* PC, bool bUseLightningGun)
+{
+    if (!IsTrainee(PC)) { return; }
+    // Reuse the complete abort lifecycle before starting a fresh countdown.
+    // Incomplete runs are discarded, including local upload callbacks and
+    // projectiles that could otherwise score against the next run's targets.
+    if (Progress.Phase == 1 || Progress.Phase == 2) { AbortTraining(PC); }
+    StartTraining(PC, bUseLightningGun);
+}
+
 void ANCAimTrainerGame::AbortTraining(ANCAimTrainerPlayerController* PC)
 {
     if (!IsTrainee(PC)) { return; }
@@ -613,6 +623,9 @@ void ANCAimTrainerGame::BeginActiveRun()
 
 void ANCAimTrainerGame::HideAllTargets()
 {
+    // Aborts, restarts and scenario changes discard feedback from the old run.
+    PendingFlakHitDamage = FlakHitFeedbackAt = 0.f;
+    FlakHitFeedbackLocation = FVector::ZeroVector;
     Drill = NCAimTrainerDrillPolicy::FAttempt();
     FlakAttemptShot = 0;
     FlakPellets.Empty();
@@ -1309,6 +1322,7 @@ void ANCAimTrainerGame::PublishProgress()
 void ANCAimTrainerGame::FinishRun()
 {
     UpdateShotCount();
+    FlushFlakHitFeedback();
     HideAllTargets();
     Progress.Phase = 3;
     Progress.RemainingSeconds = 0.f;

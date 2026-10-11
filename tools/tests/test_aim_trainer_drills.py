@@ -16,6 +16,7 @@ ADAPTER = r'''
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -34,11 +35,13 @@ struct FMath {
     static int RoundToInt(float x){return int(std::round(x));}
 };
 struct FVector {
+    static const FVector ZeroVector;
     float X,Y,Z;
     FVector(float x=0,float y=0,float z=0):X(x),Y(y),Z(z){}
     FVector operator+(FVector v) const{return {X+v.X,Y+v.Y,Z+v.Z};}
     FVector operator-(FVector v) const{return {X-v.X,Y-v.Y,Z-v.Z};}
 };
+const FVector FVector::ZeroVector{};
 struct FRotator { FRotator(float,float,float){} };
 struct FString:std::string {
     using std::string::string; using std::string::operator=;
@@ -58,8 +61,15 @@ struct AController:AActor{};
 struct ANCAimTrainerPlayerController:AController {
     AUTPlayerState* PlayerState=nullptr;
     AActor Pawn; int Notifications=0; FString Status;
+    struct FlakFeedback { float Damage; FVector Location; };
+    std::vector<FlakFeedback> FlakNotifications;
+    std::function<void(float,const FVector&)> OnFlakFeedback;
     AActor* GetPawn(){return &Pawn;}
     void NotifyTrainerHit(float){++Notifications;}
+    void NotifyTrainerFlakHit(float damage,const FVector& location){
+        FlakNotifications.push_back({damage,location});
+        if(OnFlakFeedback)OnFlakFeedback(damage,location);
+    }
     void SetTrainerOnlineStatus(const FString& s){Status=s;}
 };
 struct AUTWeapon:AActor {
@@ -127,6 +137,8 @@ struct ANCAimTrainerGame {
     int FlakAttemptShot=0;
     TArray<AActor*> FlakPellets;
     float NextDrillAction=0,PhaseStartedAt=0,ShotStatBaseline=0;
+    float PendingFlakHitDamage=0,FlakHitFeedbackAt=0;
+    FVector FlakHitFeedbackLocation;
     bool bDrillDodgeQueued=false;
     float NextWiggleTime[6]={},NextCrouchTime[6]={},CrouchEndTime[6]={},TargetExpiry[6]={},NextTargetTime[6]={};
     int LocalAppearances[6]={},HitsRecorded=0,ExpiresRecorded=0,ProjectilesCleared=0;
@@ -137,6 +149,7 @@ struct ANCAimTrainerGame {
     void RecordLocalTarget(int,bool hit){if(hit)++HitsRecorded;else ++ExpiresRecorded;}
     void ClearTrainerProjectiles(){++ProjectilesCleared;}
     void PublishDrillStatus();void UpdateDrillShots();void ActivateDrillTarget(float);
+    void QueueFlakHitFeedback(float,const FVector&);void FlushFlakHitFeedback();
     void RetireDrillTarget(bool,float);void UpdateDrillTargets(float);void UpdateShotCount();
     float RecordDrillHit(ANCAimTrainerTarget*,float,const FDamageEvent&,AActor*);
 };
@@ -156,11 +169,68 @@ int main(int argc,char** argv){
     Require(argc==2,"case missing");const std::string name(argv[1]);
     if(name=="flak_threshold"){
         Fixture f;f.Shot();AUTProjectile pellets[6];
+        f.P.OnFlakFeedback=[&](float damage,const FVector&){
+            Require(f.T.Visible&&f.G.Drill.FlakDamage>=100.f,"lethal cue waited until target/attempt reset");
+            Require(std::abs(damage-100.f)<.001f&&f.G.PendingFlakHitDamage==0&&f.G.FlakHitFeedbackAt==0,
+                "lethal cue omitted accepted pellet damage or retained batch during callback");
+        };
         for(int i=0;i<5;++i){pellets[i]=f.Pellet();Require(f.Hit(&pellets[i],19.9f)>0,"valid pellet rejected");}
         Require(f.G.Progress.Hits==0&&f.T.Visible,"less than 100 damage killed");
         Require(f.Hit(&pellets[0],100)==0,"same pellet counted twice");
         pellets[5]=f.Pellet();f.Hit(&pellets[5],.5f);
         Require(f.G.Progress.Hits==1&&!f.T.Visible&&f.G.Progress.Score==100&&f.G.HitsRecorded==1,"100 damage did not resolve exactly one lethal volley");
+        Require(f.P.FlakNotifications.size()==1&&f.P.Notifications==0,"lethal pellets emitted separate generic cues");
+        f.G.FlushFlakHitFeedback();Require(f.P.FlakNotifications.size()==1,"lethal cue replayed on flush");
+    } else if(name=="flak_feedback_group"){
+        Fixture f;f.Shot();auto p1=f.Pellet();auto p2=f.Pellet();auto p3=f.Pellet();
+        f.T.Position=FVector(12,34,108);f.Hit(&p1,20);
+        const float deadline=f.G.FlakHitFeedbackAt;
+        Require(std::abs(deadline-1.035f)<.0001f,"first pellet did not start 35ms cue window");
+        WorldNow=1.02f;f.T.Position=FVector(100,200,500);f.Hit(&p2,30);
+        WorldNow=1.034f;f.Hit(&p3,40);f.G.UpdateDrillTargets(WorldNow);
+        Require(f.P.FlakNotifications.empty()&&f.P.Notifications==0&&f.G.FlakHitFeedbackAt==deadline,
+            "pellets played independently or extended the first impact deadline");
+        WorldNow=deadline+.0001f;f.G.UpdateDrillTargets(WorldNow);
+        Require(f.P.FlakNotifications.size()==1&&f.P.FlakNotifications[0].Damage==90.f,
+            "accepted pellets did not produce one summed cue on deadline");
+        const FVector where=f.P.FlakNotifications[0].Location;
+        Require(where.X==12&&where.Y==34&&std::abs(where.Z-232.2f)<.001f,
+            "queued damage number followed target movement instead of first impact location");
+        Require(f.T.Visible&&f.G.Progress.TargetsExpired==0,"partial cue waited for failed-attempt retirement");
+        WorldNow=1.36f;f.G.UpdateDrillTargets(WorldNow);
+        Require(!f.T.Visible&&f.P.FlakNotifications.size()==1,"failed-attempt retirement duplicated grouped cue");
+    } else if(name=="flak_feedback_late_pellet"){
+        Fixture f;f.Shot();auto p1=f.Pellet();auto p2=f.Pellet();f.Hit(&p1,20);
+        WorldNow=1.05f;f.Hit(&p2,30); // No tick between impacts: queue must flush the mature first burst.
+        Require(f.P.FlakNotifications.size()==1&&f.P.FlakNotifications[0].Damage==20.f
+            &&f.G.PendingFlakHitDamage==30.f&&std::abs(f.G.FlakHitFeedbackAt-1.085f)<.0001f,
+            "late pellet merged into expired burst or lost its own feedback");
+        WorldNow=1.086f;f.G.UpdateDrillTargets(WorldNow);
+        Require(f.P.FlakNotifications.size()==2&&f.P.FlakNotifications[1].Damage==30.f,
+            "late pellet burst did not flush on its own deadline");
+    } else if(name=="flak_feedback_rejections"){
+        Fixture f;f.Shot();auto accepted=f.Pellet();f.Hit(&accepted,30);
+        Require(f.Hit(&accepted,60)==0,"duplicate pellet accepted");
+        for(int guard=0;guard<5;++guard){auto invalid=f.Pellet();if(guard==0)invalid.Role=1;
+            if(guard==1)invalid.InstigatorController=nullptr;if(guard==2)invalid.Instigator=nullptr;
+            if(guard==3)invalid.Type=99;if(guard==4)invalid.MyDamageType=99;
+            Require(f.Hit(&invalid,90)==0,"invalid pellet accepted");}
+        WorldNow=1.036f;f.G.UpdateDrillTargets(WorldNow);
+        Require(f.P.FlakNotifications.size()==1&&f.P.FlakNotifications[0].Damage==30.f
+            &&f.G.Drill.FlakDamage==30.f,"rejected pellet inflated score or feedback pitch damage");
+    } else if(name=="flak_feedback_retire_early"){
+        Fixture f;f.Shot();auto p=f.Pellet();f.Hit(&p,25);
+        WorldNow=1.01f;f.Shot(); // A second volley retires the first attempt before its cue timer.
+        Require(!f.T.Visible&&f.P.FlakNotifications.size()==1&&f.P.FlakNotifications[0].Damage==25.f,
+            "early retirement dropped partial feedback");
+        WorldNow=1.04f;f.G.UpdateDrillTargets(WorldNow);
+        Require(f.P.FlakNotifications.size()==1,"expired early-retired batch replayed");
+    } else if(name=="flak_feedback_scope"){
+        for(int guard=0;guard<3;++guard){Fixture f;f.G.QueueFlakHitFeedback(25,FVector(1,2,3));
+            if(guard==0)f.G.Progress.Phase=3;if(guard==1)f.G.Progress.Scenario=12;if(guard==2)f.G.Trainee=nullptr;
+            f.G.FlushFlakHitFeedback();
+            Require(f.P.FlakNotifications.empty()&&f.G.PendingFlakHitDamage==0&&f.G.FlakHitFeedbackAt==0
+                &&f.G.FlakHitFeedbackLocation.X==0,"inactive/foreign scenario leaked or retained pending flak cue");}
     } else if(name=="flak_attempts"){
         Fixture f;f.Shot();auto old=f.Pellet();f.Hit(&old,50);
         WorldNow=1.36f;f.G.UpdateDrillTargets(WorldNow);
@@ -183,6 +253,8 @@ int main(int argc,char** argv){
         for(int i=0;i<4;++i){WorldNow+=.7f;f.Shot();f.Hit(&f.Shock);}
         Require(!f.T.Visible&&f.G.Drill.Stops==1&&f.G.Progress.Hits==9&&f.T.Impulses==9,"five-hit reset or native impulse count wrong");
         Require(f.G.Progress.Score==875,"shock score differs from server formula");
+        Require(f.P.Notifications==9&&f.P.FlakNotifications.empty()&&f.G.PendingFlakHitDamage==0,
+            "shock hits were delayed/grouped or emitted flak feedback");
     } else if(name=="shock_capture"){
         Fixture f(true);f.Shot();f.Hit(&f.Shock);f.T.Position=FVector(-1400,0,108);f.G.UpdateDrillTargets(WorldNow);f.G.UpdateShotCount();
         Require(!f.T.Visible&&f.G.Progress.TargetsExpired==1&&f.G.Drill.Streak==0&&f.G.Progress.Score==0,"capture did not retire/reset carrier");
@@ -226,7 +298,7 @@ class AimTrainerDrillTests(unittest.TestCase):
         headers = [PLUGIN / p for p in ("Source/Public/NCAimTrainerDrillPolicy.h", "Source/Private/NCAimTrainerScenarioPolicy.h", "Source/Private/NCAimTrainerScoring.h")]
         drills = (PLUGIN / "Source/Private/NCAimTrainerDrills.cpp").read_text()
         game = (PLUGIN / "Source/Private/NCAimTrainerGame.cpp").read_text()
-        signatures = ["void ANCAimTrainerGame::" + name for name in ("PublishDrillStatus", "UpdateDrillShots", "ActivateDrillTarget", "RetireDrillTarget", "UpdateDrillTargets")]
+        signatures = ["void ANCAimTrainerGame::" + name for name in ("QueueFlakHitFeedback", "FlushFlakHitFeedback", "PublishDrillStatus", "UpdateDrillShots", "ActivateDrillTarget", "RetireDrillTarget", "UpdateDrillTargets")]
         source = directory / "drills.cpp"
         source.write_text("\n".join([*(f'#include "{p.as_posix()}"' for p in headers), ADAPTER,
             *(native_function(drills, s) for s in signatures), native_function(drills, "float ANCAimTrainerGame::RecordDrillHit"),
@@ -243,5 +315,5 @@ class AimTrainerDrillTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
-for _case in ("flak_threshold", "flak_attempts", "flak_identity", "shock_streak", "shock_capture", "spawn_geometry", "evasive_sequence"):
+for _case in ("flak_threshold", "flak_feedback_group", "flak_feedback_late_pellet", "flak_feedback_rejections", "flak_feedback_retire_early", "flak_feedback_scope", "flak_attempts", "flak_identity", "shock_streak", "shock_capture", "spawn_geometry", "evasive_sequence"):
     setattr(AimTrainerDrillTests, "test_" + _case, lambda self, case=_case: self.run_case(case))

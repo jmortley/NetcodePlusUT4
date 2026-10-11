@@ -27,9 +27,30 @@ struct FMath {
     static bool IsFinite(float value) { return std::isfinite(value); }
     static float Clamp(float value, float low, float high) { return std::max(low, std::min(high, value)); }
     static int RoundToInt(float value) { return int(std::round(value)); }
+    static int Min(int a, int b) { return std::min(a, b); }
 };
+struct FVector {
+    float X, Y, Z;
+    FVector(float x=0, float y=0, float z=0) : X(x), Y(y), Z(z) {}
+    bool ContainsNaN() const { return !std::isfinite(X) || !std::isfinite(Y) || !std::isfinite(Z); }
+};
+using FVector_NetQuantize = FVector;
+template<class T> struct TArray : std::vector<T> {
+    void Add(const T& value) { this->push_back(value); }
+    void Empty() { this->clear(); }
+};
+struct FEnemyDamageNumber {
+    void* DamagedPawn; float DamageTime; int DamageAmount; FVector WorldPosition;
+    float Scale; bool bArmorDamage, bOverhealth;
+    FEnemyDamageNumber(void* pawn, float time, int damage, FVector position, float scale, bool armor, bool overhealth)
+        : DamagedPawn(pawn), DamageTime(time), DamageAmount(damage), WorldPosition(position),
+          Scale(scale), bArmorDamage(armor), bOverhealth(overhealth) {}
+};
+namespace NCAimTrainerScenarioPolicy { bool IsFlakScenario(int scenario) { return scenario==11; } }
+struct FNCAimTrainerProgress { int Phase=2, Scenario=11; };
 struct AClientHitsounds;
-struct World { std::vector<AClientHitsounds*> Mutators; };
+struct World { std::vector<AClientHitsounds*> Mutators; float GetTimeSeconds() const { return 10.f; } };
+struct ANCAimTrainerHUD;
 struct FHitsoundsConfig { int SelectedPreset = 0; float Volume = 1.f; };
 struct AClientHitsounds {
     bool Suppress = false;
@@ -67,14 +88,34 @@ struct ANCAimTrainerPlayerController {
     bool Local = true, HasWorld = true;
     int Sent = 0, LastSent = 0;
     World TheWorld;
+    ANCAimTrainerHUD* MyUTHUD = nullptr;
+    FNCAimTrainerProgress TrainerProgress;
+    int FlakSent = 0;
+    FVector FlakLocation;
     bool IsLocalController() const { return Local; }
     World* GetWorld() { return HasWorld ? &TheWorld : nullptr; }
+    const FNCAimTrainerProgress& GetTrainerProgress() const { return TrainerProgress; }
     void ClientTrainerConfirmedHit(int damage) {
         ++Sent; LastSent = damage; ClientTrainerConfirmedHit_Implementation(damage);
     }
     void NotifyTrainerHit(float);
     void ClientTrainerConfirmedHit_Implementation(int);
+    void NotifyTrainerFlakHit(float, const FVector&);
+    void ClientTrainerFlakHit_Implementation(int, FVector_NetQuantize);
+    void ClientTrainerFlakHit(int damage, FVector location) {
+        ++FlakSent; LastSent=damage; FlakLocation=location;
+        ClientTrainerFlakHit_Implementation(damage, location);
+    }
 };
+struct ANCAimTrainerHUD {
+    ANCAimTrainerPlayerController* PlayerOwner = nullptr;
+    bool bDrawDamageNumbers = false;
+    TArray<FEnemyDamageNumber> DamageNumbers;
+    World* GetWorld() { return PlayerOwner ? PlayerOwner->GetWorld() : nullptr; }
+    void UpdateTrainerDamageNumbers();
+    void AddFlakDamageNumber(int, const FVector&);
+};
+template<class T, class U> T* Cast(U* value) { return static_cast<T*>(value); }
 void Require(bool condition, const char* message) {
     if (!condition) { std::cerr << message << '\n'; std::exit(1); }
 }
@@ -128,6 +169,66 @@ int main(int argc, char** argv) {
         for (int damage : {0, -1, 10001}) pc.ClientTrainerConfirmedHit_Implementation(damage);
         Require(AClientHitsounds::PreviewPlays == 0 && AClientHitsounds::ConfigReads == 0,
                 "invalid receiver or payload reached audio/config work");
+    } else if (name == "flak_authority") {
+        ANCAimTrainerHUD hud; hud.PlayerOwner=&pc; pc.MyUTHUD=&hud;
+        const FVector location(130.f, -90.f, 218.f);
+        pc.Role=1; pc.NotifyTrainerFlakHit(105.f, location);
+        Require(pc.FlakSent==0, "client published flak feedback");
+        pc.Role=ROLE_Authority;
+        for (float damage : {0.f, -1.f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()})
+            pc.NotifyTrainerFlakHit(damage, location);
+        pc.NotifyTrainerFlakHit(105.f, FVector(std::numeric_limits<float>::infinity()));
+        pc.NotifyTrainerFlakHit(105.f, FVector(0, std::numeric_limits<float>::quiet_NaN()));
+        pc.HasWorld=false; pc.NotifyTrainerFlakHit(105.f, location); pc.HasWorld=true;
+        pc.TrainerProgress.Phase=1; pc.NotifyTrainerFlakHit(105.f, location);
+        pc.TrainerProgress.Phase=2; pc.TrainerProgress.Scenario=12; pc.NotifyTrainerFlakHit(105.f, location);
+        Require(pc.FlakSent==0 && hud.DamageNumbers.empty(), "invalid flak event published feedback");
+        pc.TrainerProgress.Scenario=11; pc.NotifyTrainerFlakHit(105.f, location);
+        Require(pc.FlakSent==1 && pc.LastSent==105 && AClientHitsounds::PreviewDamage==105,
+                "flak burst did not reach sound playback as one combined damage value");
+        Require(hud.DamageNumbers.size()==1 && hud.DamageNumbers[0].DamageAmount==105
+                && hud.DamageNumbers[0].WorldPosition.X==130.f && hud.DamageNumbers[0].WorldPosition.Y==-90.f
+                && hud.DamageNumbers[0].WorldPosition.Z==218.f && hud.DamageNumbers[0].DamagedPawn==nullptr,
+                "flak damage number lost captured position or retained a reused pawn");
+    } else if (name == "flak_receiver") {
+        ANCAimTrainerHUD hud; hud.PlayerOwner=&pc; pc.MyUTHUD=&hud;
+        for (int damage : {0,-1,10001}) pc.ClientTrainerFlakHit_Implementation(damage,FVector());
+        pc.ClientTrainerFlakHit_Implementation(100,FVector(0,0,std::numeric_limits<float>::infinity()));
+        pc.Local=false; pc.ClientTrainerFlakHit_Implementation(100,FVector()); pc.Local=true;
+        pc.HasWorld=false; pc.ClientTrainerFlakHit_Implementation(100,FVector()); pc.HasWorld=true;
+        for (int phase : {0,1,3}) { pc.TrainerProgress.Phase=phase; pc.ClientTrainerFlakHit_Implementation(100,FVector()); }
+        pc.TrainerProgress.Phase=2;
+        for (int scenario : {0,1,2,3,4,5,6,7,8,9,10,12}) {
+            pc.TrainerProgress.Scenario=scenario; pc.ClientTrainerFlakHit_Implementation(100,FVector());
+        }
+        Require(AClientHitsounds::PreviewPlays==0 && hud.DamageNumbers.empty(), "invalid or wrong-scenario flak feedback played");
+        pc.TrainerProgress.Scenario=11;
+        AClientHitsounds mutator; mutator.Suppress=true; pc.TheWorld.Mutators.push_back(&mutator);
+        pc.ClientTrainerFlakHit_Implementation(105,FVector(5,6,7));
+        Require(mutator.Checks==1 && mutator.Plays==0 && hud.DamageNumbers.size()==1,
+                "sound deduplication incorrectly suppressed the flak damage number");
+        mutator.Suppress=false; pc.MyUTHUD=nullptr;
+        pc.ClientTrainerFlakHit_Implementation(75,FVector());
+        Require(mutator.Plays==1 && mutator.LastDamage==75, "missing HUD blocked accepted flak sound");
+    } else if (name == "flak_hud_lifecycle") {
+        ANCAimTrainerHUD hud; hud.PlayerOwner=&pc;
+        hud.AddFlakDamageNumber(105,FVector(1,2,3));
+        Require(hud.bDrawDamageNumbers && hud.DamageNumbers.size()==1, "active flak numbers disabled");
+        hud.AddFlakDamageNumber(10000,FVector());
+        Require(hud.DamageNumbers.back().DamageAmount==255, "stock damage-number range overflowed");
+        for (int phase : {0,1,3}) {
+            pc.TrainerProgress.Phase=phase; hud.UpdateTrainerDamageNumbers();
+            Require(!hud.bDrawDamageNumbers && hud.DamageNumbers.empty(), "old run number survived phase exit");
+            hud.AddFlakDamageNumber(50,FVector()); Require(hud.DamageNumbers.empty(), "inactive phase accepted number");
+            pc.TrainerProgress.Phase=2; hud.AddFlakDamageNumber(105,FVector());
+        }
+        pc.TrainerProgress.Scenario=12; hud.UpdateTrainerDamageNumbers();
+        Require(!hud.bDrawDamageNumbers && hud.DamageNumbers.empty(), "flak numbers survived scenario change");
+        pc.TrainerProgress.Scenario=11; hud.AddFlakDamageNumber(-1,FVector());
+        hud.AddFlakDamageNumber(105,FVector(std::numeric_limits<float>::quiet_NaN()));
+        Require(hud.DamageNumbers.empty(), "malformed direct HUD input created number");
+        hud.PlayerOwner=nullptr; hud.UpdateTrainerDamageNumbers();
+        Require(!hud.bDrawDamageNumbers, "unowned HUD enabled damage numbers");
     } else Require(false, "unknown case");
 }
 '''
@@ -144,9 +245,16 @@ class AimTrainerHitsoundTests(unittest.TestCase):
         signatures = (
             "void ANCAimTrainerPlayerController::NotifyTrainerHit",
             "void ANCAimTrainerPlayerController::ClientTrainerConfirmedHit_Implementation",
+            "void ANCAimTrainerPlayerController::NotifyTrainerFlakHit",
+            "void ANCAimTrainerPlayerController::ClientTrainerFlakHit_Implementation",
         )
+        hud = (PLUGIN / "Source/Private/NCAimTrainerHUD.cpp").read_text(encoding="utf-8-sig")
+        hud_methods = [native_function(hud, s) for s in (
+            "void ANCAimTrainerHUD::UpdateTrainerDamageNumbers",
+            "void ANCAimTrainerHUD::AddFlakDamageNumber",
+        )]
         source = directory / "trainer_hitsounds.cpp"
-        source.write_text("\n".join([ADAPTER] + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
+        source.write_text("\n".join([ADAPTER] + [native_function(native, s) for s in signatures] + hud_methods + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_hitsounds.exe" if os.name == "nt" else "trainer_hitsounds")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
@@ -165,6 +273,9 @@ class AimTrainerHitsoundTests(unittest.TestCase):
     def test_selected_preset_volume_and_mute_are_preserved(self): self.run_case("preferences")
     def test_existing_ncp_mutator_prediction_deduplicates_confirmation(self): self.run_case("dedup")
     def test_nonlocal_missing_world_and_invalid_payload_do_not_play(self): self.run_case("receiver")
+    def test_flak_burst_delivers_total_damage_and_captured_location(self): self.run_case("flak_authority")
+    def test_flak_feedback_is_gated_and_sound_dedup_keeps_damage_numbers(self): self.run_case("flak_receiver")
+    def test_flak_numbers_clear_on_run_exit_and_scenario_change(self): self.run_case("flak_hud_lifecycle")
 
 
 if __name__ == "__main__":

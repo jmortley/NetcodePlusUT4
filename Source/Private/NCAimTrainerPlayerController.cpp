@@ -1,10 +1,13 @@
 #include "NCAimTrainerPlayerController.h"
 #include "NCAimTrainerGame.h"
+#include "NCAimTrainerHUD.h"
 #include "NCAimTrainerOnline.h"
 #include "NCAimTrainerScenarioPolicy.h"
 #include "NCAimTrainerLayout.h"
 #include "NCAimTrainerCharacter.h"
 #include "NCAimTrainerCountdownMessage.h"
+#include "NCAimTrainerInputSettings.h"
+#include "NCPlusHUDLayout.h"
 #include "UTAnnouncer.h"
 #include "UTPlayerCameraManager.h"
 #include "UTLocalPlayer.h"
@@ -98,6 +101,8 @@ bool ANCAimTrainerPlayerController::IsTrainerMenuVisible() const
 bool ANCAimTrainerPlayerController::HasTrainerInputFocus() const
 {
 #if !UE_SERVER
+	// F5 and the NCP editors are viewport widgets, not stock UT menu windows.
+	if (NCPlusHUDDragMode::IsActive()) { return false; }
 	UUTLocalPlayer* LP = Cast<UUTLocalPlayer>(Player);
 	// Use retail exports rather than UTLocalPlayer virtual slots/member offsets.
 	if (LP && (LP->UUTLocalPlayer::AreMenusOpen() || LP->GetQuickChatWidget().IsValid())) { return false; }
@@ -111,6 +116,13 @@ bool ANCAimTrainerPlayerController::InputKey(FKey Key, EInputEvent EventType, fl
 {
 	if (HasTrainerInputFocus())
 	{
+		const FKey RestartKey = NCAimTrainerInputSettings::GetRestartKey();
+		if (TrainerProgress.Phase >= 1 && TrainerProgress.Phase <= 3
+			&& RestartKey.IsValid() && Key == RestartKey)
+		{
+			if (EventType == IE_Pressed) { RestartTrainerRun(); }
+			return true; // Consume repeats/releases without restarting again.
+		}
 		if (Key == EKeys::F6)
 		{
 			if (EventType == IE_Pressed) { ReturnToTrainerMenu(); }
@@ -202,6 +214,17 @@ void ANCAimTrainerPlayerController::StartTrainerRun()
 	if (IsTrainerMenuVisible()) { ServerTrainerStart(PrefersTrainerLightningGun()); }
 }
 
+void ANCAimTrainerPlayerController::RestartTrainerRun()
+{
+	if (!HasTrainerInputFocus() || TrainerProgress.Phase < 1 || TrainerProgress.Phase > 3) { return; }
+	// Stop local held fire immediately, including a restart during countdown
+	// where the replicated phase can remain unchanged on the owning client.
+	bTrackingPrimaryHeld = bTrackingAltHeld = false;
+	Super::OnStopFire();
+	Super::OnStopAltFire();
+	ServerTrainerStart(PrefersTrainerLightningGun());
+}
+
 bool ANCAimTrainerPlayerController::PrefersTrainerLightningGun() const
 {
 	// Read only on the owning player. Dedicated servers must receive this
@@ -242,7 +265,7 @@ bool ANCAimTrainerPlayerController::ServerTrainerStart_Validate(bool bUseLightni
 void ANCAimTrainerPlayerController::ServerTrainerStart_Implementation(bool bUseLightningGun)
 {
 	ANCAimTrainerGame* Game = GetWorld() ? Cast<ANCAimTrainerGame>(GetWorld()->GetAuthGameMode()) : nullptr;
-	if (Game && AdmitTrainerRequest(1)) { Game->StartTraining(this, bUseLightningGun); }
+	if (Game && AdmitTrainerRequest(1)) { Game->RestartTraining(this, bUseLightningGun); }
 }
 
 bool ANCAimTrainerPlayerController::ServerTrainerAbort_Validate() { return true; }
@@ -270,6 +293,7 @@ void ANCAimTrainerPlayerController::SetTrainerProgress(const FNCAimTrainerProgre
 
 void ANCAimTrainerPlayerController::OnRep_TrainerProgress()
 {
+	if (ANCAimTrainerHUD* TrainerHUD = Cast<ANCAimTrainerHUD>(MyUTHUD)) { TrainerHUD->UpdateTrainerDamageNumbers(); }
 	UpdateTrainerCountdownAudio();
 	if (bLastPresentedMovementPractice != TrainerProgress.bMovementPractice
 		|| LastPresentedScenario != TrainerProgress.Scenario
@@ -436,6 +460,32 @@ void ANCAimTrainerPlayerController::NotifyTrainerHit(float Damage)
 {
 	if (Role != ROLE_Authority || !FMath::IsFinite(Damage) || Damage <= 0.f) { return; }
 	ClientTrainerConfirmedHit(FMath::RoundToInt(FMath::Clamp(Damage, 1.f, 10000.f)));
+}
+
+void ANCAimTrainerPlayerController::NotifyTrainerFlakHit(float Damage, const FVector& HitLocation)
+{
+	if (Role != ROLE_Authority || !GetWorld() || !FMath::IsFinite(Damage) || Damage <= 0.f
+		|| HitLocation.ContainsNaN() || TrainerProgress.Phase != 2
+		|| !NCAimTrainerScenarioPolicy::IsFlakScenario(TrainerProgress.Scenario)) { return; }
+	ClientTrainerFlakHit(FMath::RoundToInt(FMath::Clamp(Damage, 1.f, 10000.f)), HitLocation);
+}
+
+void ANCAimTrainerPlayerController::ClientTrainerFlakHit_Implementation(int32 Damage, FVector_NetQuantize HitLocation)
+{
+#if !UE_SERVER
+	if (!IsLocalController() || !GetWorld() || Damage <= 0 || Damage > 10000
+		|| HitLocation.ContainsNaN() || TrainerProgress.Phase != 2
+		|| !NCAimTrainerScenarioPolicy::IsFlakScenario(TrainerProgress.Scenario)) { return; }
+	// Keep the chosen NCP sound/style/volume and prediction deduplication. The
+	// server has already coalesced this burst, so pitch represents its damage.
+	ClientTrainerConfirmedHit_Implementation(Damage);
+	if (ANCAimTrainerHUD* TrainerHUD = Cast<ANCAimTrainerHUD>(MyUTHUD))
+	{
+		// Targets are hidden and reused immediately after lethal hits. Sending
+		// the captured point avoids reading a later appearance's pawn location.
+		TrainerHUD->AddFlakDamageNumber(Damage, HitLocation);
+	}
+#endif
 }
 
 void ANCAimTrainerPlayerController::ClientTrainerConfirmedHit_Implementation(int32 Damage)

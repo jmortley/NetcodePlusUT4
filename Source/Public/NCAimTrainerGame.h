@@ -36,6 +36,7 @@ public:
     void SelectScenario(ANCAimTrainerPlayerController* PC, uint8 Scenario, bool bUseLightningGun);
     void SetMovementPractice(ANCAimTrainerPlayerController* PC, bool bEnabled);
     void StartTraining(ANCAimTrainerPlayerController* PC, bool bUseLightningGun);
+    void RestartTraining(ANCAimTrainerPlayerController* PC, bool bUseLightningGun);
     void AbortTraining(ANCAimTrainerPlayerController* PC);
     float RecordTargetHit(ANCAimTrainerTarget* Target, float Damage, const FDamageEvent& Event, AController* Instigator, AActor* Causer);
 
@@ -56,6 +57,9 @@ private:
     int32 HeadshotClearedSlots = 0;
     NCAimTrainerDrillPolicy::FAttempt Drill;
     int32 FlakAttemptShot = 0;
+    float PendingFlakHitDamage = 0.f;
+    float FlakHitFeedbackAt = 0.f;
+    FVector FlakHitFeedbackLocation = FVector::ZeroVector;
     TArray<TWeakObjectPtr<AActor>> FlakPellets;
     float NextDrillAction = 0.f;
     bool bDrillDodgeQueued = false;
@@ -118,6 +122,8 @@ private:
     float RecordDrillHit(ANCAimTrainerTarget* Target, float Damage, const FDamageEvent& Event, AActor* Causer);
     void RetireDrillTarget(bool bSuccess, float Now);
     void PublishDrillStatus();
+    void QueueFlakHitFeedback(float Damage, const FVector& HitLocation);
+    void FlushFlakHitFeedback();
     float PracticeLaneX() const;
     float PracticeFloorZ() const;
     void UpdateTargets(float Now);

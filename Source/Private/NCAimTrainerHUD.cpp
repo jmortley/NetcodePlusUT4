@@ -1,6 +1,8 @@
 #include "NCAimTrainerHUD.h"
 #include "NCAimTrainerPlayerController.h"
 #include "NCAimTrainerScenarioPolicy.h"
+#include "NCAimTrainerInputSettings.h"
+#include "NCPlusHUDLayout.h"
 #include "Engine/Canvas.h"
 #include "UTCharacter.h"
 
@@ -66,8 +68,28 @@ void ANCAimTrainerHUD::BeginPlay()
 bool ANCAimTrainerHUD::ScoreboardIsUp() { return false; }
 bool ANCAimTrainerHUD::ShouldDrawMinimap() { return false; }
 
+void ANCAimTrainerHUD::UpdateTrainerDamageNumbers()
+{
+	const ANCAimTrainerPlayerController* PC = Cast<ANCAimTrainerPlayerController>(PlayerOwner);
+	bDrawDamageNumbers = PC && PC->GetTrainerProgress().Phase == 2
+		&& NCAimTrainerScenarioPolicy::IsFlakScenario(PC->GetTrainerProgress().Scenario);
+	if (!bDrawDamageNumbers) { DamageNumbers.Empty(); }
+}
+
+void ANCAimTrainerHUD::AddFlakDamageNumber(int32 Damage, const FVector& HitLocation)
+{
+	UpdateTrainerDamageNumbers();
+	if (!bDrawDamageNumbers || !GetWorld() || Damage <= 0 || Damage > 10000 || HitLocation.ContainsNaN()) { return; }
+	// Native rendering only uses the stored world point. Keep no pawn pointer:
+	// the same training actor is reused for every appearance around the player.
+	// Match ordinary UT damage numbers' 255 cap and body-damage presentation.
+	DamageNumbers.Add(FEnemyDamageNumber(nullptr, GetWorld()->GetTimeSeconds(),
+		FMath::Min(Damage, 255), HitLocation, 0.75f, false, false));
+}
+
 EInputMode::Type ANCAimTrainerHUD::GetInputMode_Implementation() const
 {
+	if (NCPlusHUDDragMode::IsActive()) { return EInputMode::EIM_GameAndUI; }
 	const ANCAimTrainerPlayerController* PC = Cast<ANCAimTrainerPlayerController>(PlayerOwner);
 	return PC && PC->IsTrainerMenuVisible() ? EInputMode::EIM_GameAndUI : EInputMode::EIM_GameOnly;
 }
@@ -274,11 +296,16 @@ void ANCAimTrainerHUD::DrawResults(ANCAimTrainerPlayerController* PC)
 	{
 		Button(MovementAction, Progress.bMovementPractice ? TEXT("[M] MOVEMENT: ON") : TEXT("[M] MOVEMENT: OFF"), 506.f, 610.f, 267.f, 43.f, Progress.bMovementPractice);
 	}
-	Button(StartAction, TEXT("ENTER  /  PLAY AGAIN"), 799.f, 610.f, 361.f, 43.f, true);
+	const FKey RestartKey = NCAimTrainerInputSettings::GetRestartKey();
+	const FString ReplayLabel = RestartKey.IsValid() && RestartKey != EKeys::Enter
+		? FString::Printf(TEXT("ENTER / %s  /  PLAY AGAIN"), *RestartKey.GetDisplayName().ToString().ToUpper())
+		: TEXT("ENTER  /  PLAY AGAIN");
+	Button(StartAction, ReplayLabel, 799.f, 610.f, 361.f, 43.f, true);
 }
 
 void ANCAimTrainerHUD::DrawHUD()
 {
+	UpdateTrainerDamageNumbers();
 	TrainerButtons.Empty();
 	ANCAimTrainerPlayerController* PC = Cast<ANCAimTrainerPlayerController>(PlayerOwner);
 	if (!Canvas || !PC) { Super::DrawHUD(); return; }
@@ -305,7 +332,6 @@ void ANCAimTrainerHUD::DrawHUD()
 	}
 	else
 	{
-		Label(TEXT("F6  /  END RUN AND RETURN TO PRACTICE MENU"), 640.f, 677.f, 13.f, TrainerMuted, 0.f, true);
 		if (NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario))
 		{
 			Label(FString::Printf(TEXT("HOLD EITHER FIRE BUTTON  /  BEAM ON TARGET  %.2f s"), Progress.TrackingSeconds), 640.f, 103.f, 16.f, TrainerAccent, 0.f, true);
@@ -331,6 +357,14 @@ void ANCAimTrainerHUD::DrawHUD()
 			Label(HitDetail,
 				640.f, 103.f, 16.f, TrainerAccent, 0.f, true);
 		}
+	}
+	if (Progress.Phase == 1 || Progress.Phase == 2)
+	{
+		const FKey RestartKey = NCAimTrainerInputSettings::GetRestartKey();
+		const FString RunControls = RestartKey.IsValid()
+			? FString::Printf(TEXT("%s  /  RESTART     F6  /  PRACTICE MENU"), *RestartKey.GetDisplayName().ToString().ToUpper())
+			: TEXT("F6  /  PRACTICE MENU");
+		Label(RunControls, 640.f, 677.f, 13.f, TrainerMuted, 1040.f, true);
 	}
 }
 
