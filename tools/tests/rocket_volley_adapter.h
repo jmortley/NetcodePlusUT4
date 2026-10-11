@@ -40,6 +40,7 @@ template<class T,class U> T* Cast(U* P){return dynamic_cast<T*>(P);}
 struct FRotator { bool Nan=false; bool ContainsNaN()const{return Nan;} void Normalize(){} FRotator GetNormalized()const{return *this;} static const FRotator ZeroRotator;};
 const FRotator FRotator::ZeroRotator;
 struct Controller : UObject {};
+struct AUTBot : Controller {};
 using AController = Controller;
 struct AUTProjectile;
 struct APlayerController : Controller {bool Confirmed=true;TArray<AUTProjectile*> FakeProjectiles;};
@@ -163,6 +164,7 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     // Other lifecycle tests keep their existing charge/animation boundary stubs.
     bool TestUseStateCallbacks=false;
     int TestStateDepth=0,TestMaxStateDepth=0,TestChargedEntries=0,TestLoadStarts=0;
+    int TestFlashCalls=0,TestFlashMode=-1;
     TArray<bool> TestPendingAtGotoActive;
     TArray<float> LastFireTime{ };
     std::function<void()> TestOnActive;
@@ -173,7 +175,7 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     AUTPlusWeap_RocketLauncher(){FiringState.Add(&Idle);FiringState.Add(&Charge);RocketFireModes.Add({});RocketFireModes.Add({});RocketFireModes.Add({});Idle.Outer=Charge.Outer=this;LastFireTime.Add(0);LastFireTime.Add(0);}
     World* GetWorld(){return TestWorld;}Timers& GetWorldTimerManager(){return GetWorld()->GetTimerManager();}
     bool HasAmmo(uint8)const{return Ammo>0;}bool IsFiring()const{return CurrentState==&Charge;}
-    bool Is329FireProtocolReady()const{APlayerController* PC=UTOwner?Cast<APlayerController>(UTOwner->Controller):nullptr;return PC&&PC->Confirmed;}
+    bool Is329FireProtocolReady()const{if(UTOwner&&Cast<AUTBot>(UTOwner->Controller))return true;APlayerController* PC=UTOwner?Cast<APlayerController>(UTOwner->Controller):nullptr;return PC&&PC->Confirmed;}
     void ForceNetUpdate(){}
     bool IsPendingKillPending()const{return TestDestroyed;}
     void UpdateLock(){}void ClearLoadedRockets(){}
@@ -189,7 +191,7 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     uint32 GetLoadedVolleyId()const{return LoadedVolley.Id;}uint32 GetLoadedVolleyEpoch()const{return LoadedVolleyEpoch;}
     bool IsLoadedVolleyReleasePending()const{return bLoadedVolleyReleaseSent||bLoadedVolleyReleaseReceived;}
     void AddAmmo(int32 A){Ammo+=A;Refund+=A;}
-    void SetRocketFlashExtra(uint8,int32,int32,bool){}
+    void SetRocketFlashExtra(uint8,int32,int32 Mode,bool){++TestFlashCalls;TestFlashMode=Mode;}
     bool HasLoadedVolley()const{return LoadedVolley.Id!=0&&!LoadedVolley.Terminal;}
     void ClientLoadedVolleyResult(uint32,uint32 Id,AUTCharacter*,uint8 R,uint8 C,uint8 M){FNCLoadedVolleyReceipt X;X.VolleyId=Id;X.Result=R;X.Count=C;X.SpawnedMask=M;SentVolleys.Add(X);}
     void ClientLoadedRocketResult(uint32,uint32,AUTCharacter*,uint8 Ordinal,uint8 R,AUTProjectile*,uint32){SentRockets.Add(Ordinal);SentRocketResults.Add(R);}

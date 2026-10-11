@@ -559,6 +559,11 @@ static void TestMixedCloseRangeOutcomes()
 
 int main()
 {
+    TestServerBeginWhileRocketPending();
+    TestServerPendingRocketRelease();
+    TestServerPendingRocketAdmissionSafety();
+    TestServerPendingRocketDirectActiveScan();
+    TestServerPendingRocketCancellation();
     TestLateVolleyResultPreservesNewInput();
     TestOwnershipEpochPreservesOtherInput();
     TestRocketCleanupPreservesPrimary();

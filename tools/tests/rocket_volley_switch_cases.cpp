@@ -213,7 +213,7 @@ static void TestHeldAltSwitchRecovery()
     for (bool Bot : {false, true})
     {
         FHeldAltSwitchFixture F;
-        Controller BotController;
+        AUTBot BotController;
         F.Weapon.Role = ROLE_Authority;
         F.Pawn.Local = !Bot;
         if (Bot) F.Pawn.Controller = &BotController;
@@ -221,6 +221,271 @@ static void TestHeldAltSwitchRecovery()
         assert(F.Weapon.HasLoadedVolley() && F.Weapon.LoadedVolley.Id == 41);
         assert(F.Weapon.TestLoadStarts == 1 && F.Weapon.TestChargedEntries == 1);
         assert(F.Weapon.GotoCalls == 0 && F.Weapon.SentBegins.Num() == 0);
+    }
+}
+
+// Actor-channel timing is deliberately arranged, not simulated: the incoming
+// launcher's reliable Begin has arrived while the old weapon is still current.
+// Execute production admission/queue/release methods against those snapshots.
+struct FPendingServerRocketFixture : FHeldAltSwitchFixture
+{
+    AUTPlusWeap_RocketLauncher OldWeapon;
+
+    FPendingServerRocketFixture()
+    {
+        Pawn.Local = false;
+        Pawn.Weapon = &OldWeapon;
+        Pawn.PendingWeapon = &Weapon;
+        Pawn.SetPendingFire(1, true); // Can still belong to the outgoing LG zoom.
+        OldWeapon.UTOwner = &Pawn;
+        OldWeapon.CurrentState = OldWeapon.UnequippingState;
+        Weapon.Role = ROLE_Authority;
+        Weapon.CurrentState = Weapon.InactiveState;
+    }
+
+    void Begin()
+    {
+        Weapon.ServerBeginLoadedVolley_Implementation(1, 41, &Pawn);
+    }
+
+    void AssertWaiting() const
+    {
+        assert(Weapon.HasLoadedVolley() && Weapon.LoadedVolley.Id == 41);
+        assert(Weapon.LoadedVolleyEpoch == 1 && Weapon.LoadedVolleyPawn.Get() == &Pawn);
+        assert(!Weapon.bLoadedVolleyEnteredState && Weapon.LoadedVolleyBeginHandle.Active);
+        assert(Weapon.BeginCalls == 0 && Weapon.EndCalls == 0 && Weapon.TestLoadStarts == 0);
+        assert(Weapon.Ammo == 9 && Weapon.NumLoadedRockets == 0);
+        assert(Weapon.SentVolleys.Num() == 0 && Pawn.IsPendingFire(1));
+    }
+
+    void BeginRaise()
+    {
+        Pawn.Weapon = &Weapon;
+        Pawn.PendingWeapon = nullptr;
+        Weapon.CurrentState = Weapon.EquippingState;
+        Weapon.TryBeginLoadedVolley();
+        assert(Weapon.HasLoadedVolley() && Weapon.BeginCalls == 0);
+        assert(!Pawn.IsPendingFire(1) && Weapon.LoadedVolleyBeginHandle.Active);
+    }
+
+    void FinishServerRaise()
+    {
+        Weapon.GotoState(Weapon.ActiveState);
+        Weapon.TryBeginLoadedVolley();
+        assert(Weapon.HasLoadedVolley() && Weapon.LoadedVolley.Id == 41);
+        assert(Weapon.bLoadedVolleyEnteredState && !Weapon.LoadedVolleyBeginHandle.Active);
+        assert(Weapon.BeginCalls == 1 && Weapon.TestLoadStarts == 1);
+        assert(Weapon.CurrentState == &Weapon.Charge && Weapon.Charge.bCharging);
+        assert(Weapon.Charge.StateVolleyId == 41 && Weapon.Charge.LoadTimerHandle.Active);
+        assert(Weapon.SentBegins.Num() == 0 && Weapon.Ammo == 9);
+    }
+};
+
+static void TestServerBeginWhileRocketPending()
+{
+    // A named pending launcher may be inactive, raising, or lowering as the
+    // switch resolves. None of those snapshots permits firing before Active.
+    for (int PendingState = 0; PendingState != 3; ++PendingState)
+    {
+        FPendingServerRocketFixture F;
+        if (PendingState == 1) F.Weapon.CurrentState = F.Weapon.EquippingState;
+        if (PendingState == 2) F.Weapon.CurrentState = F.Weapon.UnequippingState;
+        assert(!F.Weapon.CanBeginLoadedVolleyInput()); // Local-input gate stays strict.
+        F.Begin();
+        F.AssertWaiting();
+        const float RequestedAt = F.Weapon.LoadedVolleyBeginRequestedAt;
+        F.Weapon.W.Now += 0.05f;
+        F.Begin(); // Duplicate reliable Begin cannot renew age or start loading.
+        F.Weapon.TryBeginLoadedVolley();
+        F.AssertWaiting();
+        assert(F.Weapon.LoadedVolleyBeginRequestedAt == RequestedAt);
+        F.BeginRaise();
+        F.Weapon.TestRemaining = 0.2f;
+        F.Weapon.GotoState(F.Weapon.ActiveState);
+        F.Weapon.TryBeginLoadedVolley();
+        assert(F.Weapon.BeginCalls == 0 && F.Weapon.LoadedVolleyBeginHandle.Active);
+        F.Weapon.TestRemaining = 0;
+        F.FinishServerRaise();
+        F.Weapon.TryBeginLoadedVolley();
+        assert(F.Weapon.BeginCalls == 1 && F.Weapon.TestLoadStarts == 1);
+    }
+}
+
+static void TestServerPendingRocketRelease()
+{
+    FPendingServerRocketFixture F;
+    F.Begin();
+    F.AssertWaiting();
+    F.Weapon.ServerSetLoadedRocketMode_Implementation(1, 41, &F.Pawn, 2);
+    assert(F.Weapon.CurrentRocketFireMode == 2 && F.Weapon.bDrawRocketModeString);
+    assert(F.Weapon.TestFlashCalls == 0); // Do not publish rocket effects on outgoing LG.
+    F.Weapon.ServerReleaseLoadedVolley_Implementation(1, 41, &F.Pawn, 1, 2);
+    F.AssertWaiting();
+    assert(F.Weapon.bLoadedVolleyReleaseReceived && F.Weapon.LoadedVolleyRequestedCount == 2);
+    assert(F.Weapon.LoadedVolleySelectedMode == 1 && F.Weapon.CurrentRocketFireMode == 1);
+    F.Weapon.ServerReleaseLoadedVolley_Implementation(1, 41, &F.Pawn, 0, 3);
+    F.Weapon.ServerSetLoadedRocketMode_Implementation(1, 41, &F.Pawn, 2);
+    assert(F.Weapon.LoadedVolleyRequestedCount == 2 && F.Weapon.CurrentRocketFireMode == 1);
+    F.BeginRaise();
+    F.FinishServerRaise();
+    // Actual charged BeginState forwards the retained release to the weapon;
+    // EndFiringSequence is a counter/input stub in this existing adapter.
+    assert(F.Weapon.EndCalls == 1 && !F.Pawn.IsPendingFire(1));
+    assert(F.Weapon.TestFlashCalls == 1 && F.Weapon.TestFlashMode == 1);
+    // The recorded client count cannot invent loads or skip the first timer.
+    // Stand in for exactly one authoritative load completion, then commit.
+    F.Weapon.NumLoadedRockets = F.Weapon.LoadedVolleyAmmoSpent = 1;
+    F.Weapon.Ammo = 8;
+    assert(F.Weapon.CommitLoadedVolley());
+    assert(F.Weapon.LoadedVolley.Count == 1 && F.Weapon.Refund == 0 && F.Weapon.Ammo == 8);
+}
+
+static void TestServerPendingRocketAdmissionSafety()
+{
+    for (int Gate = 0; Gate != 13; ++Gate)
+    {
+        FPendingServerRocketFixture F;
+        AUTCharacter WrongPawn;
+        AUTPlusWeap_RocketLauncher Other;
+        uint32 Epoch = 1;
+        AUTCharacter* ExpectedPawn = &F.Pawn;
+        if (Gate == 0) Epoch = 2;
+        if (Gate == 1) ExpectedPawn = &WrongPawn;
+        if (Gate == 2) F.PC.Confirmed = false;
+        if (Gate == 3) F.Pawn.Dead = true;
+        if (Gate == 4) F.Pawn.Disabled = true;
+        if (Gate == 5) F.Weapon.Ammo = 0;
+        if (Gate == 6) F.Weapon.bDisableAltLoading = true;
+        if (Gate == 7) F.Weapon.W.GS.Block = true;
+        if (Gate == 8) F.Weapon.FiringState.Empty();
+        if (Gate == 9) F.Pawn.PendingWeapon = nullptr; // Begin overtook switch RPC entirely.
+        if (Gate == 10) F.Pawn.PendingWeapon = &Other;
+        if (Gate == 11) F.Weapon.CurrentState = nullptr;
+        if (Gate == 12) F.Weapon.CurrentState = F.Weapon.ActiveState;
+        F.Weapon.ServerBeginLoadedVolley_Implementation(Epoch, 41, ExpectedPawn);
+        assert(!F.Weapon.HasLoadedVolley() && !F.Weapon.LoadedVolleyBeginHandle.Active);
+        assert(F.Weapon.BeginCalls == 0 && F.Weapon.TestLoadStarts == 0);
+        assert(F.Pawn.IsPendingFire(1)); // Invalid RPC cannot steal current weapon input.
+    }
+
+    // A second distinct Begin cannot replace an already accepted pending volley.
+    FPendingServerRocketFixture F;
+    F.Begin();
+    F.Weapon.ServerBeginLoadedVolley_Implementation(1, 42, &F.Pawn);
+    assert(F.Weapon.HasLoadedVolley() && F.Weapon.LoadedVolley.Id == 41);
+    assert(F.Weapon.SentVolleys.Last().VolleyId == 42);
+    assert(F.Weapon.SentVolleys.Last().Result == uint8(NCRocketVolley::EResult::Rejected));
+    assert(F.Weapon.BeginCalls == 0 && F.Pawn.IsPendingFire(1));
+}
+
+static void TestServerPendingRocketDirectActiveScan()
+{
+    for (int Gate = 0; Gate != 5; ++Gate)
+    {
+        FPendingServerRocketFixture F;
+        F.Begin();
+        F.AssertWaiting();
+        if (Gate == 1) F.Weapon.TestRemaining = 0.2f;
+        if (Gate == 2) F.Weapon.EarliestFireTime = F.Weapon.W.Now + 0.2f;
+        if (Gate == 3) F.PC.Confirmed = false;
+        if (Gate == 4) F.Weapon.W.Now += 5.01f;
+        F.Pawn.Weapon = &F.Weapon;
+        F.Pawn.PendingWeapon = nullptr;
+        F.Weapon.CurrentState = F.Weapon.EquippingState;
+        // No queue timer ran yet: the outgoing weapon's held bit remains set
+        // when stock Active scans it synchronously during equip completion.
+        F.Weapon.GotoState(F.Weapon.ActiveState);
+        assert(F.Weapon.BeginCalls == 0 && F.Weapon.Ammo == 9);
+        if (Gate == 0)
+        {
+            assert(F.Weapon.bLoadedVolleyEnteredState && F.Weapon.TestLoadStarts == 1);
+            assert(F.Weapon.CurrentState == &F.Weapon.Charge);
+            assert(F.Weapon.Charge.StateVolleyId == 41 && F.Weapon.Charge.StateVolleyEpoch == 1);
+            assert(!F.Weapon.LoadedVolleyBeginHandle.Active);
+            F.Weapon.TryBeginLoadedVolley();
+            assert(F.Weapon.TestLoadStarts == 1 && F.Weapon.BeginCalls == 0);
+        }
+        else
+        {
+            assert(!F.Weapon.bLoadedVolleyEnteredState && F.Weapon.TestLoadStarts == 0);
+            assert(F.Weapon.CurrentState == F.Weapon.ActiveState && !F.Pawn.IsPendingFire(1));
+            assert(!F.Weapon.Charge.bCharging && !F.Weapon.Charge.LoadTimerHandle.Active);
+            if (Gate == 1 || Gate == 2)
+            {
+                assert(F.Weapon.HasLoadedVolley() && F.Weapon.LoadedVolleyBeginHandle.Active);
+                F.Weapon.TryBeginLoadedVolley();
+                assert(F.Weapon.TestLoadStarts == 0);
+                F.Weapon.TestRemaining = F.Weapon.EarliestFireTime = 0;
+                F.Weapon.TryBeginLoadedVolley();
+                assert(F.Weapon.bLoadedVolleyEnteredState && F.Weapon.TestLoadStarts == 1);
+            }
+            else
+            {
+                F.Weapon.TryBeginLoadedVolley();
+                assert(!F.Weapon.HasLoadedVolley() && !F.Weapon.LoadedVolleyBeginHandle.Active);
+                assert(F.Weapon.SentVolleys.Last().Result == uint8(NCRocketVolley::EResult::Cancelled));
+                assert(F.Weapon.TestLoadStarts == 0);
+            }
+        }
+    }
+
+    // A release received before the server catches up keeps its immutable mode
+    // across a stock held-bit attempt rejected only for remaining cooldown.
+    FPendingServerRocketFixture F;
+    F.Begin();
+    F.Weapon.ServerReleaseLoadedVolley_Implementation(1, 41, &F.Pawn, 1, 1);
+    assert(F.Weapon.bLoadedVolleyReleaseReceived && F.Weapon.CurrentRocketFireMode == 1);
+    F.Weapon.TestRemaining = 0.2f;
+    F.Pawn.Weapon = &F.Weapon;
+    F.Pawn.PendingWeapon = nullptr;
+    F.Weapon.CurrentState = F.Weapon.EquippingState;
+    F.Weapon.GotoState(F.Weapon.ActiveState);
+    assert(F.Weapon.HasLoadedVolley() && F.Weapon.TestLoadStarts == 0);
+    F.Weapon.TestRemaining = 0;
+    F.Weapon.TryBeginLoadedVolley();
+    assert(F.Weapon.bLoadedVolleyEnteredState && F.Weapon.TestLoadStarts == 1);
+    assert(F.Weapon.CurrentRocketFireMode == 1 && F.Weapon.EndCalls == 1);
+}
+
+static void TestServerPendingRocketCancellation()
+{
+    // Invalidating any original identity/safety gate while waiting closes the
+    // volley once. Restoring state afterwards cannot resurrect that request.
+    for (int Cancel = 0; Cancel != 10; ++Cancel)
+    {
+        FPendingServerRocketFixture F;
+        AUTPlusWeap_RocketLauncher Other;
+        AUTCharacter NewPawn;
+        F.Begin();
+        F.AssertWaiting();
+        if (Cancel == 0) F.Pawn.PendingWeapon = nullptr;
+        if (Cancel == 1) F.Pawn.PendingWeapon = &Other;
+        if (Cancel == 2) F.Weapon.W.Now += 5.01f;
+        if (Cancel == 3) F.PC.Confirmed = false;
+        if (Cancel == 4) F.Weapon.LoadedOwnershipEpoch = 2;
+        if (Cancel == 5) F.Weapon.UTOwner = &NewPawn;
+        if (Cancel == 6) F.Pawn.Dead = true;
+        if (Cancel == 7) F.Pawn.Disabled = true;
+        if (Cancel == 8) F.Weapon.Ammo = 0;
+        if (Cancel == 9) F.Weapon.W.GS.Block = true;
+        F.Weapon.TryBeginLoadedVolley();
+        assert(!F.Weapon.HasLoadedVolley() && !F.Weapon.LoadedVolleyBeginHandle.Active);
+        assert(F.Weapon.BeginCalls == 0 && F.Weapon.TestLoadStarts == 0);
+        assert(F.Weapon.SentVolleys.Last().Result == uint8(NCRocketVolley::EResult::Cancelled));
+        assert(F.Pawn.IsPendingFire(1));
+        F.Weapon.TryBeginLoadedVolley();
+        assert(F.Weapon.SentVolleys.Num() == 1); // No duplicate cancellation.
+        F.Weapon.UTOwner = &F.Pawn;
+        F.Pawn.Weapon = &F.Weapon;
+        F.Pawn.PendingWeapon = nullptr;
+        F.Pawn.Dead = F.Pawn.Disabled = false;
+        F.PC.Confirmed = true;
+        F.Weapon.LoadedOwnershipEpoch = 1;
+        F.Weapon.Ammo = 9;
+        F.Weapon.W.GS.Block = false;
+        F.Weapon.CurrentState = F.Weapon.ActiveState;
+        F.Weapon.TryBeginLoadedVolley();
+        assert(!F.Weapon.HasLoadedVolley() && F.Weapon.BeginCalls == 0);
     }
 }
 
