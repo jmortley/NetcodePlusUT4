@@ -292,3 +292,205 @@ static void TestOutgoingLauncherAltHandoff()
         assert(F.Weapon.HasLoadedVolley() && F.Weapon.StockStopCalls == 0);
     }
 }
+
+static void TestLateVolleyResultPreservesNewInput()
+{
+    for (auto Result : {NCRocketVolley::EResult::Rejected, NCRocketVolley::EResult::Cancelled})
+    {
+        // A completed local volley retains its ID while the server result is in
+        // flight. The next held input can belong to another weapon, an outgoing
+        // switch, or this launcher again after it has been re-equipped.
+        for (int Location = 0; Location != 3; ++Location)
+        {
+            FHeldAltSwitchFixture F;
+            AUTPlusWeap_RocketLauncher Other;
+            F.Weapon.ResetLoadedVolley(40);
+            F.Weapon.CompleteLoadedVolley(false);
+            AUTProjectile Fake;
+            Fake.Instigator = &F.Pawn;
+            F.Weapon.FindOrAddLoadedRocket(1, 40, 0).Fake = &Fake;
+            if (Location == 0)
+            {
+                F.Pawn.Weapon = &Other;
+                F.Weapon.CurrentState = F.Weapon.InactiveState;
+            }
+            else if (Location == 1)
+            {
+                F.Pawn.PendingWeapon = &Other;
+                F.Weapon.CurrentState = F.Weapon.UnequippingState;
+            }
+            State* ExpectedState = F.Weapon.CurrentState;
+            F.Pawn.SetPendingFire(1, true);
+            F.Weapon.ClientLoadedVolleyResult_Implementation(1, 40, &F.Pawn, uint8(Result), 0, 0);
+            assert(F.Pawn.IsPendingFire(1));
+            assert(F.Weapon.CurrentState == ExpectedState && F.Weapon.GotoCalls == 0);
+            assert(F.Weapon.SentBegins.Num() == 0 && !F.Weapon.HasLoadedVolley());
+            assert(Fake.DestroyCalls == 1); // Receipt still retires the old fake.
+            F.Pawn.Weapon = &F.Weapon;
+            F.Pawn.PendingWeapon = nullptr;
+            F.Weapon.CurrentState = F.Weapon.EquippingState;
+            F.Weapon.GotoState(F.Weapon.ActiveState); // No fresh press to repair input.
+            F.AssertOneClientCharge();
+        }
+
+        // A newer numbered charge must survive a receipt for its predecessor.
+        {
+            FHeldAltSwitchFixture F;
+            F.Weapon.ResetLoadedVolley(40);
+            F.Weapon.CompleteLoadedVolley(false);
+            F.FinishRaise();
+            F.Weapon.ClientLoadedVolleyResult_Implementation(1, 40, &F.Pawn, uint8(Result), 0, 0);
+            F.AssertOneClientCharge();
+            assert(F.Pawn.IsPendingFire(1));
+        }
+
+        // A matching live rejection still stops the charge and its timers. A
+        // fresh handoff to a pending weapon, however, keeps the pawn's held bit.
+        for (bool SwitchingAway : {false, true})
+        {
+            FHeldAltSwitchFixture F;
+            AUTPlusWeap_RocketLauncher Other;
+            F.FinishRaise();
+            if (SwitchingAway)
+            {
+                F.Pawn.PendingWeapon = &Other;
+                F.Weapon.StartFire(1); // Outgoing handoff, no second volley.
+                F.Pawn.SetPendingFire(1, true); // Base swap-away latch.
+            }
+            F.Weapon.ClientLoadedVolleyResult_Implementation(1, 41, &F.Pawn, uint8(Result), 0, 0);
+            assert(!F.Weapon.HasLoadedVolley());
+            assert(!F.Weapon.Charge.bCharging && !F.Weapon.Charge.LoadTimerHandle.Active);
+            assert(F.Pawn.IsPendingFire(1) == SwitchingAway);
+            assert(F.Weapon.SentBegins.Num() == 1 && F.Weapon.TestLoadStarts == 1);
+            assert(F.Weapon.CurrentState == F.Weapon.ActiveState);
+            assert(F.Weapon.SentReleases.Num() == 0);
+        }
+    }
+}
+
+static void TestOwnershipEpochPreservesOtherInput()
+{
+    // Initial and replacement ownership can arrive for a holstered or lowering
+    // launcher. Neither notification owns the pawn's current held alt input.
+    for (bool InitialOwnership : {false, true})
+    {
+        for (bool Holstered : {false, true})
+        {
+            FHeldAltSwitchFixture F;
+            AUTPlusWeap_RocketLauncher Other;
+            F.Weapon.LoadedVolleyEpoch = InitialOwnership ? 0 : 1;
+            F.Weapon.LoadedOwnershipEpoch = 2;
+            if (Holstered)
+            {
+                F.Pawn.Weapon = &Other;
+                F.Weapon.CurrentState = F.Weapon.InactiveState;
+            }
+            else
+            {
+                F.Pawn.PendingWeapon = &Other;
+                F.Weapon.CurrentState = F.Weapon.UnequippingState;
+            }
+            State* ExpectedState = F.Weapon.CurrentState;
+            F.Pawn.SetPendingFire(1, true);
+            F.Weapon.OnRep_LoadedOwnershipEpoch();
+            assert(F.Pawn.IsPendingFire(1));
+            assert(F.Weapon.CurrentState == ExpectedState && F.Weapon.GotoCalls == 0);
+            assert(!F.Weapon.HasLoadedVolley() && F.Weapon.SentBegins.Num() == 0);
+            F.Pawn.Weapon = &F.Weapon;
+            F.Pawn.PendingWeapon = nullptr;
+            F.Weapon.CurrentState = F.Weapon.EquippingState;
+            F.Weapon.GotoState(F.Weapon.ActiveState);
+            F.AssertOneClientCharge(1, 2);
+        }
+    }
+
+    // Revoking a live owned charge must stop it without immediately restarting
+    // from stale held input. A pending switch's fresh hold is preserved instead.
+    for (bool SwitchingAway : {false, true})
+    {
+        FHeldAltSwitchFixture F;
+        AUTPlusWeap_RocketLauncher Other;
+        F.FinishRaise();
+        if (SwitchingAway)
+        {
+            F.Pawn.PendingWeapon = &Other;
+            F.Weapon.StartFire(1);
+            F.Pawn.SetPendingFire(1, true);
+        }
+        F.Weapon.LoadedOwnershipEpoch = 2;
+        F.Weapon.OnRep_LoadedOwnershipEpoch();
+        assert(!F.Weapon.HasLoadedVolley() && F.Weapon.LoadedVolleyEpoch == 2);
+        assert(!F.Weapon.Charge.bCharging && !F.Weapon.Charge.LoadTimerHandle.Active);
+        assert(F.Pawn.IsPendingFire(1) == SwitchingAway);
+        assert(F.Weapon.SentBegins.Num() == 1 && F.Weapon.TestLoadStarts == 1);
+        assert(F.Weapon.CurrentState == F.Weapon.ActiveState);
+        assert(!F.Weapon.LoadedVolleyBeginHandle.Active && F.Weapon.SentReleases.Num() == 0);
+    }
+}
+
+static void TestRocketCleanupPreservesPrimary()
+{
+    for (bool OwnershipUpdate : {false, true})
+    {
+        FHeldAltSwitchFixture F;
+        State Primary;
+        F.Weapon.ResetLoadedVolley(40);
+        F.Weapon.CompleteLoadedVolley(false);
+        F.Weapon.FiringState[0] = &Primary;
+        F.Weapon.CurrentState = &Primary;
+        F.Weapon.CurrentFireMode = F.Weapon.CurrentlyFiringMode = 0;
+        F.Weapon.FireModeActiveState.Add(1);
+        F.Weapon.FireModeActiveState.Add(0);
+        F.Pawn.SetPendingFire(0, true);
+        F.Pawn.SetPendingFire(1, true);
+        if (OwnershipUpdate)
+        {
+            F.Weapon.LoadedOwnershipEpoch = 2;
+            F.Weapon.OnRep_LoadedOwnershipEpoch();
+        }
+        else
+            F.Weapon.ClientLoadedVolleyResult_Implementation(1, 40, &F.Pawn,
+                uint8(NCRocketVolley::EResult::Rejected), 0, 0);
+        assert(F.Weapon.CurrentState == &Primary && F.Weapon.GotoCalls == 0);
+        assert(F.Weapon.CurrentlyFiringMode == 0 && F.Weapon.FireModeActiveState[0] == 1);
+        assert(F.Pawn.IsPendingFire(0) && F.Pawn.IsPendingFire(1));
+        assert(F.Weapon.SentBegins.Num() == 0);
+    }
+}
+
+static void TestRocketCleanupAllowsNewCallbackInput()
+{
+    // Stock state callbacks are synchronous. A new press/release accepted while
+    // leaving the cancelled charge must not inherit suppression for the old ID,
+    // or be erased by an ownership reset after the callback returns.
+    for (bool OwnershipUpdate : {false, true})
+    {
+        FHeldAltSwitchFixture F;
+        F.FinishRaise();
+        bool StartedNewInput = false;
+        F.Weapon.TestOnActive = [&F, &StartedNewInput]() {
+            if (StartedNewInput) return;
+            StartedNewInput = true;
+            F.Weapon.StartFire(1);
+            F.Weapon.StopFire(1);
+        };
+        if (OwnershipUpdate)
+        {
+            F.Weapon.LoadedOwnershipEpoch = 2;
+            F.Weapon.OnRep_LoadedOwnershipEpoch();
+        }
+        else
+            F.Weapon.ClientLoadedVolleyResult_Implementation(1, 41, &F.Pawn,
+                uint8(NCRocketVolley::EResult::Cancelled), 0, 0);
+        const uint32 ExpectedId = OwnershipUpdate ? 1 : 42;
+        const uint32 ExpectedEpoch = OwnershipUpdate ? 2 : 1;
+        assert(StartedNewInput && F.Weapon.HasLoadedVolley());
+        assert(F.Weapon.LoadedVolley.Id == ExpectedId && F.Weapon.LoadedVolleyEpoch == ExpectedEpoch);
+        assert(F.Weapon.SentBegins.Num() == 2 && F.Weapon.TestLoadStarts == 2);
+        assert(F.Weapon.SentReleases.Num() == 1 && F.Weapon.SentReleases[0].Id == ExpectedId);
+        assert(F.Weapon.SentReleases[0].Epoch == ExpectedEpoch && F.Weapon.SentReleases[0].Count == 1);
+        assert(F.Weapon.bLoadedVolleyReleaseSent && !F.Pawn.IsPendingFire(1));
+        assert(F.Weapon.CurrentState == &F.Weapon.Charge);
+        assert(F.Weapon.Charge.StateVolleyId == ExpectedId && F.Weapon.Charge.StateVolleyEpoch == ExpectedEpoch);
+    }
+}

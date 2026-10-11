@@ -583,16 +583,25 @@ void AUTPlusWeap_RocketLauncher::ClientLoadedVolleyResult_Implementation(uint32 
                 Prediction.Outcome = uint8(NCRocketVolley::ERocketResult::Cancelled);
         }
     }
-    if (Epoch == LoadedVolleyEpoch && Id == LoadedVolley.Id && (Outcome == NCRocketVolley::EResult::Rejected || Outcome == NCRocketVolley::EResult::Cancelled))
+    if (HasLoadedVolley() && Epoch == LoadedVolleyEpoch && Id == LoadedVolley.Id
+        && (Outcome == NCRocketVolley::EResult::Rejected || Outcome == NCRocketVolley::EResult::Cancelled))
     {
-        TGuardValue<bool> ResultGuard(bLoadedVolleyApplyingResult, true);
-        LoadedVolley.Finish(Id);
-        if (CurrentlyFiringMode == 1) CurrentlyFiringMode = 255;
-        if (FireModeActiveState.IsValidIndex(1)) FireModeActiveState[1] = 0;
-        if (UTOwner) UTOwner->SetPendingFire(1, false);
         UUTWeaponStateFiringChargedRocket_Transactional* State =
             Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
-        if (State && State->StateVolleyEpoch == Epoch && State->StateVolleyId == Id) GotoActiveState();
+        const bool bOwnsChargedState = LoadedVolleyPawn.Get() == UTOwner
+            && UTOwner->GetWeapon() == this && State
+            && State->StateVolleyEpoch == Epoch && State->StateVolleyId == Id;
+        // Finish before callbacks, so old release/EndState work is inert without
+        // suppressing a new volley's release during a synchronous state entry.
+        CompleteLoadedVolley(true);
+        // A terminal/older volley owns only its predicted projectiles. Even a
+        // live cancellation owns pawn input only while its charge is current;
+        // a switch-away press belongs to the incoming weapon.
+        if (bOwnsChargedState)
+        {
+            if (UTOwner->GetPendingWeapon() == nullptr) UTOwner->SetPendingFire(1, false);
+            GotoActiveState(); // A pending switch is handled by stock Active.
+        }
     }
     ReconcileLoadedRockets();
 }
@@ -767,9 +776,19 @@ void AUTPlusWeap_RocketLauncher::OnRep_LoadedOwnershipEpoch()
 {
     if (LoadedVolleyEpoch == LoadedOwnershipEpoch) return;
     const bool bInitialOwnership = LoadedVolleyEpoch == 0 && LoadedOwnershipEpoch != 0;
+    UUTWeaponStateFiringChargedRocket_Transactional* State =
+        Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
+    const bool bOwnsChargedState = UTOwner && LoadedVolleyPawn.Get() == UTOwner
+        && UTOwner->GetWeapon() == this && State && LoadedVolley.Id != 0
+        && State->StateVolleyEpoch == LoadedVolleyEpoch && State->StateVolleyId == LoadedVolley.Id;
+    const bool bOwnsHeldLoad = HasLoadedVolley() && bOwnsChargedState
+        && UTOwner->GetPendingWeapon() == nullptr;
     CompleteLoadedVolley(true);
-    if (UTOwner) UTOwner->SetPendingFire(1, false);
-    if (Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState)) GotoActiveState();
+    if (bOwnsHeldLoad) UTOwner->SetPendingFire(1, false);
+    // Reset before state callbacks: Active can synchronously dispatch a newer
+    // held input. An ownership update on a holstered launcher must not activate
+    // it or clear input belonging to the pawn's current weapon.
     ResetLoadedOwnershipState(bInitialOwnership);
+    if (bOwnsChargedState) GotoActiveState();
     TryDrainLoadedVolleyInput();
 }

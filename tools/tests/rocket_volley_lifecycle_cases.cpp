@@ -559,6 +559,10 @@ static void TestMixedCloseRangeOutcomes()
 
 int main()
 {
+    TestLateVolleyResultPreservesNewInput();
+    TestOwnershipEpochPreservesOtherInput();
+    TestRocketCleanupPreservesPrimary();
+    TestRocketCleanupAllowsNewCallbackInput();
     TestHeldAltSwitchRecovery();
     TestOutgoingLauncherAltHandoff();
     TestFirstInputWaitsForOwnership();
