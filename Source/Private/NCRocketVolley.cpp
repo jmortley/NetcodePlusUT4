@@ -1,6 +1,7 @@
 #include "NCRocketVolley.h"
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
+#include "UTWeaponStateEquipping.h"
 #include "UTPlusProj_Rocket.h"
 #include "NCPlusVersionGate.h"
 #include "NCClientFireTiming.h"
