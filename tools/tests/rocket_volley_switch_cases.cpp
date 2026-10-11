@@ -1,3 +1,5 @@
+#include <cstdio>
+
 // Runs the production charged BeginState/EndState and volley methods together.
 // The adapter supplies stock synchronous state dispatch, not UE input transport.
 struct FHeldAltSwitchFixture
@@ -51,8 +53,78 @@ struct FHeldAltSwitchFixture
     }
 };
 
+static void TestAuthorityHeldAltCooldownRecovery()
+{
+    // The authority-local stock entry has no identity yet. Refusing it for
+    // either timing gate must return through StartFire and arm the normal
+    // begin retry, for both a listen/standalone player and a non-PC bot.
+    bool AllQueued = true;
+    bool AllRecovered = true;
+    for (bool Bot : {false, true})
+    {
+        for (bool TimingDebt : {false, true})
+        {
+            for (bool ExpiredRetry : {false, true})
+            {
+                FHeldAltSwitchFixture F;
+                AUTBot BotController;
+                F.Weapon.Role = ROLE_Authority;
+                F.Pawn.Local = !Bot;
+                if (Bot) F.Pawn.Controller = &BotController;
+                if (TimingDebt) F.Weapon.TestRemaining = 0.2f;
+                else F.Weapon.EarliestFireTime = F.Weapon.W.Now + 0.2f;
+                F.FinishRaise();
+
+                const uint32 QueuedId = F.Weapon.LoadedVolley.Id;
+                const bool Queued = F.Weapon.HasLoadedVolley()
+                    && F.Weapon.LoadedVolleyBeginHandle.Active
+                    && !F.Weapon.bLoadedVolleyEnteredState
+                    && F.Weapon.TestLoadStarts == 0 && F.Weapon.BeginCalls == 0
+                    && F.Weapon.CurrentState == F.Weapon.ActiveState
+                    && !F.Pawn.IsPendingFire(1) && F.Weapon.Ammo == 9;
+                AllQueued = Queued && AllQueued;
+                assert(F.Weapon.SentBegins.Num() == 0 && F.Weapon.SentReleases.Num() == 0);
+
+                F.Weapon.TestRemaining = 0;
+                F.Weapon.W.Now += ExpiredRetry ? 6.f : 0.21f;
+                // Timers are explicit in this adapter: only dispatch a callback
+                // if production actually armed it. An orphan must not get a
+                // fabricated retry which would conceal the original bug.
+                if (F.Weapon.LoadedVolleyBeginHandle.Active) F.Weapon.TryBeginLoadedVolley();
+                if (ExpiredRetry)
+                {
+                    // A delayed callback cancels the expired queued request;
+                    // the next press must then get a fresh, usable identity.
+                    AllRecovered = !F.Weapon.HasLoadedVolley() && AllRecovered;
+                    F.Weapon.StartFire(1);
+                }
+                const bool Recovered = F.Weapon.HasLoadedVolley()
+                    && F.Weapon.bLoadedVolleyEnteredState
+                    && F.Weapon.TestLoadStarts == 1 && F.Weapon.BeginCalls == 1
+                    && F.Weapon.CurrentState == &F.Weapon.Charge
+                    && F.Weapon.Charge.bCharging && F.Weapon.Charge.LoadTimerHandle.Active
+                    && !F.Weapon.LoadedVolleyBeginHandle.Active;
+                AllRecovered = Recovered && AllRecovered;
+                if (Recovered)
+                {
+                    assert(ExpiredRetry ? F.Weapon.LoadedVolley.Id != QueuedId
+                                        : F.Weapon.LoadedVolley.Id == QueuedId);
+                    const uint32 ActiveId = F.Weapon.LoadedVolley.Id;
+                    F.Weapon.StartFire(1);
+                    assert(F.Weapon.LoadedVolley.Id == ActiveId && F.Weapon.TestLoadStarts == 1);
+                }
+                if (!Queued || !Recovered)
+                    fprintf(stderr, "authority held-alt cooldown: bot=%d timingDebt=%d expired=%d queued=%d recovered=%d\n",
+                        int(Bot), int(TimingDebt), int(ExpiredRetry), int(Queued), int(Recovered));
+            }
+        }
+    }
+    assert(AllQueued && AllRecovered);
+}
+
 static void TestHeldAltSwitchRecovery()
 {
+    TestAuthorityHeldAltCooldownRecovery();
     // The report's trigger: Active sees a carried held bit and bypasses StartFire.
     // Recovery must leave the failed charge before starting exactly one real one.
     {

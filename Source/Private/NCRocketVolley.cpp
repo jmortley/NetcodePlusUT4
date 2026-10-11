@@ -282,6 +282,17 @@ void AUTPlusWeap_RocketLauncher::ServerBeginLoadedVolley_Implementation(uint32 E
 
 bool AUTPlusWeap_RocketLauncher::BeginLoadedVolleyState()
 {
+    // Stock Active scans held input synchronously when BringUp finishes. Check
+    // readiness before creating a local authority volley: a refused entry must
+    // leave ContinueLoadedVolley free to queue StartFire with its begin timer.
+    // Existing numbered requests keep their identity/timer while waiting.
+    const float Now = GetWorld()->GetTimeSeconds();
+    const bool bReady = CanBeginLoadedVolleyInput()
+        && (Role != ROLE_Authority || Is329FireProtocolReady())
+        && EarliestFireTime - Now <= KINDA_SMALL_NUMBER
+        && NCClientFireTiming::MaxRemaining(this) <= KINDA_SMALL_NUMBER;
+    if (!bReady) return false;
+
     // Bots/listen host may enter via the stock continued-fire state machinery.
     if (!HasLoadedVolley() && Role == ROLE_Authority && UTOwner
         && (UTOwner->IsLocallyControlled() || !Cast<APlayerController>(UTOwner->Controller)))
@@ -289,16 +300,8 @@ bool AUTPlusWeap_RocketLauncher::BeginLoadedVolleyState()
         LastClientLoadedVolleyId = NCRocketVolley::Next(LastClientLoadedVolleyId);
         ResetLoadedVolley(LastClientLoadedVolleyId);
     }
-    // Stock Active scans shared held bits synchronously when BringUp finishes.
-    // A queued server Begin must still satisfy readiness if that scan reaches
-    // this state before our retry timer, including on an instant bring-up.
-    const float Now = GetWorld()->GetTimeSeconds();
     const bool bValid = HasLoadedVolley() && LoadedVolleyEpoch == LoadedOwnershipEpoch
-        && LoadedVolleyPawn.Get() == UTOwner && CanBeginLoadedVolleyInput()
-        && (Role != ROLE_Authority || Is329FireProtocolReady())
-        && Now - LoadedVolleyBeginRequestedAt <= 5.f
-        && EarliestFireTime - Now <= KINDA_SMALL_NUMBER
-        && NCClientFireTiming::MaxRemaining(this) <= KINDA_SMALL_NUMBER;
+        && LoadedVolleyPawn.Get() == UTOwner && Now - LoadedVolleyBeginRequestedAt <= 5.f;
     if (bValid)
     {
         // A denied stock held-input scan can reset the visual mode. Restore

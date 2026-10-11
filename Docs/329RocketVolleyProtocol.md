@@ -23,6 +23,13 @@ EarliestFireTime, rather than setting a generic pending-fire bit that could bypa
 the cooldown. Queued begins expire after five seconds or owner/state/match failure.
 A release during that wait is retained and releases after the first legal load.
 
+Authority-local held-alt entry (listen host, standalone and bots) checks weapon
+readiness before creating its volley identity. If cooldown blocks the stock
+charged-state entry, `ContinueLoadedVolley()` retries through `StartFire(1)` and
+arms the normal begin timer. This prevents a rejected entry from leaving a live
+volley with no timer that blocks subsequent alt-fire presses. Existing numbered
+remote requests retain their queued timer and identity while readiness is pending.
+
 Held alt-fire carried across a weapon switch re-enters through `StartFire(1)` on
 the owning client only. Stock ActiveState can enter the charged state directly
 from the pawn's held bit before a numbered volley exists. That failed entry uses
