@@ -1358,7 +1358,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 			[
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Flags"),     &FMConfig.bFlags) ]
-				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Darken"),    &FMConfig.bDarkenBodies) ]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Darken Bodies"), &FMConfig.bDarkenBodies) ]
 				// "Outline" checkbox intentionally NOT exposed — parked again 2026-07-01 (the stock
 				// M_OutlinePP rim is fixed screen-space width and reads too big on distant players;
 				// needs the material-edit width fix). Code stays live: dogfood via Mod.ini

@@ -228,6 +228,15 @@ namespace NCPlusForceModels
 	/** Checks third-person team materials only; tintable arms cannot qualify an untintable body. */
 	NETCODEPLUS_API bool CanTintBodyContent(TSubclassOf<AUTCharacterContent> Content);
 
+	/** F5 "Darken Bodies" corpse colour: the live colour's hue with saturation capped and value lowered
+	 *  to Value (never brightened). Idempotent, so an already-dark parameter comes back unchanged. */
+	NETCODEPLUS_API FLinearColor GetCorpseColour(const FLinearColor& Live, float Value);
+	/** Darken one corpse material: zero the highlight emissive scalars and darken every team-colour
+	 *  vector the material exposes. Faces/eyes/hair keep their colours (their emissive still drops);
+	 *  an overlay also darkens its emissive "Color". Writes only parameters that exist and change, so
+	 *  a repeat costs parameter lookups and no render updates. */
+	NETCODEPLUS_API void DarkenCorpseMaterial(class UMaterialInstanceDynamic* MID, float Value, bool bOverlay);
+
 	/** True if a material's name matches the [ForceModels] BakedMaterials denylist — its model can't be
 	 *  recoloured (inert params) and should fall back to its baked red/blue skin. Empty list -> false. */
 	NETCODEPLUS_API bool IsBakedMaterial(const FString& MaterialName);

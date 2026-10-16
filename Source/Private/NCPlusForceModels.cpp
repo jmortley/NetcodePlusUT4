@@ -400,7 +400,10 @@ void NCPlusForceModels::ReapplyAll(UWorld* World)
 	TArray<ATeamArenaCharacter*> Chars;
 	for (TActorIterator<ATeamArenaCharacter> It(World); It; ++It)
 	{
-		if (ATeamArenaCharacter* C = *It) { Chars.Add(C); }
+		// Skip corpses: stock team setup on a torn-off body resets its material team branch (undoing
+		// Darken Bodies), and a body never needs a new look before cleanup.
+		ATeamArenaCharacter* C = *It;
+		if (C && !C->IsDead()) { Chars.Add(C); }
 	}
 	for (ATeamArenaCharacter* C : Chars)
 	{
@@ -1496,6 +1499,63 @@ bool NCPlusForceModels::CanTintBodyContent(TSubclassOf<AUTCharacterContent> Cont
 		}
 	}
 	return bHasBodyColour;
+}
+
+FLinearColor NCPlusForceModels::GetCorpseColour(const FLinearColor& Live, float Value)
+{
+	// Same hue, little saturation, low value: the body reads as down with only a hint of its team.
+	// Value is absolute, so a Glow-overbright forced colour and a stock team colour land alike.
+	static const float CorpseSaturationCap = 0.35f;
+	FLinearColor HSV = Live.LinearRGBToHSV();   // R = hue 0-360, G = sat, B = value
+	HSV.G = FMath::Min(HSV.G, CorpseSaturationCap);
+	HSV.B = FMath::Min(HSV.B, FMath::Max(Value, 0.f));
+	FLinearColor Corpse = HSV.HSVToLinearRGB();
+	Corpse.A = Live.A;
+	return Corpse;
+}
+
+void NCPlusForceModels::DarkenCorpseMaterial(UMaterialInstanceDynamic* MID, float Value, bool bOverlay)
+{
+	if (!MID) { return; }
+	// The highlight emissive is self-lit and ignores scene lighting, so every corpse material drops it
+	// (eyes included). Absent or already-zero scalars are skipped: nothing is re-uploaded.
+	static const FName EmissiveParams[] = { FName(TEXT("Emissive Max")), FName(TEXT("Emission Power")) };
+	for (const FName& Param : EmissiveParams)
+	{
+		float Current = 0.f;
+		if (MID->GetScalarParameterValue(Param, Current) && Current != 0.f)
+		{
+			MID->SetScalarParameterValue(Param, 0.f);
+		}
+	}
+
+	const UMaterialInterface* Src = MID->Parent;
+	if (!bOverlay && IsRecolorSkippedMaterial(Src ? Src->GetName() : MID->GetName(), /*bUseConfiguredOverrides=*/false))
+	{
+		return;   // faces/eyes/hair keep their natural colours, as in the live recolour
+	}
+	auto DarkenVector = [MID, Value](const FName& Param)
+	{
+		FLinearColor Current;
+		if (MID->GetVectorParameterValue(Param, Current))
+		{
+			const FLinearColor Corpse = GetCorpseColour(Current, Value);
+			if (!Corpse.Equals(Current))
+			{
+				MID->SetVectorParameterValue(Param, Corpse);
+			}
+		}
+	};
+	// The complete known set, not a personal RecolorParams override: no team channel may keep glowing.
+	for (const FName& Param : TeamColourParamNames(/*bUseConfiguredOverrides=*/false))
+	{
+		DarkenVector(Param);
+	}
+	if (bOverlay)
+	{
+		static const FName NAME_OverlayColor(TEXT("Color"));   // armour shell emissive (UpdateArmorOverlay)
+		DarkenVector(NAME_OverlayColor);
+	}
 }
 
 bool NCPlusForceModels::IsBakedMaterial(const FString& MaterialName)
