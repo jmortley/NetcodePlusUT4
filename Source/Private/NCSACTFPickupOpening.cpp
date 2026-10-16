@@ -1,5 +1,5 @@
-#include "NetcodePlus.h"
 #include "NCSACTFPickupOpening.h"
+#include "NetcodePlus.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "TimerManager.h"
