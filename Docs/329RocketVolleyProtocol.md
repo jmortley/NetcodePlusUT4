@@ -21,7 +21,19 @@ The client predicts loading. The server still owns load timers and ammunition.
 Begin waits for the existing refire/equip boundary, using the cadence helper and
 EarliestFireTime, rather than setting a generic pending-fire bit that could bypass
 the cooldown. Queued begins expire after five seconds or owner/state/match failure.
-A release during that wait is retained and releases after the first legal load.
+The owning client sends Begin only after its charge entry passes readiness checks.
+Releasing M2 while the local request is still waiting cancels it, matching 328:
+no Begin or Release is sent, no ammunition is spent, and no delayed rocket appears.
+Once local loading has started, an early release still guarantees the first rocket,
+including when the server is still waiting on its own equip/cooldown boundary.
+
+A physical M1 press while M2 remains held selects the rocket mode even during the
+local ownership/equip/cooldown wait. It is consumed before ordinary primary debounce
+or retries, so it cannot become an unintended primary shot after the volley. The
+choice is retained separately from visual state and restored on charge entry;
+Begin then the selected absolute Mode are sent reliably on the same actor. No new
+RPC, RPC parameter, replicated field or cancellation message is required. Old 329
+clients retain their old tap behavior until their client module is updated.
 
 Authority-local held-alt entry (listen host, standalone and bots) checks weapon
 readiness before creating its volley identity. If cooldown blocks the stock
@@ -37,8 +49,8 @@ from the pawn's held bit before a numbered volley exists. That failed entry uses
 one numbered volley through the normal ownership/cooldown gates. Its caller
 returns immediately because recovery can synchronously re-enter the same state
 object; the second entry has an identity and does not repeat recovery. An outgoing
-weapon's tap released before handoff stays dropped. Direct launcher presses keep
-their existing queued-load/release behavior. Remote authority still clears an
+weapon's tap released before handoff stays dropped. Direct launcher presses now
+cancel on release if local loading has not started. Remote authority still clears an
 unnumbered held bit and waits for the version-gated Begin RPC. This recovery adds
 no RPCs, replicated properties or class members and is a client-DLL-only fix
 compatible with the existing 329 server protocol.
@@ -113,18 +125,17 @@ an expiry diagnostic after 12 seconds. This is not a promise that visuals surviv
 arbitrary network loss, actor destruction or invalid custom projectile content.
 
 The first charge still requires a nonzero server ownership epoch. A locally
-controlled client now retains one initial alt-fire press, plus its release, for
+controlled client retains one initial held alt-fire press and its selected mode for
 up to 250 ms of real time while that epoch is zero. It creates no volley ID, RPC,
 pending-fire permission, predicted charge or ammo consumption during the wait.
 Repeated presses do not refresh the active buffer or queue more volleys. An
 expired request is discarded; a later fresh press can start a new request.
 
 After initial epoch cleanup, the buffer is consumed once through the normal
-StartFire path. A retained release applies only to the exact resulting volley
-on the same pawn/controller/world, and the existing first-load boundary still
-applies. Buffered waiting time grants no load progress, cooldown credit or extra
-rockets. An old primary retry does not erase the buffer; a fresh primary press
-does. Death, disabled firing, missing ammo, a pending weapon switch, put-down,
+load-start checks. Releasing before ownership arrives cancels it immediately.
+Buffered waiting time grants no load progress, cooldown credit or extra rockets.
+An old primary retry does not erase the buffer; a fresh M1 press while M2 is held
+cycles its selected mode. Death, disabled firing, missing ammo, a pending weapon switch, put-down,
 detach, removal, destruction/end-play, ownership/possession changes or timeout
 cancel it. Only the initial zero-to-nonzero epoch transition preserves the buffer.
 This adds no RPC or replicated fields and does not alter the 329 wire protocol.

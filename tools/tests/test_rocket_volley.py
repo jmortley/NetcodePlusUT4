@@ -27,6 +27,8 @@ class RocketVolleyTests(unittest.TestCase):
             "void AUTPlusWeap_RocketLauncher::StartFire",
             "void AUTPlusWeap_RocketLauncher::StopFire",
             "void AUTPlusWeap_RocketLauncher::NotifyLoadedVolleyRelease",
+            "bool AUTPlusWeap_RocketLauncher::TryCycleLoadedVolleyMode",
+            "void AUTPlusWeap_RocketLauncher::StartLoadedVolleyInput",
             "bool AUTPlusWeap_RocketLauncher::CanBeginLoadedVolleyInput",
             "void AUTPlusWeap_RocketLauncher::BufferLoadedVolleyInput",
             "void AUTPlusWeap_RocketLauncher::TryDrainLoadedVolleyInput",
@@ -58,12 +60,13 @@ class RocketVolleyTests(unittest.TestCase):
             "AUTProjectile* AUTPlusWeap_RocketLauncher::SpawnNetPredictedProjectile",
         ]
         charged = "\n".join(native_function(source, signature) for signature in (
+            "void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation",
             "void UUTWeaponStateFiringChargedRocket_Transactional::BeginState",
             "void UUTWeaponStateFiringChargedRocket_Transactional::EndState",
             "void UUTWeaponStateFiringChargedRocket_Transactional::ClearAllTimers",
         ))
-        # UE_LOG is stubbed out: only these diagnostic-heavy state methods have
-        # variables/parameters used exclusively inside log arguments. Keep all
+        # UE_LOG is stubbed out: these state methods have diagnostic-only locals;
+        # OnMultiPress also retains its inherited, unused mode parameter. Keep all
         # other warnings (and the rest of the adapter/cases) under -Werror /WX.
         charged = """
 #ifdef _MSC_VER
@@ -89,6 +92,7 @@ class RocketVolleyTests(unittest.TestCase):
                             + "\n".join(native_function(source, signature) for signature in methods)
                             + charged
                             + (tests / "rocket_volley_switch_cases.cpp").read_text()
+                            + (tests / "rocket_volley_quick_input_cases.cpp").read_text()
                             + (tests / "rocket_volley_lifecycle_cases.cpp").read_text(), encoding="utf-8")
             executable = directory / ("lifecycle.exe" if os.name == "nt" else "lifecycle")
             include = PLUGIN / "Source/Public"

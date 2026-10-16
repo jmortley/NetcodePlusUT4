@@ -12,7 +12,10 @@ using uint8 = uint8_t; using uint32 = uint32_t; using int32 = int32_t;
 constexpr int ROLE_Authority = 3;
 constexpr float KINDA_SMALL_NUMBER = 0.0001f;
 constexpr int INDEX_NONE = -1;
-struct FVector {};
+struct FVector {static const FVector ZeroVector;};
+const FVector FVector::ZeroVector;
+constexpr int SRT_AllButOwner=0, SAT_WeaponFoley=0;
+struct UUTGameplayStatics {template<class... T>static void UTPlaySound(T...){}};
 template<class T> struct TSubclassOf {};
 struct FMath {
     template<class T> static T Min(T A,T B){return std::min(A,B);}
@@ -97,6 +100,7 @@ struct Timers {
     void ClearTimer(FTimerHandle& H){++ClearCalls;H.Active=false;}
     template<class T> void ClearAllTimersForObject(T*){}
     bool IsTimerActive(const FTimerHandle& H)const{return H.Active;}
+    float GetTimerRemaining(const FTimerHandle& H)const{return H.Active?H.Delay:-1.f;}
     template<class T,class F> void SetTimer(FTimerHandle& H,T*,F,float D,bool){H.Active=true;H.Delay=D;}
 };
 struct World {UNetDriver Driver;UNetDriver* GetNetDriver(){return &Driver;}float Now=10; AUTGameState GS;float GetTimeSeconds()const{return Now;} template<class T>T* GetGameState(){return &GS;}Timers TimerManager;Timers& GetTimerManager(){return TimerManager;}};
@@ -132,7 +136,9 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     State* ActiveState=&Idle;State* InactiveState=&Inactive;State* UnequippingState=&Unequip;State* CurrentState=&Idle;
     State* EquippingState=&Equip;
     TArray<State*> FiringState{ };TArray<RocketMode> RocketFireModes;
-    bool bDisableAltLoading=false,bAllowGrenades=true,bAllowAltModes=true,SpiralRocketClass=true;
+    bool bDisableAltLoading=false,bAllowGrenades=true,bAllowAltModes=true;
+    void* SpiralRocketClass=reinterpret_cast<void*>(1);
+    void* AltFireModeChangeSound=nullptr;
     bool bDrawRocketModeString=false,bHandlingRetry=false;
     bool bFireHeldByPlayer[2]={false,false}; // AUTWeaponFix's GhostFix held flags.
     uint8 CurrentFireMode=1;int32 CurrentRocketFireMode=0,NumLoadedRockets=0,NumLoadedBarrels=0,Ammo=9;
@@ -140,7 +146,8 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     int BeginCalls=0,EndCalls=0,GotoCalls=0,Refund=0;float EarliestFireTime=0,TestRemaining=0;
     NCRocketVolley::FProgress LoadedVolley;
     uint32 LoadedOwnershipEpoch=1,LoadedVolleyEpoch=0,LastClientLoadedVolleyId=0,LastServerLoadedVolleyId=0;
-    bool bPendingLoadedVolleyInput=false,bPendingLoadedVolleyRelease=false;
+    bool bPendingLoadedVolleyInput=false;
+    uint8 PendingLoadedVolleyMode=0;
     double PendingLoadedVolleyInputAt=0;
     TWeakObjectPtr<AUTCharacter> PendingLoadedVolleyPawn;
     TWeakObjectPtr<UWorld> PendingLoadedVolleyWorld;
@@ -156,10 +163,10 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     TWeakObjectPtr<AUTCharacter> LoadedVolleyPawn;
     TArray<FNCLoadedRocketPrediction> LoadedRocketPredictions;TArray<FNCLoadedVolleyReceipt> LoadedVolleyReceipts;
     TArray<FNCLoadedVolleyReceipt> SentVolleys;TArray<uint8> SentRockets,SentRocketResults;
-    TArray<FTestLoadedInputRPC> SentBegins,SentReleases;TArray<uint8> InputEvents;
+    TArray<FTestLoadedInputRPC> SentBegins,SentReleases,SentModes;TArray<uint8> InputEvents;
     int StockStartCalls=0,StockStopCalls=0;
     bool TestPutDownResult=true,BaseSawPendingInput=false,TestDestroyed=false;
-    std::function<void()> TestOnBegin;
+    std::function<void()> TestOnBegin,TestOnServerBegin;
     // Opt in to stock-style synchronous state callbacks for switch regressions.
     // Other lifecycle tests keep their existing charge/animation boundary stubs.
     bool TestUseStateCallbacks=false;
@@ -171,7 +178,8 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     EEndPlayReason::Type TestEndPlayReason=EEndPlayReason::Destroyed;
     int LifecycleCalls=0;
     FTimerHandle UpdateLockHandle;float LockCheckTime=0.1f;
-    FTimerHandle LoadedRocketReconcileHandle,LoadedVolleyBeginHandle;
+    FTimerHandle LoadedRocketReconcileHandle,LoadedVolleyBeginHandle,SpawnDelayedFakeProjHandle;
+    FTimerHandle RetryFireHandle[2];bool bBufferedClickPending[2]={false,false},bCrossModeRetryArmed[2]={false,false};
     AUTPlusWeap_RocketLauncher(){FiringState.Add(&Idle);FiringState.Add(&Charge);RocketFireModes.Add({});RocketFireModes.Add({});RocketFireModes.Add({});Idle.Outer=Charge.Outer=this;LastFireTime.Add(0);LastFireTime.Add(0);}
     World* GetWorld(){return TestWorld;}Timers& GetWorldTimerManager(){return GetWorld()->GetTimerManager();}
     bool HasAmmo(uint8)const{return Ammo>0;}bool IsFiring()const{return CurrentState==&Charge;}
@@ -180,7 +188,7 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     bool IsPendingKillPending()const{return TestDestroyed;}
     void UpdateLock(){}void ClearLoadedRockets(){}
     void ClearDeferredActiveState(){}
-    bool BeginFiringSequence(uint8 M,bool){++BeginCalls;InputEvents.Add(2);CurrentFireMode=M;UTOwner->SetPendingFire(M,true);if(TestUseStateCallbacks)GotoState(&Charge);else{CurrentState=&Charge;bLoadedVolleyEnteredState=true;}if(TestOnBegin)TestOnBegin();return true;}
+    bool BeginFiringSequence(uint8 M,bool){++BeginCalls;InputEvents.Add(2);CurrentFireMode=M;UTOwner->SetPendingFire(M,true);if(TestUseStateCallbacks)GotoState(&Charge);else{CurrentState=&Charge;if(!BeginLoadedVolleyState())return false;}if(TestOnBegin)TestOnBegin();return true;}
     void EndFiringSequence(uint8 M){++EndCalls;InputEvents.Add(4);if(UTOwner)UTOwner->SetPendingFire(M,false);}
     void GotoActiveState(){++GotoCalls;TestPendingAtGotoActive.Add(UTOwner&&UTOwner->IsPendingFire(1));if(TestUseStateCallbacks)GotoState(ActiveState);else CurrentState=ActiveState;}
     void GotoState(State* NewState);
@@ -195,8 +203,11 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     bool HasLoadedVolley()const{return LoadedVolley.Id!=0&&!LoadedVolley.Terminal;}
     void ClientLoadedVolleyResult(uint32,uint32 Id,AUTCharacter*,uint8 R,uint8 C,uint8 M){FNCLoadedVolleyReceipt X;X.VolleyId=Id;X.Result=R;X.Count=C;X.SpawnedMask=M;SentVolleys.Add(X);}
     void ClientLoadedRocketResult(uint32,uint32,AUTCharacter*,uint8 Ordinal,uint8 R,AUTProjectile*,uint32){SentRockets.Add(Ordinal);SentRocketResults.Add(R);}
-    void ServerBeginLoadedVolley(uint32 Epoch,uint32 Id,AUTCharacter* Pawn){SentBegins.Add({Epoch,Id,Pawn,0,0});InputEvents.Add(1);}
+    void ServerBeginLoadedVolley(uint32 Epoch,uint32 Id,AUTCharacter* Pawn){SentBegins.Add({Epoch,Id,Pawn,0,0});InputEvents.Add(1);if(TestOnServerBegin)TestOnServerBegin();}
     void ServerReleaseLoadedVolley(uint32 Epoch,uint32 Id,AUTCharacter* Pawn,uint8 Mode,uint8 Count){SentReleases.Add({Epoch,Id,Pawn,Mode,Count});InputEvents.Add(3);}
+    void ServerSetLoadedRocketMode(uint32 Epoch,uint32 Id,AUTCharacter* Pawn,uint8 Mode){SentModes.Add({Epoch,Id,Pawn,Mode,0});InputEvents.Add(5);}
+    void OnMultiPress(uint8 Mode){OnMultiPress_Implementation(Mode);}
+    void OnMultiPress_Implementation(uint8);
     AUTProjectile* SpawnNetPredictedProjectileInternal(TSubclassOf<AUTProjectile>,FVector,FRotator,uint8,int32,bool AllowDelay){
         ++TestSpawnCalls;TestAllowDelay=AllowDelay;
         CaptureLoadedRocketSpawn(TestNextProjectile);
@@ -206,7 +217,7 @@ struct AUTPlusWeap_RocketLauncher : FakeBase {
     }
     bool CanBeginLoadedVolley();bool IsLoadedVolleyModeValid(uint8 Mode)const;void ResetLoadedVolley(uint32 Id);
     void StartFire(uint8);void StopFire(uint8);void NotifyLoadedVolleyRelease();
-    bool CanBeginLoadedVolleyInput();void BufferLoadedVolleyInput();void TryDrainLoadedVolleyInput();void ClearLoadedVolleyInput();
+    bool CanBeginLoadedVolleyInput();bool TryCycleLoadedVolleyMode();void StartLoadedVolleyInput(uint8);void BufferLoadedVolleyInput();void TryDrainLoadedVolleyInput();void ClearLoadedVolleyInput();
     void TryBeginLoadedVolley();bool BeginLoadedVolleyState();void ContinueLoadedVolley();void ServerBeginLoadedVolley_Implementation(uint32,uint32,AUTCharacter*);
     void ServerReleaseLoadedVolley_Implementation(uint32,uint32,AUTCharacter*,uint8,uint8);
     void ServerSetLoadedRocketMode_Implementation(uint32,uint32,AUTCharacter*,uint8);

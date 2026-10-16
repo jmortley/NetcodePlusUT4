@@ -210,7 +210,7 @@ static void TestHeldAltSwitchRecovery()
         F.Weapon.EarliestFireTime = F.Weapon.W.Now + 0.2f;
         F.Weapon.TestRemaining = 0.3f;
         F.FinishRaise();
-        assert(F.Weapon.HasLoadedVolley() && F.Weapon.SentBegins.Num() == 1);
+        assert(F.Weapon.HasLoadedVolley() && F.Weapon.SentBegins.Num() == 0);
         assert(F.Weapon.BeginCalls == 0 && !F.Pawn.IsPendingFire(1));
         assert(F.Weapon.LoadedVolleyBeginHandle.Active && F.Weapon.TestLoadStarts == 0);
         assert(F.Weapon.LoadedVolleyBeginHandle.Delay == 0.3f);
@@ -272,7 +272,7 @@ static void TestHeldAltSwitchRecovery()
         FHeldAltSwitchFixture F;
         F.Weapon.CurrentState = F.Weapon.EquippingState;
         F.Weapon.StartFire(1);
-        assert(F.Weapon.SentBegins.Num() == 1 && F.Weapon.TestLoadStarts == 0);
+        assert(F.Weapon.SentBegins.Num() == 0 && F.Weapon.TestLoadStarts == 0);
         assert(!F.Pawn.IsPendingFire(1) && F.Weapon.LoadedVolleyBeginHandle.Active);
         F.Weapon.GotoState(F.Weapon.ActiveState);
         assert(F.Weapon.TestLoadStarts == 0);
@@ -598,7 +598,7 @@ static void TestOutgoingLauncherAltHandoff()
 
     // A genuine release during the put-down clears that latch and the GhostFix
     // flag, with or without an older queued volley, and sends no stock Stop. A
-    // queued volley still receives its existing numbered release.
+    // queued volley cancels locally without sending an unpaired release.
     for (bool QueuedVolley : {false, true})
     {
         FHeldAltSwitchFixture F;
@@ -612,21 +612,20 @@ static void TestOutgoingLauncherAltHandoff()
         F.Weapon.StopFire(1);
         assert(!F.Pawn.IsPendingFire(1) && !F.Weapon.bFireHeldByPlayer[1]);
         assert(F.Weapon.StockStartCalls == 1 && F.Weapon.StockStopCalls == 0);
-        assert(F.Weapon.SentReleases.Num() == (QueuedVolley ? 1 : 0));
+        assert(F.Weapon.SentReleases.Num() == 0);
         assert(F.Weapon.EndCalls == (QueuedVolley ? 0 : 1));
     }
 
-    // Outside a switch a release keeps the 329 queued-volley rule: the held bit
-    // was already cleared when the Begin queued, and the release is retained.
+    // Outside a switch, releasing before charge cancels the queued request.
     {
         FHeldAltSwitchFixture F;
         F.Weapon.TestRemaining = 0.2f;
         F.Weapon.StartFire(1);
-        assert(F.Weapon.StockStartCalls == 0 && F.Weapon.SentBegins.Num() == 1);
+        assert(F.Weapon.StockStartCalls == 0 && F.Weapon.SentBegins.Num() == 0);
         assert(!F.Pawn.IsPendingFire(1) && F.Weapon.LoadedVolleyBeginHandle.Active);
         F.Weapon.StopFire(1);
-        assert(F.Weapon.SentReleases.Num() == 1 && F.Weapon.EndCalls == 0);
-        assert(F.Weapon.HasLoadedVolley() && F.Weapon.StockStopCalls == 0);
+        assert(F.Weapon.SentReleases.Num() == 0 && F.Weapon.EndCalls == 0);
+        assert(!F.Weapon.HasLoadedVolley() && F.Weapon.StockStopCalls == 0);
     }
 }
 

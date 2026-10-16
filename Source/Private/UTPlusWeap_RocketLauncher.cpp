@@ -993,64 +993,65 @@ void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode
     // Legacy primary Start/Sync notifications must not cycle it a second time.
     if (Role == ROLE_Authority && HasLoadedVolley() && UTOwner
         && !UTOwner->IsLocallyControlled() && Cast<APlayerController>(UTOwner->Controller)) return;
-    // Only allow mode switch if currently in Alt-Fire (Mode 1)
-    if ((bAllowAltModes || bAllowGrenades) && (CurrentFireMode == 1))
+    const bool bQueuedLoad = bPendingLoadedVolleyInput || (HasLoadedVolley()
+        && !bLoadedVolleyEnteredState && !IsLoadedVolleyReleasePending() && !LoadedVolley.Released);
+    // A held load can be waiting for ownership, equip or cooldown, with the
+    // previous fire mode/state still visible. Its mode choice belongs to the load.
+    if ((bAllowAltModes || bAllowGrenades) && (bQueuedLoad || CurrentFireMode == 1))
     {
         // 1. Check State Validity
         UUTWeaponStateFiringChargedRocket_Transactional* TransactionalAltState =
             Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
 
-        bool bIsCharging = false;
+        bool bIsCharging = bQueuedLoad;
         FTimerHandle* GraceHandle = nullptr;
 
-        if (TransactionalAltState != nullptr)
+        if (!bQueuedLoad && TransactionalAltState != nullptr)
         {
             bIsCharging = TransactionalAltState->bCharging;
             GraceHandle = &TransactionalAltState->GraceTimerHandle;
         }
 
         // 2. Perform Timing Safety Check (Prevent switching right as you fire)
-        if (bIsCharging && GraceHandle != nullptr)
+        if (bIsCharging)
         {
-            if ((GetWorldTimerManager().IsTimerActive(*GraceHandle) &&
+            if ((!bQueuedLoad && GraceHandle && GetWorldTimerManager().IsTimerActive(*GraceHandle) &&
                 GetWorldTimerManager().GetTimerRemaining(*GraceHandle) < 0.05f) ||
-                GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
+                (!bQueuedLoad && GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle)))
             {
                 return;
             }
 
-            // --- FIX START: SYNC WITH SERVER ---
-            // If we are a client, tell the server we pushed the button.
-            //
-            
-            // --- FIX END ---
-
-            // 3. Cycle Mode Locally
-            CurrentRocketFireMode++;
+            // Cycle only supported modes; queued and already-charging input use
+            // the same selection, including launchers that offer grenades only.
+            const uint8 PreviousMode = bPendingLoadedVolleyInput ? PendingLoadedVolleyMode
+                : bQueuedLoad ? LoadedVolleySelectedMode : uint8(CurrentRocketFireMode);
+            uint8 SelectedMode = PreviousMode;
+            for (uint8 Step = 1; Step <= 3; ++Step)
+            {
+                const uint8 Candidate = uint8((PreviousMode + Step) % 3);
+                if (IsLoadedVolleyModeValid(Candidate))
+                {
+                    SelectedMode = Candidate;
+                    break;
+                }
+            }
+            if (SelectedMode == PreviousMode) return;
+            CurrentRocketFireMode = SelectedMode;
+            if (bPendingLoadedVolleyInput) PendingLoadedVolleyMode = SelectedMode;
+            else if (HasLoadedVolley()) LoadedVolleySelectedMode = SelectedMode;
             bDrawRocketModeString = true;
-
-            // Determine Max Modes (Spread, Grenade, Spiral)
-            int32 MaxModes = RocketFireModes.Num();
-            if (SpiralRocketClass != nullptr || MaxModes < 3)
-            {
-                MaxModes = 3;
-            }
-
-            if (CurrentRocketFireMode >= MaxModes)
-            {
-                CurrentRocketFireMode = 0;
-            }
 
             // 329 mode updates are absolute and tied to a load identity. A
             // delayed mode RPC can never cycle a subsequent volley's mode.
-            if (Role < ROLE_Authority && HasLoadedVolley())
+            if (Role < ROLE_Authority && HasLoadedVolley() && bLoadedVolleyEnteredState)
                 ServerSetLoadedRocketMode(GetLoadedVolleyEpoch(), GetLoadedVolleyId(), UTOwner, uint8(CurrentRocketFireMode));
 
             // 4. Feedback
             UUTGameplayStatics::UTPlaySound(GetWorld(), AltFireModeChangeSound, UTOwner, SRT_AllButOwner, false, FVector::ZeroVector, NULL, NULL, true, SAT_WeaponFoley);
 
             // 5. Update Server-Side Flash (so other clients see the text change)
-            if (Role == ROLE_Authority)
+            if (Role == ROLE_Authority && !bQueuedLoad)
             {
                 SetRocketFlashExtra(CurrentFireMode, NumLoadedRockets + 1, CurrentRocketFireMode, bDrawRocketModeString);
             }

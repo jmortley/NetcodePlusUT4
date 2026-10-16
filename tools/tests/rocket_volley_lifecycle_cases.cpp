@@ -25,7 +25,7 @@ static void AssertNoLoadedInputWork(const FLocalLoadedInputFixture& F)
 
 static void AssertLoadedInputCleared(const FLocalLoadedInputFixture& F)
 {
-    assert(!F.Weapon.bPendingLoadedVolleyInput && !F.Weapon.bPendingLoadedVolleyRelease);
+    assert(!F.Weapon.bPendingLoadedVolleyInput && F.Weapon.PendingLoadedVolleyMode == 0);
     assert(!F.Weapon.PendingLoadedVolleyInputHandle.Active);
     assert(F.Weapon.PendingLoadedVolleyPawn.Get() == nullptr);
     assert(F.Weapon.PendingLoadedVolleyWorld.Get() == nullptr);
@@ -38,7 +38,7 @@ static void TestFirstInputWaitsForOwnership()
     F.Weapon.LoadedOwnershipEpoch = 0;
     F.Weapon.StartFire(1);
     AssertNoLoadedInputWork(F);
-    assert(F.Weapon.bPendingLoadedVolleyInput && !F.Weapon.bPendingLoadedVolleyRelease);
+    assert(F.Weapon.bPendingLoadedVolleyInput && F.Weapon.PendingLoadedVolleyMode == 0);
     assert(F.Weapon.PendingLoadedVolleyPawn.Get() == &F.Pawn);
     assert(F.Weapon.PendingLoadedVolleyWorld.Get() == &F.Weapon.W);
     assert(F.Weapon.PendingLoadedVolleyController.Get() == &F.PC);
@@ -66,51 +66,24 @@ static void TestFirstInputWaitsForOwnership()
     assert(F.Weapon.SentReleases.Num() == 1 && F.Weapon.EndCalls == 1);
 }
 
-static void TestReleaseBeforeOwnershipIsRetained()
+static void TestReleaseBeforeOwnershipIsCancelled()
 {
-    for (bool Cooldown : {false, true})
-    {
-        FLocalLoadedInputFixture F;
-        F.Weapon.LoadedOwnershipEpoch = 0;
-        F.Weapon.StartFire(1);
-        FPlatformTime::Now += 0.05;
-        F.Weapon.StopFire(1);
-        F.Weapon.StopFire(1);
-        assert(F.Weapon.bPendingLoadedVolleyInput && F.Weapon.bPendingLoadedVolleyRelease);
-        assert(F.Weapon.EndCalls == 0);
-        AssertNoLoadedInputWork(F);
-        const double RequestedAt = F.Weapon.PendingLoadedVolleyInputAt;
-        F.Weapon.StartFire(1); // Repeated input does not erase the earlier release.
-        assert(F.Weapon.bPendingLoadedVolleyRelease && F.Weapon.PendingLoadedVolleyInputAt == RequestedAt);
-        F.Weapon.TestRemaining = Cooldown ? 0.1f : 0;
-        F.Weapon.LoadedOwnershipEpoch = 8;
-        F.Weapon.OnRep_LoadedOwnershipEpoch();
-        AssertLoadedInputCleared(F);
-        assert(F.Weapon.SentBegins.Num() == 1 && F.Weapon.SentReleases.Num() == 1);
-        const FTestLoadedInputRPC& Begin = F.Weapon.SentBegins[0];
-        const FTestLoadedInputRPC& Release = F.Weapon.SentReleases[0];
-        assert(Begin.Epoch == 8 && Begin.Id == 1 && Begin.Pawn == &F.Pawn);
-        assert(Release.Epoch == Begin.Epoch && Release.Id == Begin.Id && Release.Pawn == Begin.Pawn);
-        assert(Release.Count == 1 && Release.Mode == 0);
-        assert(F.Weapon.bLoadedVolleyReleaseSent);
-        if (Cooldown)
-        {
-            assert(F.Weapon.BeginCalls == 0 && F.Weapon.EndCalls == 0 && !F.Pawn.Pending[1]);
-            assert(F.Weapon.LoadedVolleyBeginHandle.Active);
-            assert(F.Weapon.InputEvents == std::vector<uint8>({1, 3}));
-            F.Weapon.TestRemaining = 0;
-            F.Weapon.TryBeginLoadedVolley();
-        }
-        else
-        {
-            assert(F.Weapon.EndCalls == 1 && !F.Pawn.Pending[1]);
-            assert(F.Weapon.InputEvents == std::vector<uint8>({1, 2, 3, 4}));
-        }
-        F.Weapon.TryDrainLoadedVolleyInput();
-        F.Weapon.OnRep_LoadedOwnershipEpoch();
-        assert(F.Weapon.SentBegins.Num() == 1 && F.Weapon.SentReleases.Num() == 1);
-        assert(F.Weapon.BeginCalls == 1 && F.Weapon.LastClientLoadedVolleyId == 1);
-    }
+    FLocalLoadedInputFixture F;
+    F.Weapon.LoadedOwnershipEpoch = 0;
+    F.Weapon.StartFire(1);
+    F.Weapon.StartFire(0);
+    assert(F.Weapon.PendingLoadedVolleyMode == 1 && F.Weapon.StockStartCalls == 0);
+    FPlatformTime::Now += 0.05;
+    F.Weapon.StopFire(1);
+    AssertLoadedInputCleared(F);
+    F.Weapon.StopFire(1); // Duplicate release cannot manufacture an RPC.
+    F.Weapon.LoadedOwnershipEpoch = 8;
+    F.Weapon.OnRep_LoadedOwnershipEpoch();
+    F.Weapon.TryDrainLoadedVolleyInput();
+    AssertNoLoadedInputWork(F);
+    F.Weapon.StartFire(1);
+    assert(F.Weapon.SentBegins.Num() == 1 && F.Weapon.SentReleases.Num() == 0);
+    assert(F.Weapon.CurrentRocketFireMode == 0 && F.Weapon.SentModes.Num() == 0);
 }
 
 static void TestOwnershipInputWindowDoesNotRefresh()
@@ -121,7 +94,6 @@ static void TestOwnershipInputWindowDoesNotRefresh()
     const double RequestedAt = F.Weapon.PendingLoadedVolleyInputAt;
     FPlatformTime::Now = RequestedAt + NCRocketVolley::OwnershipInputWindowSeconds - 0.01;
     F.Weapon.StartFire(1);
-    F.Weapon.StopFire(1);
     assert(F.Weapon.bPendingLoadedVolleyInput && F.Weapon.PendingLoadedVolleyInputAt == RequestedAt);
     AssertNoLoadedInputWork(F);
     // Wall time expires while game time is paused; another press cannot extend it.
@@ -142,16 +114,17 @@ static void TestEpochReadyPollBeforeNotify()
     FLocalLoadedInputFixture F;
     F.Weapon.LoadedOwnershipEpoch = 0;
     F.Weapon.StartFire(1);
-    F.Weapon.StopFire(1);
+    F.Weapon.StartFire(0);
     F.Weapon.LoadedOwnershipEpoch = 9;
     F.Weapon.TryDrainLoadedVolleyInput();
     F.Weapon.OnRep_LoadedOwnershipEpoch();
     F.Weapon.TryDrainLoadedVolleyInput();
     AssertLoadedInputCleared(F);
     assert(F.Weapon.HasLoadedVolley() && F.Weapon.LoadedVolleyEpoch == 9);
-    assert(F.Weapon.SentBegins.Num() == 1 && F.Weapon.SentReleases.Num() == 1);
-    assert(F.Weapon.BeginCalls == 1 && F.Weapon.EndCalls == 1);
-    assert(F.Weapon.LastClientLoadedVolleyId == 1);
+    assert(F.Weapon.SentBegins.Num() == 1 && F.Weapon.SentReleases.Num() == 0);
+    assert(F.Weapon.BeginCalls == 1 && F.Weapon.EndCalls == 0);
+    assert(F.Weapon.LastClientLoadedVolleyId == 1 && F.Weapon.CurrentRocketFireMode == 1);
+    assert(F.Weapon.SentModes.Num() == 1 && F.Weapon.SentModes[0].Mode == 1);
 }
 
 static void TestRetryInputDoesNotReplaceFreshIntent()
@@ -164,22 +137,21 @@ static void TestRetryInputDoesNotReplaceFreshIntent()
     AssertNoLoadedInputWork(F);
     F.Weapon.bHandlingRetry = false;
     F.Weapon.StartFire(1);
-    F.Weapon.StopFire(1);
     const double RequestedAt = F.Weapon.PendingLoadedVolleyInputAt;
     FPlatformTime::Now += 0.05;
     F.Weapon.bHandlingRetry = true;
-    F.Weapon.StartFire(0); // An older primary retry cannot erase this later alt input.
+    F.Weapon.StartFire(0); // Retry cannot cycle or erase a newer held M2.
     assert(F.Weapon.StockStartCalls == 1);
-    assert(F.Weapon.bPendingLoadedVolleyInput && F.Weapon.bPendingLoadedVolleyRelease);
+    assert(F.Weapon.bPendingLoadedVolleyInput && F.Weapon.PendingLoadedVolleyMode == 0);
     assert(F.Weapon.PendingLoadedVolleyInputAt == RequestedAt);
-    assert(F.Weapon.PendingLoadedVolleyInputHandle.Active && F.Weapon.SentBegins.Num() == 0);
     F.Weapon.bHandlingRetry = false;
-    F.Weapon.StartFire(0); // A new physical primary press does replace the intent.
-    AssertLoadedInputCleared(F);
-    assert(F.Weapon.StockStartCalls == 2);
+    F.Weapon.StartFire(0); // Fresh M1 cycles, preserving the same ownership wait.
+    assert(F.Weapon.bPendingLoadedVolleyInput && F.Weapon.PendingLoadedVolleyMode == 1);
+    assert(F.Weapon.PendingLoadedVolleyInputAt == RequestedAt && F.Weapon.StockStartCalls == 1);
     F.Weapon.LoadedOwnershipEpoch = 14;
     F.Weapon.OnRep_LoadedOwnershipEpoch();
-    assert(F.Weapon.SentBegins.Num() == 0 && F.Weapon.BeginCalls == 0);
+    assert(F.Weapon.SentBegins.Num() == 1 && F.Weapon.BeginCalls == 1);
+    assert(F.Weapon.CurrentRocketFireMode == 1 && F.Weapon.SentModes.Num() == 1);
 }
 
 static void TestFreshPressAfterExpiredInput()
@@ -195,7 +167,7 @@ static void TestFreshPressAfterExpiredInput()
         F.Weapon.StartFire(1); // This is a new press, with the old expiry still queued.
         if (!Ready)
         {
-            assert(F.Weapon.bPendingLoadedVolleyInput && !F.Weapon.bPendingLoadedVolleyRelease);
+            assert(F.Weapon.bPendingLoadedVolleyInput && F.Weapon.PendingLoadedVolleyMode == 0);
             assert(F.Weapon.PendingLoadedVolleyInputAt == FPlatformTime::Now);
             AssertNoLoadedInputWork(F);
             F.Weapon.LoadedOwnershipEpoch = 15;
@@ -209,50 +181,18 @@ static void TestFreshPressAfterExpiredInput()
     }
 }
 
-static void TestBufferedReleaseDoesNotFollowBeginReentry()
+static void TestCancelledInputCannotReachLateEntry()
 {
-    for (int Replacement = 0; Replacement < 10; ++Replacement)
-    {
-        FLocalLoadedInputFixture F;
-        AUTCharacter OtherPawn;
-        APlayerController OtherController;
-        AUTPlusWeap_RocketLauncher OtherWeapon;
-        UWorld OtherWorld;
-        OtherPawn.Controller = &OtherController;
-        OtherPawn.Weapon = &F.Weapon;
-        F.Weapon.LoadedOwnershipEpoch = 0;
-        F.Weapon.StartFire(1);
-        F.Weapon.StopFire(1);
-        // Inject at state dispatch, after TryBegin's checks, to exercise the
-        // drain's post-dispatch identity guard rather than earlier validation.
-        F.Weapon.TestOnBegin = [&]()
-        {
-            assert(!F.Weapon.bPendingLoadedVolleyInput);
-            switch (Replacement)
-            {
-                case 0: F.Weapon.LoadedVolley.Id = 40; break;
-                case 1: F.Weapon.LoadedVolleyEpoch = 40; break;
-                case 2: F.Weapon.LoadedOwnershipEpoch = 40; break;
-                case 3:
-                    F.Weapon.UTOwner = &OtherPawn;
-                    F.Weapon.LoadedVolleyPawn = &OtherPawn;
-                    break;
-                case 4: F.Pawn.Weapon = &OtherWeapon; break;
-                case 5: F.Pawn.PendingWeapon = &OtherWeapon; break;
-                case 6: F.Pawn.Controller = &OtherController; break;
-                case 7: F.Weapon.TestWorld = &OtherWorld; break;
-                case 8: F.Pawn.Dead = true; break;
-                case 9: F.Pawn.Disabled = true; break;
-            }
-        };
-        F.Weapon.LoadedOwnershipEpoch = 16;
-        F.Weapon.OnRep_LoadedOwnershipEpoch();
-        AssertLoadedInputCleared(F);
-        assert(F.Weapon.HasLoadedVolley() && F.Weapon.BeginCalls == 1);
-        assert(F.Weapon.SentBegins.Num() == 1 && F.Weapon.SentBegins[0].Id == 1);
-        assert(F.Weapon.SentReleases.Num() == 0 && F.Weapon.EndCalls == 0);
-        assert(!F.Weapon.bLoadedVolleyReleaseSent);
-    }
+    FLocalLoadedInputFixture F;
+    F.Weapon.LoadedOwnershipEpoch = 0;
+    F.Weapon.StartFire(1);
+    F.Weapon.StopFire(1);
+    F.Weapon.TestOnBegin = [](){assert(false && "cancelled input entered charge");};
+    F.Weapon.LoadedOwnershipEpoch = 16;
+    F.Weapon.OnRep_LoadedOwnershipEpoch();
+    F.Weapon.TryDrainLoadedVolleyInput();
+    AssertLoadedInputCleared(F);
+    AssertNoLoadedInputWork(F);
 }
 
 static void TestPendingInputInvalidation()
@@ -335,8 +275,8 @@ static void TestPendingInputLifecycleCancellation()
         FLocalLoadedInputFixture F;
         F.Weapon.LoadedOwnershipEpoch = 0;
         F.Weapon.StartFire(1);
-        F.Weapon.StopFire(1);
-        assert(F.Weapon.bPendingLoadedVolleyInput && F.Weapon.bPendingLoadedVolleyRelease);
+        F.Weapon.StartFire(0);
+        assert(F.Weapon.bPendingLoadedVolleyInput && F.Weapon.PendingLoadedVolleyMode == 1);
         switch (Hook)
         {
             case 0: F.Weapon.Removed(); break;
@@ -374,11 +314,13 @@ static void TestPendingInputLifecycleCancellation()
     Primary.Weapon.LoadedOwnershipEpoch = 0;
     Primary.Weapon.StartFire(1);
     Primary.Weapon.StartFire(0);
-    AssertLoadedInputCleared(Primary);
-    assert(Primary.Weapon.StockStartCalls == 1);
+    assert(Primary.Weapon.bPendingLoadedVolleyInput && Primary.Weapon.PendingLoadedVolleyMode == 1);
+    assert(Primary.Weapon.StockStartCalls == 0);
     Primary.Weapon.LoadedOwnershipEpoch = 12;
     Primary.Weapon.OnRep_LoadedOwnershipEpoch();
-    assert(Primary.Weapon.SentBegins.Num() == 0 && Primary.Weapon.BeginCalls == 0);
+    AssertLoadedInputCleared(Primary);
+    assert(Primary.Weapon.SentBegins.Num() == 1 && Primary.Weapon.BeginCalls == 1);
+    assert(Primary.Weapon.CurrentRocketFireMode == 1);
 
     // An epoch replacement only preserves intent for the first zero-to-ready transition.
     FLocalLoadedInputFixture Replacement;
@@ -407,7 +349,7 @@ static void TestReadyInputPath()
     assert(F.Weapon.SentReleases.Num() == 1 && F.Weapon.EndCalls == 1);
     assert(F.Weapon.SentReleases[0].Epoch == 7 && F.Weapon.SentReleases[0].Id == 1);
     assert(F.Weapon.SentReleases[0].Count == 1 && !F.Pawn.Pending[1]);
-    assert(F.Weapon.InputEvents == std::vector<uint8>({1, 2, 3, 4}));
+    assert(F.Weapon.InputEvents == std::vector<uint8>({2, 1, 3, 4}));
     F.Weapon.StartFire(0);
     F.Weapon.StopFire(0);
     assert(F.Weapon.StockStartCalls == 1 && F.Weapon.StockStopCalls == 1);
@@ -416,12 +358,12 @@ static void TestReadyInputPath()
     Delayed.Weapon.TestRemaining = 0.2f;
     Delayed.Weapon.StartFire(1);
     Delayed.Weapon.StopFire(1);
-    assert(Delayed.Weapon.SentBegins.Num() == 1 && Delayed.Weapon.SentReleases.Num() == 1);
+    assert(Delayed.Weapon.SentBegins.Num() == 0 && Delayed.Weapon.SentReleases.Num() == 0);
     assert(Delayed.Weapon.BeginCalls == 0 && Delayed.Weapon.EndCalls == 0);
-    assert(Delayed.Weapon.LoadedVolleyBeginHandle.Active && !Delayed.Pawn.Pending[1]);
+    assert(!Delayed.Weapon.HasLoadedVolley() && !Delayed.Weapon.LoadedVolleyBeginHandle.Active);
     Delayed.Weapon.TestRemaining = 0;
     Delayed.Weapon.TryBeginLoadedVolley();
-    assert(Delayed.Weapon.BeginCalls == 1 && Delayed.Weapon.bLoadedVolleyReleaseSent);
+    assert(Delayed.Weapon.BeginCalls == 0 && !Delayed.Weapon.bLoadedVolleyReleaseSent);
 }
 
 static void TestThirdLoadReleaseCounts()
@@ -559,6 +501,7 @@ static void TestMixedCloseRangeOutcomes()
 
 int main()
 {
+    TestQuickRocketInputs();
     TestServerBeginWhileRocketPending();
     TestServerPendingRocketRelease();
     TestServerPendingRocketAdmissionSafety();
@@ -571,12 +514,12 @@ int main()
     TestHeldAltSwitchRecovery();
     TestOutgoingLauncherAltHandoff();
     TestFirstInputWaitsForOwnership();
-    TestReleaseBeforeOwnershipIsRetained();
+    TestReleaseBeforeOwnershipIsCancelled();
     TestOwnershipInputWindowDoesNotRefresh();
     TestEpochReadyPollBeforeNotify();
     TestRetryInputDoesNotReplaceFreshIntent();
     TestFreshPressAfterExpiredInput();
-    TestBufferedReleaseDoesNotFollowBeginReentry();
+    TestCancelledInputCannotReachLateEntry();
     TestPendingInputInvalidation();
     TestOnlyLocalClientBuffersInput();
     TestPendingInputLifecycleCancellation();

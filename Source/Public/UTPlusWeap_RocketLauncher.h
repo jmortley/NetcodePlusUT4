@@ -435,16 +435,18 @@ protected:
     TArray<FNCLoadedVolleyReceipt> LoadedVolleyReceipts;
     FTimerHandle LoadedRocketReconcileHandle;
     FTimerHandle LoadedVolleyBeginHandle;
-    // Local-only first press/release, before the initial ownership epoch maps.
+    // Local-only held press and mode choice before the initial ownership epoch maps.
     // Separate from PendingFire and the numbered volley so it cannot load early.
     bool bPendingLoadedVolleyInput = false;
-    bool bPendingLoadedVolleyRelease = false;
+    uint8 PendingLoadedVolleyMode = 0;
     double PendingLoadedVolleyInputAt = 0.0;
     TWeakObjectPtr<AUTCharacter> PendingLoadedVolleyPawn;
     TWeakObjectPtr<UWorld> PendingLoadedVolleyWorld;
     TWeakObjectPtr<AController> PendingLoadedVolleyController;
     FTimerHandle PendingLoadedVolleyInputHandle;
     bool CanBeginLoadedVolleyInput();
+    bool TryCycleLoadedVolleyMode();
+    void StartLoadedVolleyInput(uint8 SelectedMode);
     void BufferLoadedVolleyInput();
     void TryDrainLoadedVolleyInput();
     void ClearLoadedVolleyInput();
