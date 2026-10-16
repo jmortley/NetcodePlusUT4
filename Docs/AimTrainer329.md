@@ -96,9 +96,17 @@ increase from 55% to 75% of eligible decisions, and dodge-to-slide choices from
 
 The rear head-peek and high-right platform behavior stays unchanged. The middle
 platform uses the IG evasive decisions at its existing speed. Other scenarios,
-hitboxes, spawn cadence, exposure, scoring, refire and board revisions are
-unchanged. Tests cover the IG-only scope, actual movement decisions and bounded
-dodge/slide paths at the increased speed.
+hitboxes, spawn cadence, exposure, scoring and refire are unchanged. Tests cover
+the IG-only scope, actual movement decisions and bounded dodge/slide paths at the
+increased speed.
+
+**IG pop-up starts fresh revision-21 boards (2026-10-16).** The faster targets
+are a harder run, so IG pop-up alone moves from revision 19 to 21, for fixed and
+movement, local and approved-server boards. Sniper/LG and SACTF pop-up stay on
+revision 19, and Airborne keeps revision 16 despite its longer target lifetime.
+Older IG pop-up scores remain browsable as archived revision-19 results. Deploy
+Django revision-21 support before this plugin build: an older backend rejects a
+revision-21 start, so those runs would only count as practice.
 
 ## Airborne target lifetime (2026-10-12)
 

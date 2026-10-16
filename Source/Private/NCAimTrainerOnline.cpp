@@ -164,6 +164,8 @@ int32 FNCAimTrainerOnline::PresetRevisionForScenario(int32 Scenario)
 {
 	return NCAimTrainerScenarioPolicy::IsDrillScenario(Scenario) ? DrillPresetRevision
 		: NCAimTrainerScenarioPolicy::IsHeadshotScenario(Scenario) ? HeadshotPresetRevision
+		// Faster IG evasion starts fresh IG boards; Sniper/LG and SACTF pop-up keep theirs.
+		: Scenario == NCAimTrainerScenarioId::InstagibPopup ? InstagibPopupPresetRevision
 		: NCAimTrainerScenarioPolicy::IsPopupScenario(Scenario) ? PopupPresetRevision
 		: NCAimTrainerScenarioPolicy::IsAirborneScenario(Scenario) ? AirbornePresetRevision : PresetRevision;
 }
