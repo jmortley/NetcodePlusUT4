@@ -39,7 +39,9 @@ public:
     bool SetTrainerCrouched(bool bCrouch);
     void HideTarget();
     bool IsAvailable() const { return bTrainerVisible; }
-    float GetAppearanceTime() const { return AppearanceTime; }
+    double GetAppearanceTime() const { return AppearanceTime; }
+    /** Engine projectile CreationTime comparisons must stay in the engine world-time domain. */
+    float GetAppearanceWorldTime() const { return AppearanceWorldTime; }
     bool HasCharacterAssets() const;
     void ReverseStrafe();
     void ConfigurePopupStrafe(const FVector& Center, float HalfWidth, float DirectionRoll);
@@ -79,7 +81,7 @@ private:
     float StrafeDirection = 1.0f;
     float StrafeRange = 800.f;
     float WiggleRange = 0.f;
-    float PopupLongStrafeEndTime = 0.f;
+    double PopupLongStrafeEndTime = 0.0;
     bool bRecenterWiggleAfterSlide = false;
     bool bRecenterWiggleAfterDodge = false;
     bool bTrainerDodgeSlidePending = false;
@@ -91,15 +93,17 @@ private:
     bool bPopupEvasion = false;
     bool bPopupNeedsDecision = false;
     FVector TrainerSlideDirection = FVector::ZeroVector;
-    float AppearanceTime = 0.f;
+    double AppearanceTime = 0.0;
+    float AppearanceWorldTime = 0.f;
+    double GetTrainerTimeSeconds() const;
     int32 DrillMovementMode = 0;
     FVector DrillOrigin = FVector::ZeroVector;
     float DrillStrafeSide = 1.f;
     float DrillAdvance = 0.4f;
-    float DrillDodgeBlockedUntil = 0.f;
+    double DrillDodgeBlockedUntil = 0.0;
     bool bDrillWallDodgePending = false;
-    float DrillWallDodgeUntil = 0.f;
-    float NextDrillWallAttempt = 0.f;
+    double DrillWallDodgeUntil = 0.0;
+    double NextDrillWallAttempt = 0.0;
     TWeakObjectPtr<class UStaticMeshComponent> DrillFlagPole;
     TWeakObjectPtr<class UStaticMeshComponent> DrillFlagBanner;
     void TickDrillMovement(float DeltaSeconds);
@@ -111,7 +115,7 @@ private:
         TMap<FName, float> Scalars;
     };
     TArray<FTrainerMaterialTint> TrainerTintMaterials;
-    float NextTrainerTintTime = 0.f;
+    double NextTrainerTintTime = 0.0;
     void UpdateTrainerTint();
     void ResetTargetMovement();
     bool StartTrainerSlide(const FVector& Direction);

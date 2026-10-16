@@ -39,6 +39,8 @@ struct FAnnouncementInfo {
     const UObject* OptionalObject = nullptr;
     float QueueTime = 0.f;
 };
+struct FPlatformTime { static double Now; static double Seconds(){return Now;} };
+double FPlatformTime::Now=20.;
 struct FMath {
     static bool IsFinite(float value) { return std::isfinite(value); }
     static int32 CeilToInt(float value) { return int32(std::ceil(value)); }
@@ -51,6 +53,9 @@ struct FNCAimTrainerProgress { int Phase = 1; float RemainingSeconds = 2.95f; };
 struct ANCAimTrainerPlayerController : UObject {
     bool Local = true, HasWorld = true;
     World TheWorld;
+    int32 LastAnnouncedCountdown=3;
+    double TrainerCountdownQueuedAt=20.;
+    double GetTrainerCountdownAge(int32) const;
     FNCAimTrainerProgress Progress;
     bool IsLocalController() const { return Local; }
     const World* GetWorld() const { return HasWorld ? &TheWorld : nullptr; }
@@ -86,11 +91,12 @@ int main(int argc, char** argv) {
     FAnnouncementInfo incoming;
     incoming.Switch = 3;
     incoming.OptionalObject = &pc;
-    incoming.QueueTime = pc.TheWorld.Now;
+    pc.TrainerCountdownQueuedAt = FPlatformTime::Now;
     if (name == "valid") {
         for (int count : {3, 2, 1}) {
             pc.Progress.RemainingSeconds = float(count) - .05f;
             incoming.Switch = count;
+            pc.LastAnnouncedCountdown = count;
             Require(message.ShouldStillPlay(&gs, incoming), "current local countdown was rejected");
         }
         gs.AllowSpeech = false;
@@ -123,17 +129,26 @@ int main(int argc, char** argv) {
         pc.Progress.Phase = 1;
         for (int count : {-1, 0, 1, 2, 4, 1003}) {
             incoming.Switch = count;
+            pc.LastAnnouncedCountdown = count;
             Require(!message.ShouldStillPlay(&gs, incoming), "wrong spoken count or stock round message admitted");
         }
+    } else if (name == "clock_domains") {
+        pc.TheWorld.Now=5000.f; incoming.QueueTime=5000.f;
+        FPlatformTime::Now=100000000.125; pc.TrainerCountdownQueuedAt=FPlatformTime::Now;
+        FPlatformTime::Now+=.49;
+        Require(message.ShouldStillPlay(&gs,incoming),"old world age rejected fresh local speech");
+        FPlatformTime::Now+=.02;
+        Require(!message.ShouldStillPlay(&gs,incoming),"stale speech survived frozen engine time");
     } else if (name == "stale") {
-        pc.TheWorld.Now = incoming.QueueTime + message.MaxAnnouncementDelay;
+        FPlatformTime::Now = pc.TrainerCountdownQueuedAt + message.MaxAnnouncementDelay;
         Require(message.ShouldStillPlay(&gs, incoming), "fresh queued count expired early");
-        pc.TheWorld.Now += .01f;
+        FPlatformTime::Now += .01;
         Require(!message.ShouldStillPlay(&gs, incoming), "stale count replayed while progress was unchanged");
-        incoming.QueueTime = pc.TheWorld.Now;
+        pc.TrainerCountdownQueuedAt = FPlatformTime::Now;
         pc.Progress.RemainingSeconds = 1.95f;
         Require(!message.ShouldStillPlay(&gs, incoming), "queued 3 played after countdown reached 2");
         incoming.Switch = 2;
+        pc.LastAnnouncedCountdown = 2;
         Require(message.ShouldStillPlay(&gs, incoming), "fresh 2 was rejected after discarding 3");
         pc.Progress.Phase = 0;
         Require(!message.ShouldStillPlay(&gs, incoming), "aborted countdown replayed queued speech");
@@ -145,6 +160,7 @@ int main(int argc, char** argv) {
         FAnnouncementInfo previous;
         for (int count : {3, 2, 1}) {
             incoming.Switch = count;
+            pc.LastAnnouncedCountdown = count;
             Require(!message.IsOptionalSpoken(count), "trainer speech remained optional and interruptible");
             Require(message.GetAnnouncementPriority(incoming) > .8f,
                     "trainer speech stayed behind ordinary reward announcements");
@@ -153,6 +169,7 @@ int main(int argc, char** argv) {
         }
         for (int count : {0, 4, 1003}) {
             incoming.Switch = count;
+            pc.LastAnnouncedCountdown = count;
             Require(!message.InterruptAnnouncement(incoming, previous),
                     "non-trainer count interrupted an announcement");
         }
@@ -180,7 +197,8 @@ class AimTrainerCountdownMessageTests(unittest.TestCase):
             "bool UNCAimTrainerCountdownMessage::ShouldStillPlay",
         )
         source = directory / "trainer_countdown_message.cpp"
-        source.write_text("\n".join([ADAPTER, declaration]
+        controller = (PLUGIN / "Source/Private/NCAimTrainerPlayerController.cpp").read_text()
+        source.write_text("\n".join([ADAPTER, declaration, native_function(controller, "double ANCAimTrainerPlayerController::GetTrainerCountdownAge")]
             + [native_function(native, signature) for signature in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_countdown_message.exe" if os.name == "nt" else "trainer_countdown_message")
         if msvc:
@@ -195,6 +213,8 @@ class AimTrainerCountdownMessageTests(unittest.TestCase):
     def run_case(self, name):
         result = subprocess.run([str(self.executable), name], env=self.environment, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_queue_age_uses_monotonic_precision_at_large_world_age(self): self.run_case("clock_domains")
 
     def test_current_local_count_and_base_policy_are_respected(self): self.run_case("valid")
     def test_only_a_valid_local_trainer_owner_can_play(self): self.run_case("owner")

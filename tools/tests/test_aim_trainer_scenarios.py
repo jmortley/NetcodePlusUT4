@@ -28,8 +28,8 @@ constexpr int INDEX_NONE = -1;
 constexpr float PI = 3.14159265358979323846f;
 struct FMath {
     static bool IsFinite(float value) { return std::isfinite(value); }
-    static bool IsNearlyEqual(float a, float b) { return std::fabs(a - b) <= .0001f; }
-    static float Max(float a, float b) { return a > b ? a : b; }
+    static bool IsNearlyEqual(double a, double b) { return std::fabs(a - b) <= .0001f; }
+    template<class T> static T Max(T a,T b) { return a > b ? a : b; }
     static float Cos(float v) { return std::cos(v); }
     static float Sin(float v) { return std::sin(v); }
     static float Atan2(float y,float x) { return std::atan2(y,x); }
@@ -150,7 +150,7 @@ struct ANCAimTrainerGame {
         int Phase = 1, Scenario = 2, TargetsExpired = 0, Hits = 0, Headshots = 0;
         float RemainingSeconds = 3.f;
     } Progress;
-    struct World { float Now = 10.f; float GetTimeSeconds() const { return Now; } } TheWorld;
+    struct World { double Now = 10.0; float GetTimeSeconds() const { return float(Now); } } TheWorld;
     struct {
         float Roll = .5f;
         bool Random=false;
@@ -164,19 +164,22 @@ struct ANCAimTrainerGame {
     AUTWeapon* RunWeapon = nullptr;
     TArray<ANCAimTrainerTarget*> Targets;
     FVector ArenaOrigin;
-    float PhaseStartedAt = 0.f, LastTraceTime = 0.f, NextDirectionTime = 0.f, NextDodgeTime = 0.f;
-    float NextPopupTime = 0.f, PopupRefireSeconds = 1.f, ShotStatBaseline = 0.f;
-    float NextPopupSlideTime[NCAimTrainerLayout::TargetCount] = {};
-    float NextPopupLongStrafeTime[NCAimTrainerLayout::TargetCount] = {};
-    float NextPopupDodgeTime[NCAimTrainerLayout::TargetCount] = {};
+    double PhaseStartedAt = 0.0, LastTraceTime = 0.0, NextDirectionTime = 0.0, NextDodgeTime = 0.0;
+    float PhaseStartedWorldAt=0.f;
+    double GetTrainerTimeSeconds() const { return TheWorld.Now; }
+    double NextPopupTime = 0.0;
+    float PopupRefireSeconds = 1.f, ShotStatBaseline = 0.f;
+    double NextPopupSlideTime[NCAimTrainerLayout::TargetCount] = {};
+    double NextPopupLongStrafeTime[NCAimTrainerLayout::TargetCount] = {};
+    double NextPopupDodgeTime[NCAimTrainerLayout::TargetCount] = {};
     int PopupSpawnVariants[NCAimTrainerLayout::TargetCount] = {};
     int PopupDodgeActions[NCAimTrainerLayout::TargetCount] = {};
-    float NextTrackingSlideTime = 0.f;
-    float NextTargetTime[NCAimTrainerLayout::TargetCount] = {}, TargetExpiry[NCAimTrainerLayout::TargetCount] = {};
-    float NextWiggleTime[NCAimTrainerLayout::TargetCount] = {};
+    double NextTrackingSlideTime = 0.f;
+    double NextTargetTime[NCAimTrainerLayout::TargetCount] = {}, TargetExpiry[NCAimTrainerLayout::TargetCount] = {};
+    double NextWiggleTime[NCAimTrainerLayout::TargetCount] = {};
     float PopupLastMoveHold[NCAimTrainerLayout::TargetCount] = {};
-    TArray<float> NextCrouchTime = TArray<float>(NCAimTrainerLayout::TargetCount, 0.f);
-    TArray<float> CrouchEndTime = TArray<float>(NCAimTrainerLayout::TargetCount, 0.f);
+    TArray<double> NextCrouchTime = TArray<double>(NCAimTrainerLayout::TargetCount, 0.f);
+    TArray<double> CrouchEndTime = TArray<double>(NCAimTrainerLayout::TargetCount, 0.f);
     bool bRankedRun = true;
     std::string UnrankedReason;
     World* GetWorld() { return &TheWorld; }
@@ -192,20 +195,20 @@ struct ANCAimTrainerGame {
     void ClearTrainerProjectiles() {}
     bool IsAtAirborneHazard(const ANCAimTrainerTarget*) const { return false; }
     bool IsCurrentRocketDamage(const ANCAimTrainerTarget*,const FDamageEvent&,AActor*) const { return false; }
-    void UpdateAirborneTargets(float) {}
+    void UpdateAirborneTargets(double) {}
     NCAimTrainerDrillPolicy::FAttempt Drill;
     int FlakAttemptShot=0;
-    float PendingFlakHitDamage=0.f, FlakHitFeedbackAt=0.f;
+    float PendingFlakHitDamage=0.f; double FlakHitFeedbackAt=0.0;
     FVector FlakHitFeedbackLocation;
     struct { void Empty() {} } FlakPellets;
-    void UpdateDrillTargets(float) {}
+    void UpdateDrillTargets(double) {}
     float RecordDrillHit(ANCAimTrainerTarget*,float,const FDamageEvent&,AActor*) { return 0.f; }
     void HideAllTargets();
-    void ActivateSlot(int32, float);
-    void UpdateTargets(float);
-    void UpdatePopupDodger(float);
-    void ChoosePopupMovement(int32,float);
-    void UpdateTrackingMovement(float);
+    void ActivateSlot(int32, double);
+    void UpdateTargets(double);
+    void UpdatePopupDodger(double);
+    void ChoosePopupMovement(int32,double);
+    void UpdateTrackingMovement(double);
     float RecordTargetHit(ANCAimTrainerTarget*, float, const FDamageEvent&, AController*, AActor*);
 };
 struct Fixture {
@@ -222,7 +225,7 @@ struct Fixture {
         for (auto& target : Targets) target.InstagibProfile = Game.Progress.Scenario == 2;
         Game.BeginActiveRun();
     }
-    void At(float now) { Game.TheWorld.Now = now; Game.UpdateTargets(now); }
+    void At(double now) { Game.TheWorld.Now = now; Game.UpdateTargets(now); }
     float Hit(int slot) { return Game.RecordTargetHit(&Targets[slot], 100.f, FDamageEvent(), &Player, &Gun); }
     // Count timed seats only; persistent popup slots have separate lifecycle checks.
     int Activations() const {
@@ -316,7 +319,7 @@ void InitialSpawn() {
     f.At(10.f);
     Require(f.Visible() == 1 && f.Activations() == 1 && f.Targets[2].Visible,
             "initial popup burst or random eligible slot selection lost");
-    const float next = f.Game.NextPopupTime;
+    const double next = f.Game.NextPopupTime;
     Require(next > 11.f && next < 11.11f, "first spawn deadline ignores one-second refire");
     f.At(10.25f); f.At(10.5f); f.At(11.f); f.At(next - .001f);
     Require(f.Activations() == 1, "initial slots retain quarter-second burst");
@@ -330,7 +333,7 @@ void InitialSpawn() {
 }
 void Replacements() {
     Fixture hit; hit.Start(); hit.At(10.f);
-    const float afterHit = hit.Game.NextPopupTime;
+    const double afterHit = hit.Game.NextPopupTime;
     hit.At(10.1f);
     Require(hit.Hit(1) > 0.f && hit.Game.Progress.Hits == 1 && !hit.Targets[1].Visible,
             "fixture hit did not retire target through production hit method");
@@ -340,7 +343,7 @@ void Replacements() {
     Require(hit.Activations() == 2 && hit.Targets[1].Activations == 2, "hit slot not reusable at deadline");
 
     Fixture expiry; expiry.Start(); expiry.At(10.f);
-    const float afterExpiry = expiry.Game.NextPopupTime;
+    const double afterExpiry = expiry.Game.NextPopupTime;
     // Expiring early isolates the scheduler from the policy's longer exposure.
     expiry.Game.TargetExpiry[1] = afterExpiry - .1f;
     expiry.At(afterExpiry - .1f);
@@ -372,14 +375,14 @@ void HeadshotSlots() {
     f.At(10.75f); f.At(11.f);
     Require(f.Visible() == 5, "expanded headshot stations were not activated");
     Require(f.Hit(0) > 0.f && f.Game.Progress.Headshots == 1, "headshot not accepted");
-    const float respawn = f.Game.NextTargetTime[0];
+    const double respawn = f.Game.NextTargetTime[0];
     Require(FMath::IsNearlyEqual(respawn, 11.35f), "headshot hit delay changed");
     f.At(respawn - .001f); Require(f.Activations() == 5, "headshot hit respawn appeared early");
     f.At(respawn); Require(f.Activations() == 5 && !f.Targets[0].Visible, "cleared headshot station refilled before the line was cleared");
     f.Game.TargetExpiry[1] = respawn;
     f.At(respawn);
     Require(!f.Targets[1].Visible && f.Game.Progress.TargetsExpired == 1, "headshot expiry not retired");
-    const float expiryRespawn = f.Game.NextTargetTime[1];
+    const double expiryRespawn = f.Game.NextTargetTime[1];
     Require(expiryRespawn >= respawn + .25f && expiryRespawn <= respawn + .65f, "headshot expiry hide interval changed");
     f.At(expiryRespawn); Require(f.Targets[1].Activations == 2, "headshot expiry respawn blocked");
     Require(!f.Targets[0].Visible, "another station expiring unlocked a cleared headshot seat");
@@ -393,9 +396,9 @@ void HeadshotLineClear() {
                 && f.Game.HeadshotClearedSlots == 0, "body hit advanced the headshot wave");
         Require(f.Hit(0) > 0.f && f.Hit(0) == 0.f, "headshot appearance did not score exactly once");
         for (int pass = 0; pass < 3; ++pass) {
-            const float expiry = f.Game.TargetExpiry[1];
+            const double expiry = f.Game.TargetExpiry[1];
             f.At(expiry);
-            float latest = 0.f;
+            double latest = 0.0;
             for (int slot = 1; slot < 5; ++slot) latest = std::max(latest, f.Game.NextTargetTime[slot]);
             f.At(latest);
             f.Game.ActivateSlot(0, latest); // Direct activation must respect the same lock.
@@ -406,7 +409,7 @@ void HeadshotLineClear() {
         f.At(f.Game.TheWorld.Now + .36f);
         Require(f.Visible() == 1 && f.Targets[0].Activations == 1, "partial line reset before the final headshot");
         Require(f.Hit(2) > 0.f && f.Visible() == 0, "last headshot failed to clear the line");
-        const float refill = f.Game.TheWorld.Now + .35f;
+        const double refill = f.Game.TheWorld.Now + .35f;
         f.At(refill - .001f); Require(f.Visible() == 0, "new line refilled before its short pause");
         f.At(refill); Require(f.Visible() == 5 && f.Game.Progress.Hits == 5, "full line did not reopen all five seats");
         Require(f.Hit(2) > 0.f, "new wave kept the previous wave's lock");
@@ -478,7 +481,7 @@ void LayoutAndWiggles() {
                 Require(target.Wiggles == 1 && FMath::IsNearlyEqual(target.WiggleRange,range) && !target.Strafing,
                         "precision target did not start its authored wiggle");
                 const float hold=scenario==2 && NCAimTrainerScenarioPolicy::HasPopupEvasion(slot)
-                    ?NCAimTrainerScenarioPolicy::PopupMoveHoldSeconds(roll,roll,0.f)
+                    ?NCAimTrainerScenarioPolicy::InstagibPopupMoveHoldSeconds(roll,roll,0.f)
                     :NCAimTrainerScenarioPolicy::WiggleHoldSeconds(roll);
                 Require(FMath::IsNearlyEqual(f.Game.NextWiggleTime[slot],10.f+hold),
                         "initial wiggle decision deadline lost");
@@ -508,7 +511,7 @@ void LayoutAndWiggles() {
             }
             f.Game.NextPopupTime = 10000.f;
             const int wiggleSlot=scenario==2?3:0;
-            const float reverseAt = f.Game.NextWiggleTime[wiggleSlot];
+            const double reverseAt = f.Game.NextWiggleTime[wiggleSlot];
             const int initialReversals = f.Targets[wiggleSlot].Reversals;
             f.At(reverseAt - .001f);
             Require(f.Targets[wiggleSlot].Reversals == initialReversals, "wiggle reversed before deadline");
@@ -546,13 +549,13 @@ void CrouchScenarioScope() {
 }
 void CrouchOncePerAppearance() {
     Fixture f; f.Game.Schedule.SlotChoice=2; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
-    const float due=f.Game.NextCrouchTime[3];
+    const double due=f.Game.NextCrouchTime[3];
     f.At(due-.001f);
     Require(!f.Targets[3].Crouched && f.Targets[3].CrouchRequests==0,"target crouched before deadline");
     f.At(due);
     Require(f.Targets[3].Crouched && f.Targets[3].CrouchRequests==1 && f.Game.NextCrouchTime[3]==0.f,
             "due crouch was missed or left a repeating request");
-    const float end=f.Game.CrouchEndTime[3];
+    const double end=f.Game.CrouchEndTime[3];
     Require(end>=due+.25f && end<=due+.45f,"crouch hold outside its brief exposure interruption");
     f.At(end-.001f); Require(f.Targets[3].Crouched,"target stood before hold ended");
     f.At(end);
@@ -562,7 +565,7 @@ void CrouchOncePerAppearance() {
     Require(f.Targets[3].CrouchRequests==1 && f.Targets[3].StandRequests==1,"appearance repeated its crouch/stand");
     Fixture failed; failed.Game.Schedule.SlotChoice=2; failed.Start(); failed.At(10.f); failed.Game.NextPopupTime=10000.f;
     failed.Targets[3].CanCrouch=false;
-    const float failAt=failed.Game.NextCrouchTime[3]; failed.At(failAt); failed.At(failAt+.1f);
+    const double failAt=failed.Game.NextCrouchTime[3]; failed.At(failAt); failed.At(failAt+.1f);
     Require(failed.Targets[3].CrouchRequests==1 && failed.Game.CrouchEndTime[3]==0.f,
             "failed crouch was retried or created a bogus standing deadline");
 }
@@ -570,10 +573,10 @@ void CrouchExpiryGuard() {
     for (float refire:{1.f,1.5f,2.f}) {
         for (float margin:{-.001f,.001f}) {
             Fixture f; f.Gun.Refire=refire; f.Game.Schedule.SlotChoice=2; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
-            const float due=f.Game.NextCrouchTime[3];
+            const double due=f.Game.NextCrouchTime[3];
             const float hold=NCAimTrainerScenarioPolicy::CrouchHoldSeconds(f.Game.Schedule.Roll);
             f.Game.TargetExpiry[3]=due+hold+refire+.1f+margin;
-            const float expiry=f.Game.TargetExpiry[3];
+            const double expiry=f.Game.TargetExpiry[3];
             f.At(due);
             const bool allowed=margin>0.f;
             Require(f.Targets[3].Crouched==allowed && f.Targets[3].CrouchRequests==(allowed?1:0),
@@ -591,7 +594,7 @@ void CrouchExpiryGuard() {
 void BlockedStandingRetry() {
     Fixture f; f.Game.Schedule.SlotChoice=2; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
     f.At(f.Game.NextCrouchTime[3]);
-    const float end=f.Game.CrouchEndTime[3]; f.Targets[3].CanStand=false;
+    const double end=f.Game.CrouchEndTime[3]; f.Targets[3].CanStand=false;
     f.At(end); f.At(end+.02f);
     Require(f.Targets[3].Crouched && f.Game.CrouchEndTime[3]==end && f.Targets[3].StandRequests==2,
             "blocked native uncrouch lost its retry deadline");
@@ -633,7 +636,7 @@ void PersistentDodgerStartsAndDoesNotExpire() {
     for(int i=0;i<PopupSlotCount;++i) f.At(f.Game.NextPopupTime);
     Require(f.Visible()==PopupSlotCount-1 && target.Visible, "six simultaneous instagib targets cannot be displayed");
     // Isolate the persistent slot from timed target expiry and stale requests.
-    const float popupDeadline=f.Game.NextPopupTime;
+    const double popupDeadline=f.Game.NextPopupTime;
     f.Game.NextCrouchTime[PopupDodgerSlot]=10.1f; f.Game.CrouchEndTime[PopupDodgerSlot]=10.2f;
     f.Game.UpdatePopupDodger(69.99f);
     Require(target.Visible && target.Activations==1 && target.Hides==0 && f.Game.Progress.TargetsExpired==0,
@@ -644,7 +647,7 @@ void PersistentDodgerStartsAndDoesNotExpire() {
 void PersistentDodgerRefillsWithoutConsumingPopupCadence() {
     using namespace NCAimTrainerLayout;
     Fixture f; f.Start(); f.At(10.f);
-    const float deadline=f.Game.NextPopupTime;
+    const double deadline=f.Game.NextPopupTime;
     auto& target=f.Targets[PopupDodgerSlot];
     f.Game.TheWorld.Now=10.1f;
     Require(f.Hit(PopupDodgerSlot)>0.f && f.Game.Progress.Hits==1 && !target.Visible,
@@ -668,14 +671,14 @@ void PersistentDodgerRefillsWithoutConsumingPopupCadence() {
 void PersistentDodgerCadenceAndNativeRejection() {
     Fixture f; f.Game.Progress.Scenario=3; f.Gun.Refire=1.3f; f.Start();
     auto& target=f.Targets[5];
-    const float due=f.Game.NextWiggleTime[5];
+    const double due=f.Game.NextWiggleTime[5];
     const int starts=target.TravelDecisions,dodges=target.PopupDodgeAttempts;
     f.Game.UpdatePopupDodger(due-.001f);
     Require(target.TravelDecisions==starts,"persistent decision fired before its own deadline");
     target.CanTravel=false; f.Game.UpdatePopupDodger(due);
     Require(target.TravelDecisions==starts && target.PopupDodgeAttempts==dodges
         && f.Game.NextWiggleTime[5]>due,"native movement ownership did not defer both walk and dodge decisions");
-    const float retry=f.Game.NextWiggleTime[5];
+    const double retry=f.Game.NextWiggleTime[5];
     f.Game.UpdatePopupDodger(retry-.001f);
     Require(target.PopupDodgeAttempts==dodges,"busy movement was retried every frame");
     target.CanTravel=true; target.CanDodge=false;
@@ -759,8 +762,8 @@ void PopupTravelLifecycle() {
                 "evasion area lost arena-relative safe geometry");
         };
         Require(target.TravelDecisions==before+1 && target.Reversals==0,"spawn failed to select free movement"); check();
-        const float due=f.Game.NextWiggleTime[slot];
-        Require(due>=10.22f && due<=11.601f,"decision cannot mix feints with committed runs");
+        const double due=f.Game.NextWiggleTime[slot];
+        Require(due>=10.21999 && due<=11.601,"decision cannot mix feints with committed runs");
         target.CanTravel=false; f.Game.ChoosePopupMovement(slot,due);
         Require(target.TravelDecisions==before+1 && f.Game.NextWiggleTime[slot]>due,"busy native action was ignored");
         target.CanTravel=true; target.Velocity=FVector(650,-240,0);
@@ -779,7 +782,7 @@ void PopupTravelLifecycle() {
         "persistent targets share a movement timer");
     f.Game.NextWiggleTime[0]=99.f; f.Game.UpdatePopupDodger(12.01f);
     Require(left.TravelDecisions==2 && front.TravelDecisions==2,"foreground decision rescheduled left target");
-    const float nextFront=f.Game.NextWiggleTime[5],spawnDeadline=f.Game.NextPopupTime;
+    const double nextFront=f.Game.NextWiggleTime[5],spawnDeadline=f.Game.NextPopupTime;
     Require(f.Hit(0)>0,"left hit did not score"); f.Game.UpdatePopupDodger(12.02f);
     Require(left.Activations==2 && left.Visible && f.Game.TargetExpiry[0]==70.f && f.Game.NextWiggleTime[0]>12.02f,
         "left target did not refill with fresh movement");
@@ -805,7 +808,7 @@ void UpperPlatformSlideOnceAndReuse() {
     for (bool accepted : {false, true}) {
         Fixture f; f.Game.Schedule.Roll=.1f; f.Start(); f.Game.NextPopupTime = 10000.f;
         f.Game.ActivateSlot(PopupSliderSlot, 10.f); f.Targets[PopupSliderSlot].CanSlide = accepted;
-        const float due = f.Game.NextPopupSlideTime[NCAimTrainerLayout::PopupSliderSlot];
+        const double due = f.Game.NextPopupSlideTime[NCAimTrainerLayout::PopupSliderSlot];
         f.At(due - .001f);
         Require(f.Targets[PopupSliderSlot].SlideAttempts == 0, "slide started before its deadline");
         f.At(due); f.At(due + .1f); f.At(due + .8f);
@@ -814,14 +817,14 @@ void UpperPlatformSlideOnceAndReuse() {
         Require(f.Hit(PopupSliderSlot) > 0.f && !f.Targets[PopupSliderSlot].Visible,
                 "slider stopped accepting normal instagib hits");
         f.Game.ActivateSlot(PopupSliderSlot, due + 1.f);
-        const float next = f.Game.NextPopupSlideTime[NCAimTrainerLayout::PopupSliderSlot];
+        const double next = f.Game.NextPopupSlideTime[NCAimTrainerLayout::PopupSliderSlot];
         Require(next > due + 1.f, "reused target retained previous slide deadline");
         f.At(next);
         Require(f.Targets[PopupSliderSlot].SlideAttempts == 2, "new appearance did not regain its slide");
     }
     Fixture hidden; hidden.Game.Schedule.Roll=.1f; hidden.Start(); hidden.Game.NextPopupTime = 10000.f;
     hidden.Game.ActivateSlot(PopupSliderSlot, 10.f);
-    const float due = hidden.Game.NextPopupSlideTime[NCAimTrainerLayout::PopupSliderSlot];
+    const double due = hidden.Game.NextPopupSlideTime[NCAimTrainerLayout::PopupSliderSlot];
     hidden.Hit(PopupSliderSlot); hidden.At(due);
     Require(hidden.Targets[PopupSliderSlot].SlideAttempts == 0, "hidden target attempted a queued slide");
 }
@@ -832,10 +835,10 @@ void UpperPlatformSlideExpiryAndRoundGuard() {
             for (float remaining : {refire + .99f, refire + 1.01f}) {
                 Fixture f; f.Gun.Refire = refire; f.Game.Schedule.Roll=.1f; f.Start(); f.Game.NextPopupTime = 10000.f;
                 f.Game.ActivateSlot(PopupSliderSlot, 10.f);
-                const float due = f.Game.NextPopupSlideTime[NCAimTrainerLayout::PopupSliderSlot];
+                const double due = f.Game.NextPopupSlideTime[NCAimTrainerLayout::PopupSliderSlot];
                 if (roundLimit) f.Game.PhaseStartedAt = due + remaining - 60.f;
                 else f.Game.TargetExpiry[PopupSliderSlot] = due + remaining;
-                const float expiry = f.Game.TargetExpiry[PopupSliderSlot];
+                const double expiry = f.Game.TargetExpiry[PopupSliderSlot];
                 f.At(due); f.At(due + .1f);
                 Require(f.Targets[PopupSliderSlot].SlideAttempts == int(remaining > refire + 1.f),
                         "slide failed to preserve native duration and next rifle shot before deadline");
@@ -851,7 +854,7 @@ void TrackingSlideCadenceAndScope() {
         f.Game.NextTrackingSlideTime = 900.f;
         f.Start(); f.At(10.f);
         f.Game.NextCrouchTime[0] = 10000.f; // Isolate slide cadence from the independent crouch scheduler.
-        const float due = f.Game.NextTrackingSlideTime;
+        const double due = f.Game.NextTrackingSlideTime;
         Require(due >= 14.f && due <= 17.f, "tracking slide did not receive a fresh varied deadline");
         f.Game.UpdateTrackingMovement(due - .001f);
         Require(f.Targets[0].TrackingSlideAttempts == 0, "tracking slide started early");
@@ -864,7 +867,7 @@ void TrackingSlideCadenceAndScope() {
         Require(f.Targets[0].TrackingSlideAttempts == 1, "rejected slide retried every tick");
         f.Targets[0].CanSlide = true;
         f.Game.UpdateTrackingMovement(f.Game.NextTrackingSlideTime);
-        const float next = f.Game.NextTrackingSlideTime;
+        const double next = f.Game.NextTrackingSlideTime;
         Require(f.Targets[0].TrackingSlides == 1 && next >= due + 4.19f && next <= due + 7.21f,
                 "successful slide did not restore occasional cadence");
         f.Game.UpdateTrackingMovement(next + 10.f);
@@ -901,13 +904,13 @@ void TrackingCrouchPolicyAndCadence() {
         Fixture f; f.Game.Progress.Scenario = 0; f.Game.Schedule.Roll = roll; f.Start(); f.At(10.f);
         f.Game.NextTrackingSlideTime = f.Game.NextDodgeTime = 10000.f;
         const float delay = 6.f + 4.f * roll, hold = .2f + .25f * roll;
-        const float due = f.Game.NextCrouchTime[0];
+        const double due = f.Game.NextCrouchTime[0];
         Require(std::fabs(due - 10.f - delay) < .001f && f.Game.CrouchEndTime[0] == 0.f,
                 "first tracking crouch was not scheduled from activation with varied delay");
         f.Game.UpdateTrackingMovement(due - .001f);
         Require(f.Targets[0].CrouchRequests == 0, "tracking target crouched early");
         f.Game.UpdateTrackingMovement(due);
-        const float end = f.Game.CrouchEndTime[0];
+        const double end = f.Game.CrouchEndTime[0];
         Require(f.Targets[0].Crouched && f.Targets[0].CrouchRequests == 1
                 && f.Game.NextCrouchTime[0] == 0.f && std::fabs(end - due - hold) < .001f,
                 "tracking crouch missed its brief hold or repeated its start request");
@@ -917,7 +920,7 @@ void TrackingCrouchPolicyAndCadence() {
         Require(!f.Targets[0].Crouched && f.Game.CrouchEndTime[0] == 0.f
                 && std::fabs(f.Game.NextCrouchTime[0] - end - delay) < .001f,
                 "successful standing did not schedule another independently delayed crouch");
-        const float next = f.Game.NextCrouchTime[0];
+        const double next = f.Game.NextCrouchTime[0];
         f.Game.UpdateTrackingMovement(next + 10.f);
         Require(f.Targets[0].CrouchRequests == 2 && f.Targets[0].StandRequests == 1
                 && std::fabs(f.Game.CrouchEndTime[0] - next - 10.f - hold) < .001f,
@@ -927,7 +930,7 @@ void TrackingCrouchPolicyAndCadence() {
 void TrackingCrouchRetryAndConflicts() {
     Fixture f; f.Game.Progress.Scenario = 0; f.Start(); f.At(10.f);
     f.Game.NextTrackingSlideTime = f.Game.NextDodgeTime = 10000.f;
-    const float due = f.Game.NextCrouchTime[0];
+    const double due = f.Game.NextCrouchTime[0];
     f.Targets[0].CanCrouch = false;
     f.Game.UpdateTrackingMovement(due);
     Require(f.Targets[0].CrouchRequests == 1 && !f.Targets[0].Crouched && f.Game.CrouchEndTime[0] == 0.f
@@ -935,7 +938,7 @@ void TrackingCrouchRetryAndConflicts() {
             "native airborne/slide rejection lost the bounded crouch retry");
     f.Game.UpdateTrackingMovement(due + .1f);
     Require(f.Targets[0].CrouchRequests == 1, "blocked crouch retried every tick");
-    const float retry = f.Game.NextCrouchTime[0];
+    const double retry = f.Game.NextCrouchTime[0];
     f.Targets[0].CanCrouch = true;
     f.Game.NextTrackingSlideTime = f.Game.NextDodgeTime = f.Game.NextDirectionTime = retry;
     f.Game.UpdateTrackingMovement(retry);
@@ -948,7 +951,7 @@ void TrackingCrouchRetryAndConflicts() {
     Require(f.Targets[0].Reversals == reversals + 1 && f.Targets[0].TrackingSlideAttempts == 0
             && f.Targets[0].DodgeAttempts == 0,
             "holding crouch stopped A/D reversals or allowed another movement action");
-    const float end = f.Game.CrouchEndTime[0];
+    const double end = f.Game.CrouchEndTime[0];
     f.Targets[0].CanStand = false;
     f.Game.UpdateTrackingMovement(end); f.Game.UpdateTrackingMovement(end + .02f);
     Require(f.Targets[0].Crouched && f.Targets[0].StandRequests == 2 && f.Game.CrouchEndTime[0] == end
@@ -1094,11 +1097,11 @@ void PopupDodgeScheduling() {
         f.Game.ActivateSlot(slot,10.f); f.Game.TargetExpiry[slot]=70.f;
         auto& target=f.Targets[slot]; target.Velocity=FVector(650,0,0);
         int groundOnly=0,forward=0,backward=0,left=0,right=0,slides=0,continued=0,reversed=0;
-        float previousHold=0.f;
+        double previousHold=0.0;
         for(int step=0;step<100;++step) {
             const float now=10.f+step*.4f; const int before=target.PopupDodgeAttempts;
             f.Game.ChoosePopupMovement(slot,now);
-            const float hold=f.Game.NextWiggleTime[slot]-now;
+            const double hold=f.Game.NextWiggleTime[slot]-now;
             Require(!(previousHold>0.f && previousHold<.4f && hold<.4f),"short feints repeat without meaningful travel");
             previousHold=hold;
             continued+=int(target.Destination.X>.5f); reversed+=int(target.Destination.X<-.5f);
@@ -1122,7 +1125,7 @@ void PopupDodgeDeadlineAndReuse() {
         const float required=(roll<.12f?2.05f:1.05f)+f.Game.PopupRefireSeconds;
         if(roundEnd) f.Game.PhaseStartedAt=due+required+margin-60.f;
         else f.Game.TargetExpiry[4]=due+required+margin;
-        const float expiry=f.Game.TargetExpiry[4]; const int before=f.Targets[4].PopupDodgeAttempts;
+        const double expiry=f.Game.TargetExpiry[4]; const int before=f.Targets[4].PopupDodgeAttempts;
         f.Game.ChoosePopupMovement(4,due);
         Require(f.Targets[4].PopupDodgeAttempts==before+int(margin>0.f),
             "dodge did not reserve native motion plus one rifle refire before expiry/end");
@@ -1136,10 +1139,62 @@ void PopupDodgeDeadlineAndReuse() {
     Require(f.Targets[4].PopupDodgeAttempts==before && f.Game.PopupLastMoveHold[4]>.9f
         && f.Game.NextPopupDodgeTime[4]==0.f,"new long run inherited an old dodge or short-hold history");
 }
+void InstagibEvasionScope() {
+    Fixture f;
+    // Reuse the same actors while changing modes to catch a speed boost that
+    // survives preset changes. Native confined seats remain at their old speed.
+    for(int scenario:{2,3,5,2,1,4,0,6}) {
+        f.Game.HideAllTargets(); f.Game.Progress.Scenario=scenario;
+        f.Gun.Refire=scenario==3?1.3f:(scenario==4||scenario==5)?.7f:1.f;
+        f.Start();
+        const int count=NCAimTrainerScenarioPolicy::IsTrackingScenario(scenario)?1:scenario==1||scenario==4?5:6;
+        for(int slot=0;slot<count;++slot) {
+            f.Game.ActivateSlot(slot,10.0);
+            const float expected=scenario==6?1.3f:scenario==2&&(slot==0||slot==4||slot==5)?1.2f:1.f;
+            Require(FMath::IsNearlyEqual(f.Targets[slot].SpeedScale,expected),
+                "IG speed boost escaped open-floor slots or survived another preset");
+        }
+    }
+}
+void InstagibCutsAndDodges() {
+    for(int scenario:{2,3,5}) {
+        Fixture f; f.Game.Progress.Scenario=scenario; f.Game.Schedule.Roll=.65f;
+        f.Gun.Refire=scenario==3?1.3f:scenario==5?.7f:1.f; f.Start();
+        f.Game.ActivateSlot(0,10.0); f.Game.TargetExpiry[0]=70.0;
+        auto& target=f.Targets[0]; target.Velocity=FVector(650.f,0.f,0.f);
+        const int before=target.PopupDodgeAttempts;
+        f.Game.ChoosePopupMovement(0,11.0);
+        Require(target.PopupDodgeAttempts==before+(scenario==2?1:0),
+            "IG's added dodge opportunity missing or leaked to sniper/SACTF");
+        const float degrees=scenario==2?55.f+70.f*.65f:50.f+60.f*.65f;
+        Require(FMath::IsNearlyEqual(target.Destination.X,std::cos(degrees*PI/180.f))
+            &&FMath::IsNearlyEqual(target.Destination.Y,std::sin(degrees*PI/180.f)),
+            "production decision did not select the intended harder cross-direction cut");
+        f.Game.Schedule.Roll=.15f; f.Game.PopupLastMoveHold[0]=0.f;
+        f.Game.ChoosePopupMovement(0,12.0);
+        Require(target.LastDodgeSlide==(scenario==2),"added IG dodge-to-slide opportunity escaped its preset");
+        const double shortHold=f.Game.NextWiggleTime[0]-12.0;
+        Require(shortHold>=.22 && shortHold<.4,"isolated feint disappeared");
+        f.Game.ChoosePopupMovement(0,13.0);
+        Require(f.Game.NextWiggleTime[0]-13.0>=.4,"tiny A/D decisions chained instead of meaningful travel");
+        f.Game.Schedule.Roll=.95f; f.Game.ChoosePopupMovement(0,14.0);
+        Require(f.Game.NextWiggleTime[0]-14.0>=.9,"harder evasion removed genuinely long runs");
+    }
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required");
     const std::string name(argv[1]);
-    if (name == "instagib_patterns") {
+    if (name == "aged_start_anchor") {
+        Fixture f; const double now=5000.123456789;
+        f.Game.TheWorld.Now=now; f.Start();
+        Require(f.Game.PhaseStartedAt==now && f.Game.LastTraceTime==now
+            &&f.Game.GetTrainerTimeSeconds()==now,
+            "new run rounded its phase/sample anchor or reset the persistent trainer clock");
+        Require(f.Game.PhaseStartedWorldAt==float(now),"rocket creation-time anchor left the engine clock domain");
+    }
+    else if (name == "instagib_speed_scope") InstagibEvasionScope();
+    else if (name == "instagib_harder_evasion") InstagibCutsAndDodges();
+    else if (name == "instagib_patterns") {
         using namespace NCAimTrainerScenarioPolicy;
         int shortCount=0,mediumCount=0,longCount=0,continued=0;
         for(int sample=0;sample<1000;++sample) {
@@ -1202,7 +1257,7 @@ int main(int argc, char** argv) {
             f.Start(); f.Game.ActivateSlot(0,10.f);
             const float expected=(scenario==1||scenario==4)?1.15f:1.f;
             Require(std::abs(f.Targets[0].HeadScale-expected)<.0001f,"headshot boost leaked or missing");
-            Require(f.Targets[0].SpeedScale==1.f,"hard Link speed leaked into precision mode");
+            Require(f.Targets[0].SpeedScale==(scenario==2?1.2f:1.f),"movement speed profile escaped its scenario");
         }
     }
     else if (name == "strafe") StrafeMix();
@@ -1279,6 +1334,10 @@ class AimTrainerScenarioTests(unittest.TestCase):
     def run_case(self, name):
         result = subprocess.run([str(self.executable), name], env=self.environment, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_start_anchors_to_the_precise_clock_without_resetting_it(self): self.run_case("aged_start_anchor")
+    def test_ig_speed_boost_is_limited_to_open_floor_targets_and_resets(self): self.run_case("instagib_speed_scope")
+    def test_ig_uses_harder_cuts_more_dodges_without_chained_ad_spam(self): self.run_case("instagib_harder_evasion")
 
     def test_headshot_lines_require_all_five_hits_and_expiries_cannot_unlock_cleared_seats(self): self.run_case("headshot_line")
 

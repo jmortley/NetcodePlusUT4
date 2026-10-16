@@ -242,6 +242,8 @@ struct ANCAimTrainerPlayerController : AUTPlayerController {
     uint8 LastPresentedPhase = 255;
     uint8 LastPresentedScenario = 255;
     int32 LastAnnouncedCountdown = 4;
+    double TrainerCountdownQueuedAt=0.;
+    double GetTrainerCountdownAge(int32) const;
     MockAnnouncer* Announcer = nullptr;
     bool bLastPresentedMovementPractice = false;
     bool bTrackingPrimaryHeld = false, bTrackingAltHeld = false;
@@ -736,6 +738,10 @@ void CountdownAudio() {
         for (float seconds : {2.99f,2.9f,2.1f,2.f,1.9f,1.f,.1f}) present(1,seconds);
         Require(selected.Counts == std::vector<int>({3,2,1}), "countdown missing or repeated cue");
         Require(selected.Context == &pc, "announcer missing owning trainer context");
+        Require(pc.TrainerCountdownQueuedAt==FPlatformTime::Now && pc.GetTrainerCountdownAge(1)==0.,
+                "countdown queue did not stamp the local monotonic clock");
+        FPlatformTime::Now+=.51;
+        Require(pc.GetTrainerCountdownAge(1)>.5,"countdown queue age failed to advance without world time");
         present(1,0.f); present(2,60.f); present(3,0.f);
         Require(selected.Counts.size() == 3, "countdown escaped active/results boundary");
         present(1,2.9f); present(0,60.f); present(1,2.9f);
@@ -828,6 +834,7 @@ class AimTrainerControllerTests(unittest.TestCase):
             "bool ANCAimTrainerPlayerController::AdmitTrainerRequest",
             "void ANCAimTrainerPlayerController::SetTrainerProgress",
             "void ANCAimTrainerPlayerController::OnRep_TrainerProgress",
+            "double ANCAimTrainerPlayerController::GetTrainerCountdownAge",
             "void ANCAimTrainerPlayerController::UpdateTrainerCountdownAudio",
         )
         source = directory / "trainer_controller.cpp"

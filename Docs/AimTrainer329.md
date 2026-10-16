@@ -4,6 +4,118 @@ An opt-in game mode with real animated UT character targets, thirteen 60-second
 scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
 
+## Precise run clock (2026-10-12)
+
+The game mode now accumulates each frame's `DeltaSeconds` into one double clock.
+It advances throughout the loaded map and is never reset between runs; countdown
+and run starts simply record new double anchors. This avoids UE4.15's accumulated
+float world-time rounding at high frame rates and restores the intended 60-second
+run, while retaining normal pause and game-time behavior. Existing rules still
+invalidate uploads after altered game speed or a long stall.
+
+Run length, target appearance/expiry, trainer strafe/crouch/dodge/slide schedules,
+drill windows, tracking contact/fired totals, event microseconds and five-second
+checkpoint elapsed times all use that clock. Double timestamps stay double
+through intermediate calculations and arrays; only the HUD countdown is narrowed
+for presentation. Cosmetic countdown audio age and tint refresh use monotonic
+platform time. Floating damage numbers use their existing short-lived scale
+timer and no longer retain an unused world-time timestamp.
+
+Engine-owned timestamps retain matching domains: rocket/pellet `CreationTime`
+is compared against separate float world-time run/appearance stamps. Native UT
+movement recovery gates still compare against native movement time. This change
+does not modify weapon refire, engine movement cooldowns or projectile physics.
+
+**No preset revision or leaderboard reset.** This repairs the intended duration
+and timing rather than defining another preset. Short-session behavior is
+effectively unchanged; previously accepted scores remain. No Django clock change
+or map reload is needed, and there are no content assets to recook.
+
+Validation across this pending trainer diff: 274 focused native-adapter tests
+passed. The new clock fixture executes production `Tick`, event stamping and
+checkpoint flushing with an independently drifting float world at age 5000,
+at both 700 and 960 fps. Accumulation stays within 1 ms of `N * dt`; all twelve
+checkpoints dispatch on their five-second deadlines within one frame, including
+checkpoint 9 at 45 real seconds. It also verifies the 60-second end, restart
+anchors, tracking credit and separate projectile time domains. Target/drill tests
+cover subsecond deadlines at large clock values.
+
+Self-review and independent review are complete. Plugin-only UE4.15 header
+generation and syntax checks passed for nine changed production translation
+units and both automation translation units (existing `Instigator` shadow
+warnings remain). Jeremy still needs the full plugin build, then execution of
+`NetcodePlus.AimTrainer.Clock.LongSessionPrecision` and
+`NetcodePlus.AimTrainer.LocalSession.Transport` in the rebuilt editor. Follow with
+a long-session 700/960 fps playtest through checkpoint 9 and final save; automated
+adapters do not substitute for engine playtesting or live HTTP verification.
+
+## Local upload cooldown and save status (2026-10-12)
+
+The Windows local-score transport now retains `Retry-After` and `Date`, including
+on rejected requests. A 429 ends that run's upload attempt and observes the
+server's delay before another local run can request an online session. Numeric
+delays and HTTP dates are supported; a missing or malformed delay on 429 falls
+back to 60 seconds. An explicit shorter delay is honored. Hinted service errors
+also respect their cooldown; ordinary connection failures keep bounded retries.
+Known rejection headers survive a response-body timeout or cancellation, so R
+cannot bypass `Retry-After` while a body is still pending.
+
+**R still restarts practice immediately.** There is no new client restart quota.
+The cooldown survives run cancellation and map travel, and pressing R during it
+does not extend it or send more start requests. A run begun during a cooldown is
+practice only, even if the cooldown ends while playing; a subsequent run can
+upload normally. The game never freezes practice for a long retry or tries to
+upload a run retroactively without its accepted checkpoints. Django controls its
+own limits; its recently relaxed limits require no duplicated client setting.
+
+Results now prominently show **RUN NOT SAVED**, **SAVING...**, **SAVED**, or
+**SAVE NOT CONFIRMED**. The latter preserves uncertainty if a final request may
+have arrived but its acknowledgement was lost. A rejected start or recording
+failure is shown as unsaved, with its reason retained below the leaderboard.
+Only an accepted final acknowledgement shows a confirmed save. Restarted runs
+remain protected from stale callbacks.
+Bounded JSON `error`/`detail` text from rejected starts and checkpoints is retained
+as the reason, rather than discarding the body and showing a generic failure.
+Checkpoint recording and transport require an accepted run credential.
+
+Validation includes bounded/error-body HTTP handling, numeric/date/default retry
+delays, save outcomes, checkpoint recording and results rendering. The expanded
+engine transport test covers 429 timeout/cancellation, restart and map travel,
+server rejection reasons, and preventing requests without an accepted run.
+Client/server plugin rebuilds are required; no pak recook, scoring change or
+leaderboard reset is included.
+
+## Harder IG pop-up movement (2026-10-12)
+
+IG pop-up's open-floor targets (slots 0, 4 and 5) move 20% faster, with matching
+acceleration, braking, horizontal dodge and slide scaling. Evasive targets favor
+stronger diagonal cuts and shorter decisions while retaining occasional longer
+travel. Short feints cannot chain into continuous A/D twitching. Dodge attempts
+increase from 55% to 75% of eligible decisions, and dodge-to-slide choices from
+12% to 18%, subject to native recovery, path safety and remaining exposure time.
+
+The rear head-peek and high-right platform behavior stays unchanged. The middle
+platform uses the IG evasive decisions at its existing speed. Other scenarios,
+hitboxes, spawn cadence, exposure, scoring, refire and board revisions are
+unchanged. Tests cover the IG-only scope, actual movement decisions and bounded
+dodge/slide paths at the increased speed.
+
+## Airborne target lifetime (2026-10-12)
+
+Falling targets receive 0.9 seconds more timed exposure in every Airborne preset:
+Instagib, Sniper/LG, SACTF and Rockets, in fixed-position and movement practice.
+The normal deadline is now 0.1 seconds before predicted goo contact, and the
+short-fall timer floor increases from 0.75 to 1.65 seconds. Actual goo/ground
+contact and the end of the 60-second run still retire targets immediately, so
+short falls can end before the full timer extension. The jump-pad target already
+remains active until hit or run end and continues its existing repeated jumps.
+
+Spawn cadence, trajectories, refire rates and scoring are unchanged. The extra
+time improves target availability but does not raise the rifle's maximum shots
+per run: Airborne Instagib still has roughly 60 shots at 100 points per hit.
+Existing board revisions and all leaderboard scores are retained. This tuning
+needs a rebuilt plugin, with no pak recook or backend change.
+
 ## Restart binding (2026-10-11)
 
 Press **R** to restart the selected scenario during countdown, during a run, or

@@ -141,7 +141,10 @@ struct UUTCharacterMovement : UCharacterMovementComponent {
     void UnCrouch(bool);
 };
 template<class T,class U> T* Cast(U* value) { return dynamic_cast<T*>(value); }
-struct World { float Time = 42.f; float GetTimeSeconds() const { return Time; } };
+struct ANCAimTrainerGame { virtual ~ANCAimTrainerGame()=default; double Time=42.; double GetTrainerTimeSeconds() const { return Time; } };
+struct FPlatformTime { static double Seconds() { return 0.; } };
+struct World { float Time=42.f; ANCAimTrainerGame Game; float GetTimeSeconds() const { return Time; }
+    ANCAimTrainerGame* GetAuthGameMode() const { return const_cast<ANCAimTrainerGame*>(&Game); } };
 enum { EME_Slide=1,NAME_NumFloorSlides=2 };
 struct AUTPlayerState { virtual ~AUTPlayerState()=default; void ModifyStatsValue(int,float) {} };
 struct AUTCharacter {
@@ -241,18 +244,20 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
         template<class T> const T* GetDefaultObject() const { return static_cast<const T*>(Defaults); }
     } Class;
     ActorClass* GetClass() { return &Class; }
-    float StrafeDirection=1.f, StrafeRange=800.f, SpawnProtectionStartTime=0.f, AppearanceTime=0.f;
-    float WiggleRange=0.f, PopupLongStrafeEndTime=0.f;
+    float StrafeDirection=1.f, StrafeRange=800.f, SpawnProtectionStartTime=0.f, AppearanceWorldTime=0.f;
+    double AppearanceTime=0.;
+    double GetTrainerTimeSeconds() const;
+    float WiggleRange=0.f; double PopupLongStrafeEndTime=0.;
     bool bRecenterWiggleAfterSlide=false,bRecenterWiggleAfterDodge=false,bTrainerDodgeSlidePending=false;
     FVector StrafeCenter,TrainerSlideDirection,StrafeAxis=FVector(0.f,1.f,0.f);
     FVector PopupMoveMinimum,PopupMoveMaximum,PopupMoveDirection;
     bool bPopupEvasion=false,bPopupNeedsDecision=false;
-    float TrainerHeadshotScale=1.f,NextTrainerTintTime=0.f,TrainerFlightRate=1.f;
+    float TrainerHeadshotScale=1.f,TrainerFlightRate=1.f; double NextTrainerTintTime=0.;
     int DrillMovementMode=0;
     FVector DrillOrigin;
-    float DrillStrafeSide=1.f,DrillAdvance=.4f,DrillDodgeBlockedUntil=0.f;
+    float DrillStrafeSide=1.f,DrillAdvance=.4f; double DrillDodgeBlockedUntil=0.;
     bool bDrillWallDodgePending=false;
-    float DrillWallDodgeUntil=0.f,NextDrillWallAttempt=0.f;
+    double DrillWallDodgeUntil=0.,NextDrillWallAttempt=0.;
     void TickDrillMovement(float);
     void ConfigureDrillMovement(bool,const FVector&);
     void ChooseDrillStrafe(float,float);
@@ -307,7 +312,34 @@ ANCAimTrainerTarget ActivePopup() {
 CASES = r'''
 int main(int argc,char**argv) {
     Require(argc==2,"case required"); const std::string name(argv[1]);
-    if(name=="drill_momentum") {
+    if(name=="precise_clock") {
+        for(int fps:{700,960}) {
+            ANCAimTrainerTarget target;
+            target.TheWorld.Time=5000.f; target.TheWorld.Game.Time=5000.;
+            target.ActivateTarget(FVector(1000,-850,103),false); target.StartWiggle(180.f);
+            Require(target.AppearanceTime==5000. && target.AppearanceWorldTime==5000.f,
+                "activation did not retain separate trainer and engine appearance stamps");
+            Require(target.StartPopupLongStrafe(220.f,1.f,0.f),"timed long strafe rejected");
+            const float dt=1.f/float(fps);
+            for(int frame=1;frame<=fps+1;++frame) {
+                target.TheWorld.Time+=dt; // Deliberately simulate drifting UE float world time.
+                target.TheWorld.Game.Time+=double(dt); target.Tick(dt);
+                if(frame<fps) Require(target.IsTrainerLongStrafing(),"old world age retired strafe early");
+                if(frame>fps) Require(!target.IsTrainerLongStrafing(),"old world age delayed strafe expiry");
+            }
+            Require(std::abs(target.TheWorld.Game.Time-(5000.+double(dt)*(fps+1)))<.001,"fixture lost precise frame time");
+            target.TheWorld.Game.Time=100000000.125;
+            target.ActivateTarget(FVector(1000,-850,103),true);
+            Require(target.AppearanceTime==100000000.125,"appearance stamp truncated to float");
+            target.ConfigureDrillMovement(true,FVector::ZeroVector);
+            UUTDamageType damage;FUTPointDamageEvent beam;beam.DamageTypeClass=&damage;beam.Momentum=FVector(72900,0,0);
+            target.ApplyTrainerShockMomentum(beam);
+            target.TheWorld.Game.Time+=.399;
+            Require(!target.CanStartTrainerDrillAction(),"drill hit block lost subsecond precision");
+            target.TheWorld.Game.Time+=.002;
+            Require(target.CanStartTrainerDrillAction(),"drill hit block followed drifting world time");
+        }
+    } else if(name=="drill_momentum") {
         auto target=Active();target.ConfigureDrillMovement(true,FVector::ZeroVector);
         UUTDamageType damage;FUTPointDamageEvent beam;beam.DamageTypeClass=&damage;beam.Momentum=FVector(72900,0,0);
         target.ApplyTrainerShockMomentum(beam);
@@ -359,32 +391,34 @@ int main(int argc,char**argv) {
         target.ConfigureDrillMovement(true,FVector::ZeroVector);
         Require(target.TryTrainerDrillDodge(.05f)&&target.bDrillWallDodgePending&&target.Move.Velocity.Y>0,
             "carrier did not take its optional route toward the wall");
-        const int groundCalls=target.DodgeCalls;target.TheWorld.Time+=.1f;
+        const int groundCalls=target.DodgeCalls;target.TheWorld.Game.Time+=.1f;
         Require(!target.TryTrainerDrillWallDodge()&&target.DodgeCalls==groundCalls,"carrier tried a mid-lane air dodge");
         target.Position.Y=555.f;const FVector before=target.Move.Velocity;
         Require(!target.TryTrainerDrillWallDodge()&&target.DodgeCalls==groundCalls+1
             &&target.Move.Velocity.X==before.X&&target.Move.Velocity.Y==before.Y,"failed native wall trace added impulse");
-        target.WallContact=true;target.TheWorld.Time+=.05f;target.Move.DodgeAllowed=false;
+        target.WallContact=true;target.TheWorld.Game.Time+=.05f;target.Move.DodgeAllowed=false;
         Require(!target.TryTrainerDrillWallDodge(),"wall dodge bypassed native cooldown");
         target.Move.DodgeAllowed=true;
         Require(target.TryTrainerDrillWallDodge()&&target.LastDodgeDirection.X<0.f&&target.LastDodgeDirection.Y<0.f
             &&!target.bDrillWallDodgePending,"native wall dodge did not kick diagonally back into lane");
         Require(!target.TryTrainerDrillWallDodge(),"one route generated repeated airborne wall dodges");
-        target.bDrillWallDodgePending=true;target.DrillWallDodgeUntil=target.TheWorld.Time+1.f;
+        target.bDrillWallDodgePending=true;target.DrillWallDodgeUntil=target.TheWorld.Game.Time+1.f;
         target.Move.Velocity=FVector(-500,200,200);
         FUTPointDamageEvent beam;beam.Momentum=FVector(72900,0,0);target.ApplyTrainerShockMomentum(beam);
         Require(!target.bDrillWallDodgePending&&!target.TryTrainerDrillWallDodge(),"beam failed to cancel queued wall dodge");
         target.Move.Mode=MOVE_Walking;target.Move.bIsDodging=false;target.bRecenterWiggleAfterDodge=false;
         Require(!target.TryTrainerDrillDodge(.5f),"dodge erased beam impulse before its movement tick");
-        target.TheWorld.Time+=.41f;
+        target.TheWorld.Game.Time+=.41f;
         Require(target.TryTrainerDrillDodge(.3f),"shock recovery blocked dodges permanently");
         target.HideTarget();Require(!target.bDrillWallDodgePending&&target.DrillDodgeBlockedUntil==0.f,
             "pooled target kept a wall route or hit cooldown");
     } else if(name=="popup_travel") {
-        for(float dt:{.008f,.016f,.032f}) for(int slot:{0,1,4,5}) for(int variant:{0,1,2}) {
+        for(int scenario:{2,3}) for(float dt:{.008f,.016f,.032f}) for(int slot:{0,1,4,5}) for(int variant:{0,1,2}) {
             const auto area=NCAimTrainerLayout::PopupEvasionArea(slot,variant);
+            const float scale=NCAimTrainerScenarioPolicy::PopupEvasionSpeedScale(scenario,slot);
             const FVector minimum(area.MinX,area.MinY,0),maximum(area.MaxX,area.MaxY,0);
-            auto target=ActivePopup(); target.Position=(minimum+maximum)*.5f; target.Position.Z=428.f;
+            auto target=ActivePopup(); ANCAimTrainerTarget defaults=target; target.Class.Defaults=&defaults; target.SetTrainerSpeedScale(scale);
+            target.Position=(minimum+maximum)*.5f; target.Position.Z=428.f;
             const int teleports=target.Teleports;
             unsigned seed=unsigned(1+slot*17+variant*31);
             auto roll=[&]() { seed=1664525u*seed+1013904223u; return float(seed>>8)/16777216.f; };
@@ -432,8 +466,9 @@ int main(int argc,char**argv) {
         Require(!target.SetPopupMovement(minimum,maximum,FVector(std::numeric_limits<float>::quiet_NaN(),0,0)),"NaN accepted");
     }
     else if(name=="popup_evasion_dodges") {
-        for(float gravity : {-2154.f,-980.f}) for(int slot : {0,1,4,5}) for(int variant : {0,1,2}) {
+        for(int scenario : {2,3}) for(float gravity : {-2154.f,-980.f}) for(int slot : {0,1,4,5}) for(int variant : {0,1,2}) {
             const auto area=NCAimTrainerLayout::PopupEvasionArea(slot,variant);
+            const float scale=NCAimTrainerScenarioPolicy::PopupEvasionSpeedScale(scenario,slot);
             const FVector minimum(area.MinX,area.MinY,0),maximum(area.MaxX,area.MaxY,0);
             unsigned seed=unsigned(1+slot*17+variant*31);
             auto roll=[&]() { seed=1664525u*seed+1013904223u; return float(seed>>8)/16777216.f; };
@@ -442,9 +477,10 @@ int main(int argc,char**argv) {
                 auto target=Active(); target.SimulateNativeDodge=true;
                 target.Move.Gravity=gravity; target.Move.MaxWalkSpeed=940.f; target.Move.MaxAcceleration=5000.f;
                 target.Move.MaxFloorSlideSpeed=1100.f;
+                ANCAimTrainerTarget defaults=target; target.Class.Defaults=&defaults; target.SetTrainerSpeedScale(scale);
                 target.Position=FVector(area.MinX+(area.MaxX-area.MinX)*roll(),area.MinY+(area.MaxY-area.MinY)*roll(),428.f);
                 const float heading=roll()*6.28318530718f;
-                target.Move.Velocity=FVector(std::cos(heading),std::sin(heading),0)*(940.f*roll());
+                target.Move.Velocity=FVector(std::cos(heading),std::sin(heading),0)*(940.f*scale*roll());
                 Require(target.SetPopupMovement(minimum,maximum,FVector(1,0,0))&&!target.bTrainerWiggle,
                     "persistent popup did not enter evasion without a wiggle state");
                 const bool chain=sample%5==0 && slot!=1;
@@ -991,21 +1027,21 @@ int main(int argc,char**argv) {
             target.Position.Y+=side*150.f;
             Require(target.StartPopupLongStrafe(220.f,.9f,side<0.f?0.f:1.f),"valid long strafe rejected");
             Require(target.StrafeDirection==-side&&target.StrafeRange==220.f
-                &&target.PopupLongStrafeEndTime==42.9f,"long strafe did not sweep across its wider left lane");
+                &&std::abs(target.PopupLongStrafeEndTime-42.9)<.000001,"long strafe did not sweep across its wider left lane");
             target.ReverseStrafe();target.Tick(.016f);
             Require(target.LastInput.Y==-side&&target.Teleports==1&&target.Move.MaxWalkSpeed==500.f,
                 "short wiggle interrupted long hold or motion was replaced with a speed cap/teleport");
             Require(!target.StartPopupLongStrafe(220.f,.9f,0.f)&&!target.TryTrainerPopupSlide(0)
                 &&!target.SetTrainerCrouched(true),"another scheduled action interrupted long native strafe");
             target.Position.Y=target.StrafeCenter.Y-side*210.f;
-            target.TheWorld.Time=target.PopupLongStrafeEndTime-.001f;target.Tick(.001f);
+            target.TheWorld.Game.Time=target.PopupLongStrafeEndTime-.001f;target.Tick(.001f);
             Require(target.IsTrainerLongStrafing(),"long hold ended before deadline");
-            target.TheWorld.Time=target.PopupLongStrafeEndTime;target.Tick(.001f);
+            target.TheWorld.Game.Time=target.PopupLongStrafeEndTime;target.Tick(.001f);
             Require(!target.IsTrainerLongStrafing()&&target.StrafeRange==180.f&&target.LastInput.Y==side
                 &&target.Position.Y==target.StrafeCenter.Y-side*210.f&&target.Teleports==1,
                 "long strafe did not return inside original wiggle range with native motion");
             Require(target.StartPopupLongStrafe(999.f,999.f,0.f)&&target.StrafeRange==220.f
-                &&target.PopupLongStrafeEndTime==target.TheWorld.Time+1.f,"long move exceeded safe range or lost the one-second hold");
+                &&target.PopupLongStrafeEndTime==target.TheWorld.Game.Time+1.f,"long move exceeded safe range or lost the one-second hold");
             target.HideTarget();
             Require(!target.IsTrainerLongStrafing()&&target.WiggleRange==0.f,"hidden appearance retained long hold");
             target.ActivateTarget(FVector(1200.f,-850.f,103.f),false);target.StartWiggle(99.f);
@@ -1228,7 +1264,7 @@ int main(int argc,char**argv) {
             "airborne activation did not invoke native launch with full override");
         const int teleports=target.Teleports;
         target.SavedPositions.Count=4;
-        target.TheWorld.Time+=2.f;
+        target.TheWorld.Game.Time+=2.f;
         target.Move.Mode=MOVE_Walking;
         Require(target.LaunchAirborneTarget(FVector(-500,-1300,2300))&&target.Teleports==teleports
             &&target.SavedPositions.Count==4&&target.AppearanceTime==42.f,
@@ -1464,6 +1500,7 @@ class AimTrainerTargetTests(unittest.TestCase):
             "bool ANCAimTrainerTarget::TryTrainerTrackingSlide",
             "bool ANCAimTrainerTarget::StartTrainerSlide",
             "bool ANCAimTrainerTarget::IsTrainerSliding",
+            "double ANCAimTrainerTarget::GetTrainerTimeSeconds",
             "void ANCAimTrainerTarget::Tick",
             "FVector ANCAimTrainerTarget::GetHeadLocation",
             "void ANCAimTrainerTarget::SetTrainerHeadshotScale",
@@ -1496,6 +1533,8 @@ class AimTrainerTargetTests(unittest.TestCase):
     def run_case(self, name):
         result = subprocess.run([str(self.executable), name], env=self.environment, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_target_and_drill_timers_use_precise_clock_at_old_world_age(self): self.run_case("precise_clock")
 
     def test_drill_dodges_preserve_native_knockback_and_full_flak_impulse(self): self.run_case("drill_movement")
     def test_drill_random_strafes_allow_spacing_and_bound_the_carrier_lane(self): self.run_case("drill_approaches")

@@ -3,7 +3,9 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "NCAimTrainerLocalSession.h"
+#include "NCAimTrainerOnline.h"
 #include "../NCAimTrainerLocalHttp.h"
+#include "../NCAimTrainerLocalRetry.h"
 #include "Engine/World.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
@@ -14,6 +16,12 @@
 #include "Runtime/Online/HTTP/Public/Interfaces/IHttpRequest.h"
 #include "Runtime/Online/HTTP/Public/Interfaces/IHttpResponse.h"
 
+namespace NCAimTrainerLocal
+{
+	extern NCAimTrainerLocalRetry::FStartCooldown StartCooldown;
+	extern FString StartCooldownReason;
+}
+
 namespace NCAimTrainerLocalTests
 {
 	// A transport adapter only. Production session methods and real UE timers
@@ -23,15 +31,21 @@ namespace NCAimTrainerLocalTests
 	public:
 		int32 Code;
 		FString Body;
+		FString RetryAfter, ResponseDate;
 		TArray<uint8> Content;
-		FResponse(int32 InCode, const FString& InBody) : Code(InCode), Body(InBody)
+		FResponse(int32 InCode, const FString& InBody, const FString& InRetryAfter = FString(), const FString& InDate = FString())
+			: Code(InCode), Body(InBody), RetryAfter(InRetryAfter), ResponseDate(InDate)
 		{
 			FTCHARToUTF8 Utf8(*Body);
 			Content.Append(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
 		}
 		virtual FString GetURL() override { return FString(); }
 		virtual FString GetURLParameter(const FString&) override { return FString(); }
-		virtual FString GetHeader(const FString&) override { return FString(); }
+		virtual FString GetHeader(const FString& Name) override
+		{
+			if (Name.Equals(TEXT("Retry-After"), ESearchCase::IgnoreCase)) return RetryAfter;
+			return Name.Equals(TEXT("Date"), ESearchCase::IgnoreCase) ? ResponseDate : FString();
+		}
 		virtual TArray<FString> GetAllHeaders() override { return TArray<FString>(); }
 		virtual FString GetContentType() override { return TEXT("application/json"); }
 		virtual int32 GetContentLength() override { return Content.Num(); }
@@ -72,9 +86,9 @@ namespace NCAimTrainerLocalTests
 		virtual const FHttpResponsePtr GetResponse() const override { return Response; }
 		virtual void Tick(float) override {}
 		virtual float GetElapsedTime() override { return 0.f; }
-		void Reply(int32 Code, const FString& Value)
+		void Reply(int32 Code, const FString& Value, const FString& RetryAfter = FString(), const FString& ResponseDate = FString())
 		{
-			Response = MakeShareable(new FResponse(Code, Value));
+			Response = MakeShareable(new FResponse(Code, Value, RetryAfter, ResponseDate));
 			// Preserve the invoking delegate while production cancels/unbinds it.
 			FHttpRequestCompleteDelegate Callback = Complete;
 			Callback.ExecuteIfBound(AsShared(), Response, true);
@@ -89,6 +103,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNCAimTrainerLocalSessionTest,
 bool FNCAimTrainerLocalSessionTest::RunTest(const FString& Parameters)
 {
 	using namespace NCAimTrainerLocalTests;
+	// Never clear or extend the player's real cooldown while running an isolated
+	// editor automation test. No credentials or live HTTP requests are used.
+	TGuardValue<NCAimTrainerLocalRetry::FStartCooldown> CooldownGuard(
+		NCAimTrainerLocal::StartCooldown, NCAimTrainerLocalRetry::FStartCooldown());
+	TGuardValue<FString> CooldownReasonGuard(NCAimTrainerLocal::StartCooldownReason, FString());
 	FConfigFile Ini;
 	Ini.Read(FPaths::GameSavedDir() / TEXT("Config/Mod.ini"));
 	bool bEnabled = true;
@@ -141,12 +160,14 @@ bool FNCAimTrainerLocalSessionTest::RunTest(const FString& Parameters)
 	if (StartJson.IsValid())
 	{
 		TestEqual(TEXT("Precision popup has an independent scenario"), StartJson->GetStringField(TEXT("scenario")), FString(TEXT("precision_popup")));
-		TestEqual(TEXT("UT3 animations start fresh pop-up boards"), StartJson->GetNumberField(TEXT("revision")), 14.0);
+		TestEqual(TEXT("Start uses the current pop-up board identity"), StartJson->GetNumberField(TEXT("revision")),
+			double(FNCAimTrainerOnline::PopupPresetRevision));
 		TestTrue(TEXT("Start payload includes movement mode"), StartJson->GetBoolField(TEXT("movement")));
 	}
 	const TCHAR* ScenarioSlugs[] = {
         TEXT("strafe"), TEXT("headshots"), TEXT("instagib"), TEXT("precision_popup"), TEXT("sactf_headshots"), TEXT("sactf_popup"),
-        TEXT("strafe_hard"), TEXT("airborne_ig"), TEXT("airborne_sniper"), TEXT("airborne_sactf"), TEXT("airborne_rockets")
+        TEXT("strafe_hard"), TEXT("airborne_ig"), TEXT("airborne_sniper"), TEXT("airborne_sactf"), TEXT("airborne_rockets"),
+        TEXT("flak_hexagon"), TEXT("shock_defense")
     };
     for (int32 Scenario = 0; Scenario < ARRAY_COUNT(ScenarioSlugs); ++Scenario)
     {
@@ -156,8 +177,8 @@ bool FNCAimTrainerLocalSessionTest::RunTest(const FString& Parameters)
         if (ScenarioJson.IsValid())
         {
             TestEqual(TEXT("Presets have independent slugs"), ScenarioJson->GetStringField(TEXT("scenario")), FString(ScenarioSlugs[Scenario]));
-            TestEqual(TEXT("Airborne uses reward-only boards; other presets retain UT3 boards"),
-                ScenarioJson->GetNumberField(TEXT("revision")), Scenario >= 7 ? 15.0 : 14.0);
+            TestEqual(TEXT("Start retains the current scenario board identity"),
+                ScenarioJson->GetNumberField(TEXT("revision")), double(FNCAimTrainerOnline::PresetRevisionForScenario(Scenario)));
             TestTrue(TEXT("Presets preserve movement board identity"), ScenarioJson->GetBoolField(TEXT("movement")));
         }
     }
@@ -229,6 +250,147 @@ bool FNCAimTrainerLocalSessionTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Rejected credentials are never retried"), Requests.Num(), 1);
 	TestFalse(TEXT("Rejected credentials fail the session"), Session->IsHealthy());
 	Session->Cancel();
+
+	Session = NewSession();
+	Session->bStarting = true;
+	Session->StartCompletion = [&](TSharedPtr<FNCAimTrainerLocalSession> Result, const FString& Message)
+	{
+		TestFalse(TEXT("Rejected start has no usable run"), Result.IsValid());
+		TestTrue(TEXT("Start preserves the service rejection reason"), Message.Contains(TEXT("Start quota exceeded")));
+	};
+	Session->SendRequest(TEXT("https://ut4stats.com/aimtrainer_local/start/"), TEXT("fixture-token"), TEXT("{}"));
+	Requests.Last()->Reply(400, TEXT("{\"error\":\"Start quota exceeded\"}"));
+	Session->BeginRecording();
+	TestFalse(TEXT("Rejected start cannot queue checkpoints"), Session->QueueCheckpoint(0, TArray<FNCAimTrainerLocalEvent>(), false));
+	TestEqual(TEXT("Rejected start emits no checkpoint HTTP"), Requests.Num(), 1);
+	Session->Cancel();
+
+	Session = NewSession();
+	Session->RunToken.Empty();
+	Session->BeginRecording();
+	TestFalse(TEXT("Missing accepted-run credential fails recording"), Session->IsHealthy());
+	TestEqual(TEXT("Missing accepted-run credential emits no checkpoint HTTP"), Requests.Num(), 0);
+	Session->Cancel();
+
+	Session = NewSession();
+	Session->BeginRecording();
+	Requests.Last()->Reply(400, TEXT("{\"error\":\"Checkpoint 9 arrived too early\\ntry again\"}"));
+	TestTrue(TEXT("Checkpoint failure retains the service reason"), Session->GetFailureReason().Contains(TEXT("Checkpoint 9 arrived too early")));
+	TestFalse(TEXT("Server reason stays on one HUD line"), Session->GetFailureReason().Contains(TEXT("\n")));
+	Session->Cancel();
+
+	// A service rejection is not a lost packet: do not retry this run at the
+	// normal one/two-second transient backoff, including after restart or travel.
+	int32 StartCompletions = 0;
+	Session = NewSession();
+	Session->bStarting = true;
+	Session->StartCompletion = [&](TSharedPtr<FNCAimTrainerLocalSession> Result, const FString& Message)
+	{
+		TestFalse(TEXT("A throttled start cannot return an authenticated session"), Result.IsValid());
+		TestTrue(TEXT("Throttle failure says this run cannot be saved"), Message.Contains(TEXT("cannot be saved")));
+		++StartCompletions;
+	};
+	Session->SendRequest(TEXT("https://ut4stats.com/aimtrainer_local/start/"), TEXT("fixture-token"), TEXT("{}"));
+	Requests.Last()->Reply(429, TEXT("{\"error\":\"Too many run starts\"}"), TEXT("60"));
+	TestTrue(TEXT("Throttle preserves the service rejection reason"), Session->GetFailureReason().Contains(TEXT("Too many run starts")));
+	const double RejectedUntil = NCAimTrainerLocal::StartCooldown.Until;
+	TestTrue(TEXT("A sixty-second rejection persists for future runs"),
+		NCAimTrainerLocal::StartCooldown.Remaining(FPlatformTime::Seconds()) > 59.0);
+	TestFalse(TEXT("Throttled run immediately becomes practice"), Session->IsHealthy());
+	TestEqual(TEXT("Start failure callback fires once"), StartCompletions, 1);
+	TickTimers(3.01f);
+	TestEqual(TEXT("No start is retried three seconds after rejection"), Requests.Num(), 1);
+	TickTimers(61.f);
+	TestEqual(TEXT("Rejected practice run never uploads retroactively"), Requests.Num(), 1);
+	Session->Cancel();
+
+	Session = NewSession();
+	Session->bStarting = true;
+	Session->SendStartAttempt();
+	TestFalse(TEXT("Replacement run cannot bypass the service cooldown"), Session->IsHealthy());
+	TestTrue(TEXT("Replacement run preserves the cooldown explanation"), Session->GetFailureReason().Contains(TEXT("cooldown")));
+	TestEqual(TEXT("Replacement run makes no request while cooling down"), Requests.Num(), 0);
+	TestTrue(TEXT("Replacement run keeps the original cooldown reason"), Session->GetFailureReason().Contains(TEXT("Too many run starts")));
+	TestEqual(TEXT("Restarting practice does not extend the cooldown"), NCAimTrainerLocal::StartCooldown.Until, RejectedUntil);
+	Session->Cancel();
+
+	UWorld* TravelWorld = UWorld::CreateWorld(EWorldType::Game, false);
+	TestNotNull(TEXT("Travel fixture world exists"), TravelWorld);
+	if (TravelWorld)
+	{
+		Session = NewSession();
+		Session->World = TravelWorld;
+		Session->bStarting = true;
+		Session->SendStartAttempt();
+		TestTrue(TEXT("Map travel retains the service cooldown"), Session->GetFailureReason().Contains(TEXT("cooldown")));
+		TestEqual(TEXT("Map travel cannot generate another rejected start"), Requests.Num(), 0);
+		Session->Cancel();
+		Session.Reset();
+		TravelWorld->DestroyWorld(false);
+	}
+	NCAimTrainerLocal::StartCooldown.Until = FPlatformTime::Seconds() - 1.0;
+	Session = NewSession();
+	Session->bStarting = true;
+	Session->SendStartAttempt();
+	TestFalse(TEXT("Expired cooldown no longer blocks account verification"), Session->GetFailureReason().Contains(TEXT("cooldown")));
+	Session->Cancel();
+
+	// Checkpoint throttles cannot wait sixty seconds: batches expire after
+	// fifteen seconds. They fail once and protect subsequent starts instead.
+	Session = NewSession();
+	Completions = 0;
+	Session->SetCompletion([&](bool bSuccess, const FString& Message, int32)
+	{
+		TestFalse(TEXT("Rejected checkpoint is not saved"), bSuccess);
+		TestTrue(TEXT("Rejected checkpoint explains saving is unavailable"), Message.Contains(TEXT("cannot be saved")));
+		++Completions;
+	});
+	Session->BeginRecording();
+	Requests.Last()->Reply(429, TEXT("{}"));
+	TickTimers(30.f);
+	TestEqual(TEXT("Bare429 checkpoint never enters the transient retry loop"), Requests.Num(), 1);
+	TestEqual(TEXT("Rejected checkpoint reports failure only once"), Completions, 1);
+	TestTrue(TEXT("Bare429 uses a sixty-second fallback"), NCAimTrainerLocal::StartCooldown.Remaining(FPlatformTime::Seconds()) > 59.0);
+	Session->Cancel();
+
+	NCAimTrainerLocal::StartCooldown.Until = 0;
+	Session = NewSession();
+	Session->BeginRecording();
+	Requests.Last()->Reply(503, TEXT("{}"), TEXT("Mon, 12 Oct 2026 18:02:00 GMT"), TEXT("Mon, 12 Oct 2026 18:00:00 GMT"));
+	TickTimers(3.f);
+	TestEqual(TEXT("Hinted503 respects the server cooldown rather than normal retry"), Requests.Num(), 1);
+	TestTrue(TEXT("HTTP-date delay uses the server Date header"), NCAimTrainerLocal::StartCooldown.Remaining(FPlatformTime::Seconds()) > 119.0);
+	Session->Cancel();
+	NCAimTrainerLocal::StartCooldown.Until = 0;
+
+	// Headers are enough to honor a rejection even if the body never finishes.
+	Session = NewSession();
+	Session->bStarting = true;
+	Session->SendRequest(TEXT("https://ut4stats.com/aimtrainer_local/start/"), TEXT("fixture-token"), TEXT("{}"));
+	Requests.Last()->Response = MakeShareable(new FResponse(429, FString(), TEXT("60")));
+	TickTimers(0.f);
+	TickTimers(4.01f);
+	TestFalse(TEXT("Known429 with a stalled body fails the start once"), Session->IsHealthy());
+	TestTrue(TEXT("Known429 timeout retains Retry-After"), NCAimTrainerLocal::StartCooldown.Remaining(FPlatformTime::Seconds()) > 59.0);
+	TickTimers(3.01f);
+	TestEqual(TEXT("Known429 body timeout never enters transient retries"), Requests.Num(), 1);
+	Session->Cancel();
+	NCAimTrainerLocal::StartCooldown.Until = 0;
+
+	Session = NewSession();
+	Session->bStarting = true;
+	Session->SendRequest(TEXT("https://ut4stats.com/aimtrainer_local/start/"), TEXT("fixture-token"), TEXT("{}"));
+	Requests.Last()->Response = MakeShareable(new FResponse(429, FString(), TEXT("60")));
+	Session->Cancel();
+	const double CancelledUntil = NCAimTrainerLocal::StartCooldown.Until;
+	TestTrue(TEXT("Cancel after429 headers retains Retry-After"), NCAimTrainerLocal::StartCooldown.Remaining(FPlatformTime::Seconds()) > 59.0);
+	Session = NewSession();
+	Session->bStarting = true;
+	Session->SendStartAttempt();
+	TestEqual(TEXT("R cannot bypass a rejection whose body was still pending"), Requests.Num(), 0);
+	TestEqual(TEXT("R does not extend a retained partial-response cooldown"), NCAimTrainerLocal::StartCooldown.Until, CancelledUntil);
+	Session->Cancel();
+	NCAimTrainerLocal::StartCooldown.Until = 0;
 
 	Session = NewSession();
 	Session->BeginRecording();

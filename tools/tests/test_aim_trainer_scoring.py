@@ -69,9 +69,9 @@ struct ANCAimTrainerTarget : AActor {
     FVector GetActorLocation() const { return Position; }
     bool Visible = true;
     int Hidden = 0;
-    float AppearanceTime = 0;
+    double AppearanceTime = 0;
     bool IsAvailable() const { return Visible; }
-    float GetAppearanceTime() const { return AppearanceTime; }
+    double GetAppearanceTime() const { return AppearanceTime; }
     void HideTarget() { Visible = false; ++Hidden; }
 };
 struct TargetsAdapter : std::vector<ANCAimTrainerTarget*> {
@@ -90,17 +90,18 @@ struct ANCAimTrainerGame {
         int Phase = 2, Scenario = 1, Hits = 0, Headshots = 0, Score = 0, Shots = 0, TargetsExpired = 0;
         float TrackingSeconds = 0.f, FiringSeconds = 0.f, Accuracy = 0.f;
     } Progress;
-    struct World { float Now = 1.f; float GetTimeSeconds() { return Now; } } TheWorld;
+    struct World { double Now = 1.0; float GetTimeSeconds() { return float(Now); } } TheWorld;
     struct { float FRandRange(float a, float b) { return (a + b) * .5f; } } Schedule;
     ANCAimTrainerPlayerController* Trainee = nullptr;
     AUTWeapon* RunWeapon = nullptr;
     TargetsAdapter Targets;
-    float PhaseStartedAt = 0.f;
-    float LastTraceTime = 0.f;
+    double PhaseStartedAt = 0.0;
+    double GetTrainerTimeSeconds() const { return TheWorld.Now; }
+    double LastTraceTime = 0.f;
     double TrackedSeconds = 0.0, FiredSeconds = 0.0;
     bool bPreviousContact = false, bPreviousFiring = false;
-    float TargetExpiry[6] = { 4.f, 4.f, 4.f, 4.f, 4.f, 4.f };
-    float NextTargetTime[6] = {};
+    double TargetExpiry[6] = { 4.f, 4.f, 4.f, 4.f, 4.f, 4.f };
+    double NextTargetTime[6] = {};
     float ShotStatBaseline = 0.f;
     bool bRankedRun = true;
     std::string UnrankedReason;
@@ -114,7 +115,7 @@ struct ANCAimTrainerGame {
     World* GetWorld() { return &TheWorld; }
     bool HasTrackingContact() const;
     bool IsTrackingBeamFiring() const;
-    void UpdateTrackingSample(float);
+    void UpdateTrackingSample(double);
     void UpdateDrillShots() {}
     float RecordDrillHit(ANCAimTrainerTarget*,float,const FDamageEvent&,AActor*) { return 0.f; }
     void UpdateShotCount();
@@ -511,6 +512,22 @@ int main(int argc, char** argv) {
                 "new continuous contact failed to accrue matching fire/contact clocks");
         Require(f.Game.Progress.FiringSeconds == .125f && f.Game.Progress.TrackingSeconds == .0625f,
                 "owner snapshot omitted firing or tracking duration");
+    } else if (name == "tracking_aged_clock") {
+        for(int fps:{700,960}) {
+            Fixture f; AUTWeap_LinkGun_NCP link;
+            f.Game.Progress.Scenario=0; f.Game.RunWeapon=&link; link.CurrentLinkedTarget=&f.Target;
+            f.Game.PhaseStartedAt=5000.0; f.Game.LastTraceTime=5000.0;
+            f.Game.bPreviousContact=true; f.Game.bPreviousFiring=true;
+            double now=5000.0; const float dt=1.f/float(fps);
+            for(int frame=0;frame<fps*60;++frame) {
+                now=NCAimTrainerClock::Advance(now,dt);
+                f.Game.UpdateTrackingSample(now);
+            }
+            Require(std::fabs(f.Game.FiredSeconds-double(fps*60)*double(dt))<.001
+                &&std::fabs(f.Game.TrackedSeconds-double(fps*60)*double(dt))<.001,
+                "tracking contact or firing time narrowed its sample timestamps at old world age");
+            Require(f.Game.LastTraceTime==now,"tracking sample anchor narrowed to a float");
+        }
     } else if (name == "tracking_clock") {
         Fixture f; AUTWeap_LinkGun_NCP link;
         f.Game.Progress.Scenario = 0; f.Game.RunWeapon = &link; link.CurrentLinkedTarget = &f.Target;
@@ -563,6 +580,7 @@ class AimTrainerScoringTests(unittest.TestCase):
         game = (PLUGIN / "Source/Private/NCAimTrainerGame.cpp").read_text(encoding="utf-8-sig")
         weapon = (PLUGIN.parents[1] / "Source/UnrealTournament/Private/UTWeapon.cpp").read_text(encoding="utf-8-sig")
         scoring = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScoring.h").as_posix() + '"'
+        scoring += '\n#include "' + (PLUGIN / "Source/Public/NCAimTrainerClock.h").as_posix() + '"'
         source = directory / "trainer.cpp"
         policy = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix() + '"'
         policy += '\n#include "' + (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix() + '"'
@@ -612,6 +630,7 @@ class AimTrainerScoringTests(unittest.TestCase):
     def test_tracking_accuracy_uses_firing_duration_and_rejects_impossible_counts(self): self.run_case("tracking_accuracy")
     def test_tracking_sampler_distinguishes_idle_off_target_and_real_beam_contact(self): self.run_case("tracking_sample")
     def test_hard_tracking_excludes_idle_time_and_counts_only_real_beam_contact(self): self.run_case("hard_tracking_sample")
+    def test_tracking_sample_timestamps_and_credit_keep_precision_at_large_world_age(self): self.run_case("tracking_aged_clock")
     def test_tracking_sampler_rejects_stalls_invalid_clocks_and_ended_runs(self): self.run_case("tracking_clock")
 
 

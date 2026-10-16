@@ -359,7 +359,8 @@ struct ANCAimTrainerGame : BaseGame {
     int NetMode=NM_Standalone;
     void* BaseMutator=nullptr;
     bool bRankedRun=false, bPreviousContact=false, bPreviousFiring=false;
-    float PhaseStartedAt=0;
+    double PhaseStartedAt=0;
+    double GetTrainerTimeSeconds() const { return TheWorld.TimeSeconds; }
     double TrackedSeconds=0, FiredSeconds=0;
     struct { void Initialize(int) {} } Schedule;
     using Room = ANCAimTrainerArena;
@@ -375,12 +376,13 @@ struct ANCAimTrainerGame : BaseGame {
     NCAimTrainerDrillPolicy::FAttempt Drill;
     FNCAimTrainerSpawnBalance AirborneSpawnBalance;
     int32 FlakAttemptShot=0, HeadshotClearedSlots=0;
-    float PendingFlakHitDamage=0.f, FlakHitFeedbackAt=0.f;
+    float PendingFlakHitDamage=0.f; double FlakHitFeedbackAt=0.0;
     FVector FlakHitFeedbackLocation{0.f,0.f,0.f};
     TArray<int> FlakPellets, PopupSpawnVariants, PopupDodgeActions;
-    TArray<float> NextCrouchTime, CrouchEndTime, PopupLastMoveHold;
-    TArray<float> NextPopupSlideTime, NextPopupLongStrafeTime, NextPopupDodgeTime;
-    float NextTrackingSlideTime=0.f;
+    TArray<double> NextCrouchTime, CrouchEndTime;
+    TArray<float> PopupLastMoveHold;
+    TArray<double> NextPopupSlideTime, NextPopupLongStrafeTime, NextPopupDodgeTime;
+    double NextTrackingSlideTime=0.0;
     void HideAllTargets();
     bool EnsureArena();
     bool FailSetup(const char* message) { SetupError = message; return false; }

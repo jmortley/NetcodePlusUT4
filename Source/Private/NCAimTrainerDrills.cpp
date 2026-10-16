@@ -11,7 +11,7 @@
 
 void ANCAimTrainerGame::QueueFlakHitFeedback(float Damage, const FVector& HitLocation)
 {
-    const float Now = GetWorld()->GetTimeSeconds();
+    const double Now = GetTrainerTimeSeconds();
     if (PendingFlakHitDamage > 0.f && Now >= FlakHitFeedbackAt) { FlushFlakHitFeedback(); }
     if (PendingFlakHitDamage <= 0.f)
     {
@@ -27,7 +27,8 @@ void ANCAimTrainerGame::FlushFlakHitFeedback()
 {
     const float Damage = PendingFlakHitDamage;
     const FVector HitLocation = FlakHitFeedbackLocation;
-    PendingFlakHitDamage = FlakHitFeedbackAt = 0.f;
+    PendingFlakHitDamage = 0.f;
+    FlakHitFeedbackAt = 0.0;
     FlakHitFeedbackLocation = FVector::ZeroVector;
     if (Trainee && Progress.Phase == 2 && NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario)
         && FMath::IsFinite(Damage) && Damage > 0.f)
@@ -49,7 +50,7 @@ void ANCAimTrainerGame::PublishDrillStatus()
 void ANCAimTrainerGame::UpdateDrillShots()
 {
     if (Progress.Shots <= Drill.Shot) { return; }
-    const float Now = GetWorld()->GetTimeSeconds();
+    const double Now = GetTrainerTimeSeconds();
     Drill.ObserveShot(Progress.Shots, Now);
     if (NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario) && Targets.IsValidIndex(0) && Targets[0]->IsAvailable())
     {
@@ -59,7 +60,7 @@ void ANCAimTrainerGame::UpdateDrillShots()
     PublishDrillStatus();
 }
 
-void ANCAimTrainerGame::ActivateDrillTarget(float Now)
+void ANCAimTrainerGame::ActivateDrillTarget(double Now)
 {
     ANCAimTrainerTarget* Target = Targets[0];
     const float Height = Target->GetClass()->GetDefaultObject<ANCAimTrainerTarget>()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
@@ -93,7 +94,7 @@ void ANCAimTrainerGame::ActivateDrillTarget(float Now)
     PublishDrillStatus();
 }
 
-void ANCAimTrainerGame::RetireDrillTarget(bool bSuccess, float Now)
+void ANCAimTrainerGame::RetireDrillTarget(bool bSuccess, double Now)
 {
     ANCAimTrainerTarget* Target = Targets[0];
     if (!Target->IsAvailable()) { return; }
@@ -117,7 +118,7 @@ void ANCAimTrainerGame::RetireDrillTarget(bool bSuccess, float Now)
     PublishDrillStatus();
 }
 
-void ANCAimTrainerGame::UpdateDrillTargets(float Now)
+void ANCAimTrainerGame::UpdateDrillTargets(double Now)
 {
     if (!Targets.IsValidIndex(0) || !Targets[0] || Now >= PhaseStartedAt + 60.f) { return; }
     if (PendingFlakHitDamage > 0.f && Now >= FlakHitFeedbackAt) { FlushFlakHitFeedback(); }
@@ -186,7 +187,7 @@ float ANCAimTrainerGame::RecordDrillHit(ANCAimTrainerTarget* Target, float Damag
     const FDamageEvent& Event, AActor* Causer)
 {
     if (Target != Targets[0]) { return 0.f; }
-    const float Now = GetWorld()->GetTimeSeconds();
+    const double Now = GetTrainerTimeSeconds();
     const bool bFlak = NCAimTrainerScenarioPolicy::IsFlakScenario(Progress.Scenario);
     if (bFlak)
     {
@@ -194,7 +195,7 @@ float ANCAimTrainerGame::RecordDrillHit(ANCAimTrainerTarget* Target, float Damag
         AUTProjectile* Pellet = Cast<AUTProjectile>(Causer);
         if (!Flak || !Pellet || Pellet->Role != ROLE_Authority || Pellet->InstigatorController != Trainee
             || Pellet->GetInstigator() != Trainee->GetPawn() || Event.DamageTypeClass != Pellet->MyDamageType
-            || Pellet->CreationTime < Target->GetAppearanceTime()
+            || Pellet->CreationTime < Target->GetAppearanceWorldTime()
             || (!(Flak->ProjClass.IsValidIndex(0) && Pellet->GetClass() == Flak->ProjClass[0])
                 && !(Flak->MultiShotProjClass.IsValidIndex(0) && Pellet->GetClass() == Flak->MultiShotProjClass[0]))) { return 0.f; }
         UpdateShotCount(); // The native multishot counter increments once before spawning its shards.

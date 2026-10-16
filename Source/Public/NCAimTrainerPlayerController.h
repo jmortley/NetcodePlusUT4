@@ -6,6 +6,11 @@
 #include "NCAimTrainerScenarioId.h"
 #include "NCAimTrainerPlayerController.generated.h"
 
+namespace NCAimTrainerSaveState
+{
+	enum Type : uint8 { None, Pending, Saved, NotSaved, Unconfirmed };
+}
+
 /** Small, owner-only presentation snapshot. Scores are calculated by the game mode. */
 USTRUCT()
 struct FNCAimTrainerProgress
@@ -15,6 +20,8 @@ struct FNCAimTrainerProgress
 	UPROPERTY() uint8 Scenario = 0;
 	/** 0 picker, 1 countdown, 2 running, 3 results. */
 	UPROPERTY() uint8 Phase = 0;
+	/** A completed run is saved only after the score service confirms it. */
+	UPROPERTY() uint8 SaveState = NCAimTrainerSaveState::None;
 	/** Optional lateral/jump/dodge practice, ranked separately from fixed position. */
 	UPROPERTY() bool bMovementPractice = false;
 	/** Selected from the owning player's existing NCP hitscan preference. */
@@ -97,6 +104,9 @@ public:
 	UFUNCTION(Client, Reliable)
 	void ClientTrainerFlakHit(int32 Damage, FVector_NetQuantize HitLocation);
 
+	/** Local monotonic queue age; the announcer engine QueueTime is float world time. */
+	double GetTrainerCountdownAge(int32 Count) const;
+
 private:
 	UPROPERTY(ReplicatedUsing=OnRep_TrainerProgress)
 	FNCAimTrainerProgress TrainerProgress;
@@ -128,6 +138,7 @@ private:
 	uint8 LastPresentedPhase = 255;
 	uint8 LastPresentedScenario = 255;
 	int32 LastAnnouncedCountdown = 4;
+	double TrainerCountdownQueuedAt = 0.0;
 	bool bLastPresentedMovementPractice = false;
 	bool bTrackingPrimaryHeld = false;
 	bool bTrackingAltHeld = false;

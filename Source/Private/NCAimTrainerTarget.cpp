@@ -16,6 +16,7 @@
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Net/UnrealNetwork.h"
+#include "HAL/PlatformTime.h"
 
 ANCAimTrainerTarget::ANCAimTrainerTarget(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
@@ -236,7 +237,9 @@ void ANCAimTrainerTarget::ActivateTarget(const FVector& Location, bool bStrafe)
     SavedPositions.Reset();
     SavedCapsulePostures.Reset();
     SpawnProtectionStartTime = -1000.f;
-    AppearanceTime = GetWorld()->GetTimeSeconds();
+    AppearanceTime = GetTrainerTimeSeconds();
+    // CreationTime belongs to the engine clock; retain only this interoperability stamp.
+    AppearanceWorldTime = GetWorld()->GetTimeSeconds();
     bTrainerVisible = true;
     GetCharacterMovement()->SetMovementMode(bStrafe ? MOVE_Walking : MOVE_Flying);
     OnRep_TrainerVisible();
@@ -352,7 +355,7 @@ bool ANCAimTrainerTarget::StartPopupLongStrafe(float HalfWidth, float HoldSecond
     // use a fresh random direction. Native acceleration and braking still apply.
     StrafeDirection = NCAimTrainerScenarioPolicy::PopupLongStrafeDirection(
         GetActorLocation().Y - StrafeCenter.Y, DirectionRoll);
-    PopupLongStrafeEndTime = GetWorld()->GetTimeSeconds() + FMath::Clamp(HoldSeconds, 0.4f, 1.f);
+    PopupLongStrafeEndTime = GetTrainerTimeSeconds() + FMath::Clamp(HoldSeconds, 0.4f, 1.f);
     return true;
 }
 
@@ -624,11 +627,19 @@ bool ANCAimTrainerTarget::StartTrainerSlide(const FVector& Direction)
     return true;
 }
 
+double ANCAimTrainerTarget::GetTrainerTimeSeconds() const
+{
+    const ANCAimTrainerGame* Game = GetWorld() ? Cast<ANCAimTrainerGame>(GetWorld()->GetAuthGameMode()) : nullptr;
+    // Authority-only movement calls always belong to the trainer game. Never
+    // fall back to accumulated float world time when the mode is unavailable.
+    return Game ? Game->GetTrainerTimeSeconds() : 0.0;
+}
+
 void ANCAimTrainerTarget::Tick(float DeltaSeconds)
 {
     if (Role == ROLE_Authority)
     {
-        if (IsTrainerLongStrafing() && GetWorld()->GetTimeSeconds() >= PopupLongStrafeEndTime)
+        if (IsTrainerLongStrafing() && GetTrainerTimeSeconds() >= PopupLongStrafeEndTime)
         {
             // Return with normal movement if the long hold reached outside the
             // short wiggle band. Never move the center or teleport back to it.
@@ -742,11 +753,12 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
         }
     }
     Super::Tick(DeltaSeconds);
-    if (GetNetMode() != NM_DedicatedServer && GetWorld()->GetTimeSeconds() >= NextTrainerTintTime)
+    const double CosmeticNow = FPlatformTime::Seconds();
+    if (GetNetMode() != NM_DedicatedServer && CosmeticNow >= NextTrainerTintTime)
     {
         UpdateTrainerTint();
         UpdateDrillFlag();
-        NextTrainerTintTime = GetWorld()->GetTimeSeconds() + 0.25f;
+        NextTrainerTintTime = CosmeticNow + 0.25;
     }
 }
 

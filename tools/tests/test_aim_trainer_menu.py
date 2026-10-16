@@ -42,7 +42,7 @@ struct FString : std::string {
 };
 struct FMath { template<class T> static T Clamp(T x, T lo, T hi) { return std::max(lo, std::min(x, hi)); } };
 struct FLinearColor { FLinearColor(float=0, float=0, float=0, float=0) {} };
-FLinearColor TrainerPanel, TrainerInk, TrainerMuted, TrainerAccent;
+FLinearColor TrainerPanel, TrainerInk, TrainerMuted, TrainerAccent, TrainerWarning;
 struct FVector2D { float X=0, Y=0; };
 enum class EKeys { LeftMouseButton, Other, Invalid, Enter, R, T };
 struct FText { FString Value; FString ToString() const { return Value; } };
@@ -62,7 +62,7 @@ namespace NCPlusHUDDragMode { bool Active=false; bool IsActive() { return Active
 namespace EInputMode { enum Type { EIM_GameAndUI, EIM_GameOnly }; }
 enum EInputEvent { IE_Pressed, IE_Released };
 struct FNCAimTrainerProgress {
-    uint8 Scenario=0;
+    uint8 Scenario=0, SaveState=0;
     bool bMovementPractice=false;
     int Score=0, Hits=0, Shots=0, TargetsExpired=0, Headshots=0;
     float TrackingSeconds=0, FiringSeconds=0, Accuracy=0;
@@ -136,6 +136,16 @@ int main() {
     Require(hud.TrainerButtons.size()==3 && hud.TrainerButtons[0].Action==BackAction && hud.TrainerButtons[2].Action==StartAction,
         "result controls collide with scenario IDs");
     Require(hud.TrainerButtons.back().Text=="ENTER / R  /  PLAY AGAIN", "result replay omits default restart key");
+    const unsigned char saveStates[]={NCAimTrainerSaveState::Pending,NCAimTrainerSaveState::Saved,
+        NCAimTrainerSaveState::NotSaved,NCAimTrainerSaveState::Unconfirmed};
+    const char* saveLabels[]={"RUN COMPLETE / SAVING...","RUN COMPLETE / SAVED",
+        "RUN NOT SAVED","RUN COMPLETE / SAVE NOT CONFIRMED"};
+    for(int state=0;state<4;++state) {
+        pc.Progress.SaveState=saveStates[state];
+        hud.Labels.clear(); hud.DrawResults(&pc);
+        Require(std::find(hud.Labels.begin(),hud.Labels.end(),saveLabels[state])!=hud.Labels.end(),
+            "results omitted or misrepresented the save outcome");
+    }
     for (EKeys key : {EKeys::T,EKeys::Invalid,EKeys::Enter}) {
         NCAimTrainerInputSettings::RestartKey=key;
         hud.TrainerButtons.clear(); hud.DrawResults(&pc);
@@ -160,6 +170,8 @@ class AimTrainerMenuTests(unittest.TestCase):
         compiler, environment, msvc = find_compiler()
         native = (PLUGIN / "Source/Private/NCAimTrainerHUD.cpp").read_text(encoding="utf-8-sig")
         actions = re.search(r"enum \{ StartAction[^}]+\};", native).group()
+        controller = (PLUGIN / "Source/Public/NCAimTrainerPlayerController.h").read_text(encoding="utf-8-sig")
+        save_states = native_function(controller, "namespace NCAimTrainerSaveState")
         functions = [native_function(native, signature) for signature in (
             "const TCHAR* ScenarioName", "void ANCAimTrainerHUD::DrawModePicker",
             "void ANCAimTrainerHUD::DrawResults", "bool ANCAimTrainerHUD::OverrideMouseClick",
@@ -168,7 +180,7 @@ class AimTrainerMenuTests(unittest.TestCase):
             directory = Path(temporary)
             source = directory / "menu.cpp"
             policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()
-            source.write_text("\n".join([f'#include "{policy}"', ADAPTER, actions] + functions + [CASES]), encoding="utf-8")
+            source.write_text("\n".join([f'#include "{policy}"', ADAPTER, save_states, actions] + functions + [CASES]), encoding="utf-8")
             executable = directory / ("menu.exe" if os.name == "nt" else "menu")
             command = ([compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source), f"/Fe{executable}", f"/Fo{directory / 'menu.obj'}"] if msvc else
                        [compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror", "-pedantic", str(source), "-o", str(executable)])

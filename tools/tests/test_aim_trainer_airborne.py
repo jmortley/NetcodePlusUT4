@@ -24,7 +24,7 @@ ADAPTER = r'''
 using int32 = int;
 constexpr int ROLE_Authority = 3;
 struct FMath {
-    static float Min(float a,float b) { return std::min(a,b); }
+    template<class T> static T Min(T a,T b) { return std::min(a,b); }
     static bool IsFinite(float value) { return std::isfinite(value); }
     static float Abs(float value) { return std::fabs(value); }
 };
@@ -79,8 +79,11 @@ struct ANCAimTrainerTarget : AActor {
     } Move;
     bool Visible=false, HasCapsule=true, LaunchAllowed=true;
     int Activations=0, Launches=0, Hides=0;
-    float HeadScale=1.f, Appearance=0.f, NativeGravityZ=-980.f, FlightRate=1.f;
-    const float* WorldNow=nullptr;
+    float HeadScale=1.f, NativeGravityZ=-980.f, FlightRate=1.f;
+    double Appearance=0.0;
+    bool ExplicitWorldAppearance=false;
+    float WorldAppearance=0.f;
+    const double* WorldNow=nullptr;
     UClass* Class=&TeamClass;
     FVector Position, Velocity;
     const Capsule* GetCapsuleComponent() const { return HasCapsule?&Shape:nullptr; }
@@ -89,7 +92,8 @@ struct ANCAimTrainerTarget : AActor {
     FVector GetActorLocation() const { return Position; }
     UClass* GetClass() const { return Class; }
     bool IsAvailable() const { return Visible; }
-    float GetAppearanceTime() const { return Appearance; }
+    double GetAppearanceTime() const { return Appearance; }
+    float GetAppearanceWorldTime() const { return ExplicitWorldAppearance?WorldAppearance:float(Appearance); }
     bool LaunchAirborneTarget(const FVector& velocity) {
         if(!LaunchAllowed || !Visible) return false;
         Velocity=velocity; Move.Grounded=false; ++Launches; return true;
@@ -110,7 +114,7 @@ template<class T> const T* UClass::GetDefaultObject() const {
 struct ANCAimTrainerGame {
     FNCAimTrainerSpawnBalance AirborneSpawnBalance;
     struct { int TargetsExpired=0, Phase=2, Scenario=9; } Progress;
-    struct World { float Now=10.f; float GetTimeSeconds() const { return Now; } } TheWorld;
+    struct World { double Now=10.0; float GetTimeSeconds() const { return float(Now); } } TheWorld;
     struct {
         float Roll=.5f;
         int SlotChoice=0;
@@ -125,8 +129,10 @@ struct ANCAimTrainerGame {
     AUTWeapon* RunWeapon=nullptr;
     TArray<ANCAimTrainerTarget*> Targets;
     FVector ArenaOrigin=FVector(0.f,0.f,50000.f);
-    float PhaseStartedAt=10.f, NextPopupTime=10.f;
-    float TargetExpiry[6]={}, NextTargetTime[6]={};
+    double PhaseStartedAt=10.0, NextPopupTime=10.0;
+    float PhaseStartedWorldAt=10.f;
+    double GetTrainerTimeSeconds() const { return TheWorld.Now; }
+    double TargetExpiry[6]={}, NextTargetTime[6]={};
     int LocalAppearances[6]={}, ScoreUpdates=0;
     const World* GetWorld() const { return &TheWorld; }
     void UpdateShotCount() { ++ScoreUpdates; }
@@ -134,8 +140,8 @@ struct ANCAimTrainerGame {
     bool IsCurrentRocketDamage(const ANCAimTrainerTarget*,const FDamageEvent&,AActor*) const;
     bool IsAtAirborneHazard(const ANCAimTrainerTarget*) const;
     bool LaunchAirborneJumper();
-    void ActivateAirborneSlot(int32,float);
-    void UpdateAirborneTargets(float);
+    void ActivateAirborneSlot(int32,double);
+    void UpdateAirborneTargets(double);
 };
 struct Fixture {
     ANCAimTrainerGame Game;
@@ -156,20 +162,21 @@ struct Fixture {
             Game.Targets.Add(&Targets[i]);
         }
     }
-    void At(float now) { Game.TheWorld.Now=now; Game.UpdateAirborneTargets(now); }
+    void At(double now) { Game.TheWorld.Now=now; Game.UpdateAirborneTargets(now); }
     bool RocketOkay() { return Game.IsCurrentRocketDamage(&Targets[0],Event,&Projectile); }
     int VisibleFalls() const {
         int count=0; for(int i=1;i<6;++i) count+=int(Targets[i].Visible); return count;
     }
 };
 void Require(bool value,const char* why) { if(!value) { std::cerr<<why<<'\n'; std::exit(1); } }
-bool Near(float a,float b,float tolerance=.025f) { return std::fabs(a-b)<=tolerance; }
+bool Near(double a,double b,double tolerance=.025) { return std::fabs(a-b)<=tolerance; }
 float FallSeconds(const ANCAimTrainerTarget& target,const FVector& origin,float hazard) {
     const float height=target.Position.Z-origin.Z-target.Shape.HalfHeight-hazard;
     const float gravity=-target.Move.GravityZ, vz=target.Velocity.Z;
     return (vz+std::sqrt(vz*vz+2.f*gravity*height))/gravity;
 }
-FVector BallisticPosition(const ANCAimTrainerTarget& target,const FVector& origin,float time) {
+FVector BallisticPosition(const ANCAimTrainerTarget& target,const FVector& origin,double elapsed) {
+    const float time=float(elapsed);
     const FVector start=target.Position-origin;
     return FVector(start.X+target.Velocity.X*time,start.Y+target.Velocity.Y*time,
         start.Z+target.Velocity.Z*time+.5f*target.Move.GravityZ*time*time);
@@ -241,7 +248,7 @@ int main(int argc,char** argv) {
         f.Game.ActivateAirborneSlot(0,10.f);
         Require(f.Targets[0].Position.Y>f.Game.ArenaOrigin.Y,"jumper respawn ignored farmed launch side");
     } else if(name=="trajectory_bounds") {
-        int diagonal=0,vertical=0;
+        int diagonal=0,vertical=0,padContacts[4]={};
         for(int scenario:{7,8,9,10}) for(float gravity:{-980.f,-1960.f}) {
             Fixture f; f.Game.Progress.Scenario=scenario; f.Game.Schedule.Seed=9073;
             const bool rockets=scenario==10;
@@ -251,11 +258,15 @@ int main(int argc,char** argv) {
                 if(scenario==7) { target.Class=&IGClass; target.Shape.HalfHeight=103.f; }
                 f.Game.ActivateAirborneSlot(slot,10.f);
                 target.Velocity.X==0.f?++vertical:++diagonal;
-                const float duration=f.Game.TargetExpiry[slot]-10.f;
+                const float duration=float(f.Game.TargetExpiry[slot]-10.0);
                 const float contact=FallSeconds(target,f.Game.ArenaOrigin,AirborneHazardHeight(rockets));
-                Require(Near(duration,std::max(.75f,contact-1.f)),"native preset lost shortened exposure or minimum opportunity");
+                Require(Near(duration,std::max(.75f,contact-1.f)+.9f),"native preset lost the additional 0.9s exposure");
+                // Goo contact can retire a short flight before its configured
+                // deadline; only the visible portion must clear the geometry.
+                const float visibleDuration=std::min(duration,contact);
+                bool contactedPad=false;
                 for(int step=0;step<=20;++step) {
-                    const FVector p=BallisticPosition(target,f.Game.ArenaOrigin,duration*step/20.f);
+                    const FVector p=BallisticPosition(target,f.Game.ArenaOrigin,visibleDuration*step/20.f);
                     Require(std::fabs(p.X)+40.f<3200.f && std::fabs(p.Y)+40.f<1800.f
                         && p.Z+target.Shape.HalfHeight<2000.f,"diagonal fall intersects arena wall or ceiling");
                     for(int pad=0;pad<2;++pad) {
@@ -263,12 +274,36 @@ int main(int argc,char** argv) {
                         const bool overlap=std::fabs(p.X-block.CenterX)<block.SizeX*.5f+40.f
                             &&std::fabs(p.Y-block.CenterY)<block.SizeY*.5f+40.f
                             &&p.Z-target.Shape.HalfHeight<block.Height;
-                        Require(!overlap,"diagonal target lands on a pad before its planned expiry");
+                        if(overlap) {
+                            // The engine ends this flight at the platform. Feed
+                            // that grounded state into the native retirement
+                            // path rather than sampling through the platform.
+                            Fixture landed; landed.Game.Progress.Scenario=scenario;
+                            for(double& next:landed.Game.NextTargetTime) next=1000.f;
+                            landed.Game.NextPopupTime=1000.f;
+                            landed.Targets[slot]=target;
+                            landed.Targets[slot].Position=landed.Game.ArenaOrigin+p;
+                            landed.Targets[slot].Move.Grounded=true;
+                            landed.Game.TargetExpiry[slot]=10.f+duration;
+                            landed.Game.LocalAppearances[slot]=1;
+                            const float now=10.f+visibleDuration*step/20.f;
+                            landed.At(now); landed.At(now);
+                            Require(!landed.Targets[slot].Visible && landed.Targets[slot].Hides==1
+                                    && landed.Game.Progress.TargetsExpired==1 && landed.Game.ScoreUpdates==1
+                                    && landed.Game.Terminals.size()==1 && landed.Game.Terminals[0].Slot==slot
+                                    && landed.Game.Terminals[0].Appearance==1 && !landed.Game.Terminals[0].Hit
+                                    && Near(landed.Game.NextTargetTime[slot],now+.2f),
+                                    "platform contact did not retire exactly once before the slot's reuse delay");
+                            ++padContacts[scenario-7]; contactedPad=true; break;
+                        }
                     }
+                    if(contactedPad) break;
                 }
             }
         }
         Require(diagonal>8500 && diagonal<10500 && vertical>5500,"independent draws did not mix diagonal and ordinary falls");
+        Require(padContacts[0]>0 && padContacts[1]>0 && padContacts[2]>0 && padContacts[3]>0,
+                "trajectory sampling no longer exercises physical platform retirement in every airborne mode");
     } else if(name=="falls") {
         for(int scenario:{7,8,9,10}) for(float roll:{0.f,.2f,.8f,1.f}) {
             Fixture f; f.Game.Progress.Scenario=scenario; f.Game.Schedule.Roll=roll;
@@ -300,7 +335,7 @@ int main(int argc,char** argv) {
                         && f.Targets[index].HeadScale==1.f && !f.Game.IsAtAirborneHazard(&f.Targets[index]),
                         "fall activation failed to reset hitbox, appearance or native flight");
                 const float time=FallSeconds(f.Targets[index],f.Game.ArenaOrigin,AirborneHazardHeight(rockets));
-                Require(Near(f.Game.TargetExpiry[index]-10.f,std::max(.75f,time-1.f)),"fall lost shortened lifetime or minimum opportunity");
+                Require(Near(f.Game.TargetExpiry[index]-10.f,std::max(.75f,time-1.f)+.9f),"fall lost the additional 0.9s lifetime");
                 const float finalY=p.Y+f.Targets[index].Velocity.Y*time;
                 Require(std::fabs(finalY)+40.f<1800.f && p.X+40.f<3200.f,
                         "native-gravity fall drift carries a full capsule outside the room before lava");
@@ -366,7 +401,7 @@ int main(int argc,char** argv) {
                 // Scenario9 retains the old unscaled layout and native gravity.
                 original.Game.Progress.Scenario=9; compact.Game.Progress.Scenario=10;
                 original.Game.Schedule.Roll=compact.Game.Schedule.Roll=roll;
-                for(float& next:compact.Game.NextTargetTime) next=1000.f;
+                for(double& next:compact.Game.NextTargetTime) next=1000.f;
                 compact.Game.NextPopupTime=1000.f;
                 auto& oldTarget=original.Targets[index]; auto& newTarget=compact.Targets[index];
                 const bool sideWall=NCAimTrainerAirbornePolicy::UseSideWallSeat(index-1,roll);
@@ -393,19 +428,23 @@ int main(int argc,char** argv) {
                         BallisticPosition(newTarget,compact.Game.ArenaOrigin,newSampleTime),rearOffset,rearRaise);
                 }
                 const FVector end=BallisticPosition(newTarget,compact.Game.ArenaOrigin,newTime);
-                const float expiry=compact.Game.TargetExpiry[index];
-                Require(Near(expiry,10.f+std::max(.75f,newTime-1.f)),"raised rocket fall did not retain height with the shorter exposure");
-                const FVector justAbove=BallisticPosition(newTarget,compact.Game.ArenaOrigin,expiry-10.f-.01f);
+                const double expiry=compact.Game.TargetExpiry[index];
+                Require(Near(expiry,10.f+std::max(.75f,newTime-1.f)+.9f),"rocket fall did not gain 0.9s of configured exposure");
+                const double retirement=std::min(expiry,10.0+newTime);
+                const FVector justAbove=BallisticPosition(newTarget,compact.Game.ArenaOrigin,retirement-10.f-.01f);
+                const FVector terminalPosition=BallisticPosition(newTarget,compact.Game.ArenaOrigin,retirement-10.f);
                 newTarget.Position=compact.Game.ArenaOrigin+justAbove;
-                compact.At(expiry-.01f);
+                compact.At(retirement-.01f);
                 Require(newTarget.Visible && compact.Game.Progress.TargetsExpired==0,
-                        "rocket drop expired before its shortened deadline");
+                        "rocket drop expired before its deadline or physical goo contact");
                 Require(Near(end.Z-newTarget.Shape.HalfHeight,211.5f),
                         "full-size rocket target did not reach the goo at its native ballistic endpoint");
-                compact.At(expiry);
+                newTarget.Position=compact.Game.ArenaOrigin+terminalPosition;
+                if(retirement<expiry) newTarget.Position.Z=compact.Game.ArenaOrigin.Z+211.5f+newTarget.Shape.HalfHeight;
+                compact.At(retirement);
                 Require(!newTarget.Visible && compact.Game.Progress.TargetsExpired==1
                         && compact.Game.Terminals.size()==1 && compact.Game.Terminals[0].Appearance==1,
-                        "rocket fall did not retire exactly once at its deadline above goo");
+                        "rocket fall did not retire exactly once at the earlier of deadline and goo contact");
             }
         }
     } else if(name=="rocket_compact_jumper") {
@@ -446,11 +485,39 @@ int main(int argc,char** argv) {
         f.At(30.f); Require(f.VisibleFalls()==1,"same-tick retry bypassed fall cadence");
         f.Game.Schedule.Roll=0.f; f.At(30.66f);
         Require(f.Targets[1].Visible && f.VisibleFalls()==2,"eligible slot randomization always preferred one station");
+    } else if(name=="lifetime_extension") {
+        for(int scenario:{7,8,9,10}) {
+            Fixture f; f.Game.Progress.Scenario=scenario; f.Game.Schedule.Roll=.8f;
+            for(double& next:f.Game.NextTargetTime) next=1000.f;
+            f.Game.NextPopupTime=1000.f;
+            auto& target=f.Targets[3];
+            if(scenario==7) { target.Class=&IGClass; target.Shape.HalfHeight=103.f; }
+            f.Game.ActivateAirborneSlot(3,10.f);
+            const ANCAimTrainerTarget launch=target;
+            const float contact=FallSeconds(launch,f.Game.ArenaOrigin,AirborneHazardHeight(scenario==10));
+            const float oldDeadline=10.f+std::max(.75f,contact-1.f);
+            const double expiry=f.Game.TargetExpiry[3];
+            Require(Near(expiry-oldDeadline,.9f) && expiry<10.f+contact,
+                    "airborne mode did not gain a full 0.9s before goo contact on this trajectory");
+            for(double now:{double(oldDeadline)+.01,expiry-.01}) {
+                target.Position=f.Game.ArenaOrigin+BallisticPosition(launch,f.Game.ArenaOrigin,now-10.f);
+                f.At(now);
+                Require(target.Visible && target.Hides==0 && f.Game.Progress.TargetsExpired==0
+                        && f.Game.Terminals.empty() && f.Game.ScoreUpdates==0,
+                        "airborne target did not remain available throughout its additional exposure");
+            }
+            target.Position=f.Game.ArenaOrigin+BallisticPosition(launch,f.Game.ArenaOrigin,expiry-10.f);
+            f.At(expiry); f.At(expiry);
+            Require(!target.Visible && target.Hides==1 && f.Game.Progress.TargetsExpired==1
+                    && f.Game.Terminals.size()==1 && f.Game.Terminals[0].Slot==3
+                    && f.Game.Terminals[0].Appearance==1 && !f.Game.Terminals[0].Hit && f.Game.ScoreUpdates==1,
+                    "extended airborne deadline did not retire and score exactly once");
+        }
     } else if(name=="hazard_reuse") {
-        for(int scenario:{9,10}) {
+        for(int scenario:{7,8,9,10}) {
         Fixture f;
         f.Game.Progress.Scenario=scenario;
-        for(float& next:f.Game.NextTargetTime) next=1000.f;
+        for(double& next:f.Game.NextTargetTime) next=1000.f;
         f.Game.ActivateAirborneSlot(2,10.f);
         f.Targets[2].Position.Z=f.Game.ArenaOrigin.Z+AirborneHazardHeight(scenario==10)+f.Targets[2].Shape.HalfHeight;
         f.At(11.f);
@@ -467,13 +534,18 @@ int main(int argc,char** argv) {
                 "projectile from before reused target's appearance received credit");
         }
     } else if(name=="landed_fall") {
+        for(int scenario:{7,8,9,10}) {
         Fixture f;
-        for(float& next:f.Game.NextTargetTime) next=1000.f;
+        f.Game.Progress.Scenario=scenario;
+        for(double& next:f.Game.NextTargetTime) next=1000.f;
         f.Game.ActivateAirborneSlot(3,10.f);
         f.Targets[3].Position.Z=f.Game.ArenaOrigin.Z+1000.f; f.Targets[3].Move.Grounded=true;
-        f.At(11.f);
-        Require(!f.Targets[3].Visible && f.Game.Progress.TargetsExpired==1,
+        Require(f.Game.TargetExpiry[3]>11.f,"fixture landing is not before the configured deadline");
+        f.At(11.f); f.At(11.f);
+        Require(!f.Targets[3].Visible && f.Targets[3].Hides==1 && f.Game.Progress.TargetsExpired==1
+                && f.Game.Terminals.size()==1 && f.Game.ScoreUpdates==1 && Near(f.Game.NextTargetTime[3],11.2f),
                 "fall target survived unexpected contact with a platform above lava");
+        }
     } else if(name=="hazard_bounds") {
         for(int scenario:{7,8,9,10}) {
         Fixture f; auto& target=f.Targets[0];
@@ -500,7 +572,7 @@ int main(int argc,char** argv) {
             f.Game.Schedule.SlotChoice=initialPad;
             target.Class=instagib?&IGClass:&TeamClass; target.Shape.HalfHeight=instagib?103.f:108.f;
             target.NativeGravityZ=gravity; target.Move.GravityZ=gravity;
-            for(float& next:f.Game.NextTargetTime) next=1000.f;
+            for(double& next:f.Game.NextTargetTime) next=1000.f;
             f.Game.ActivateAirborneSlot(0,10.f);
             for(int landingPad:{1-initialPad,initialPad}) {
                 const FVector start=target.Position-f.Game.ArenaOrigin;
@@ -528,6 +600,14 @@ int main(int argc,char** argv) {
             }
         }
     } else if(name=="deadline") {
+        for(int scenario:{7,8,9,10}) {
+            Fixture f; f.Game.Progress.Scenario=scenario;
+            f.Game.ActivateAirborneSlot(1,69.5f);
+            Require(f.Targets[1].Visible && Near(f.Game.TargetExpiry[1],70.f),
+                    "additional fall exposure extended beyond the run deadline");
+            f.Game.ActivateAirborneSlot(0,10.f);
+            Require(Near(f.Game.TargetExpiry[0],70.f),"fall timeout was applied to the persistent jumper");
+        }
         for(int phase:{0,1,3}) {
             Fixture f; f.Game.Progress.Phase=phase;
             f.Game.ActivateAirborneSlot(1,10.f); f.At(10.f);
@@ -577,6 +657,16 @@ int main(int argc,char** argv) {
         Require(!f.RocketOkay(),"missing damage type scored");
         f.Projectile.MyDamageType=41; Require(!f.RocketOkay(),"mismatched damage event scored");
         f.Projectile.MyDamageType=42; Require(f.RocketOkay(),"current authority projectile identity rejected");
+    } else if(name=="rocket_clock_domains") {
+        Fixture f; f.Game.TheWorld.Now=24.f;
+        f.Game.PhaseStartedAt=5000.0; f.Game.PhaseStartedWorldAt=20.f;
+        f.Targets[0].Appearance=5001.0; f.Targets[0].ExplicitWorldAppearance=true; f.Targets[0].WorldAppearance=21.f;
+        f.Projectile.CreationTime=22.f;
+        Require(f.RocketOkay(),"rocket birth in engine world time compared to the trainer clock epoch");
+        f.Projectile.CreationTime=20.5f;
+        Require(!f.RocketOkay(),"clock migration admitted a projectile older than the current target appearance");
+        f.Projectile.CreationTime=19.9f;
+        Require(!f.RocketOkay(),"clock migration admitted a projectile older than the run");
     } else if(name=="rocket_age") {
         Fixture f; f.Game.TheWorld.Now=15.f;
         Require(f.RocketOkay(),"projectile exactly five seconds old rejected");
@@ -629,8 +719,8 @@ class AimTrainerAirborneTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
-for _case in ("adaptive_history", "adaptive_schedule", "trajectory_bounds", "falls", "sidewall_mix", "flight_rates", "rocket_compact_falls", "rocket_compact_jumper", "stagger", "hazard_reuse", "landed_fall", "hazard_bounds", "jumper_arc", "jumper_failure", "deadline",
-              "rocket_classes", "rocket_owner_type_role", "rocket_age"):
+for _case in ("adaptive_history", "adaptive_schedule", "trajectory_bounds", "falls", "sidewall_mix", "flight_rates", "rocket_compact_falls", "rocket_compact_jumper", "stagger", "lifetime_extension", "hazard_reuse", "landed_fall", "hazard_bounds", "jumper_arc", "jumper_failure", "deadline",
+              "rocket_classes", "rocket_owner_type_role", "rocket_age", "rocket_clock_domains"):
     setattr(AimTrainerAirborneTests, "test_" + _case, lambda self, case=_case: self.run_case(case))
 
 

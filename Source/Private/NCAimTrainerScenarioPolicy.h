@@ -56,6 +56,42 @@ namespace NCAimTrainerScenarioPolicy
             : Pattern < 0.66f ? 50.f + 60.f * Angle : 140.f + 40.f * Angle;
     }
 
+    inline float PopupEvasionSpeedScale(int Scenario, int Slot)
+    {
+        // Boost open-floor IG targets only. The narrow middle platform and
+        // protected peek/high-right seats retain their native movement speed.
+        return Scenario == NCAimTrainerScenarioId::InstagibPopup
+            && (Slot == 0 || Slot == 4 || Slot == 5) ? 1.2f : 1.f;
+    }
+
+    inline float InstagibPopupMoveHoldSeconds(float PatternRoll, float JitterRoll, float PreviousHold)
+    {
+        const float Pattern = UnitRoll(PatternRoll), Jitter = UnitRoll(JitterRoll);
+        // Spend less time coasting on one heading, while keeping isolated
+        // feints and genuine long runs. Never chain tiny A/D reversals.
+        if (Pattern < 0.2f && !(PreviousHold > 0.f && PreviousHold < 0.4f)) { return 0.22f + 0.12f * Jitter; }
+        return Pattern < 0.8f ? 0.44f + 0.30f * Jitter : 0.90f + 0.40f * Jitter;
+    }
+
+    inline float InstagibPopupTurnDegrees(float PatternRoll, float AngleRoll)
+    {
+        const float Pattern = UnitRoll(PatternRoll), Angle = UnitRoll(AngleRoll);
+        // Favor cross-direction cuts over barely changing course. Direction,
+        // hold time and dodge selection each use independent random rolls.
+        return Pattern < 0.1f ? 20.f + 20.f * Angle
+            : Pattern < 0.7f ? 55.f + 70.f * Angle : 135.f + 40.f * Angle;
+    }
+
+    inline float PopupDodgeChance(int Scenario)
+    {
+        return Scenario == NCAimTrainerScenarioId::InstagibPopup ? 0.75f : 0.55f;
+    }
+
+    inline float PopupDodgeSlideChance(int Scenario)
+    {
+        return Scenario == NCAimTrainerScenarioId::InstagibPopup ? 0.18f : 0.12f;
+    }
+
     inline int PopupSpawnVariant(int Slot, float Roll)
     {
         // Reuse the same timed actor across different seats, not extra targets

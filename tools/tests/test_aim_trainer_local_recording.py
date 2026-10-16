@@ -22,6 +22,7 @@ ADAPTER = r'''
 #include <vector>
 #define TEXT(x) x
 using int32 = int32_t;
+using uint8 = uint8_t;
 struct FString : std::string {
     using std::string::string;
     bool IsEmpty() const { return empty(); }
@@ -61,9 +62,10 @@ struct Sink {
 };
 struct PC { void SetTrainerOnlineStatus(const FString&) {} };
 struct ANCAimTrainerGame {
-    struct { int Scenario=1,Hits=0,Shots=0; } Progress;
+    struct { int Scenario=1,Hits=0,Shots=0,Phase=2; uint8 SaveState=0; } Progress;
     struct World { double Now=10; double GetTimeSeconds() const { return Now; } } TheWorld;
     World* GetWorld() { return &TheWorld; }
+    double GetTrainerTimeSeconds() const { return TheWorld.Now; }
     double PhaseStartedAt=10;
     TSharedPtr<Sink> LocalSession;
     TArray<FNCAimTrainerLocalEvent> LocalEvents;
@@ -74,6 +76,8 @@ struct ANCAimTrainerGame {
     PC* Trainee=nullptr;
     bool IsTrainee(PC* pc) const { return pc!=nullptr; }
     bool IsStandardPreset() const { return Standard; }
+    int Publishes=0;
+    void PublishProgress() { ++Publishes; }
     int RecordingStarts=0;
     void BeginLocalRecording() { ++RecordingStarts; bLocalRecording=true; }
     bool PrepareLocalRecording();
@@ -193,6 +197,16 @@ int main(int argc,char** argv) {
         auto sink=game.LocalSession; sink->Healthy=false; game.TheWorld.Now=15;
         game.RecordLocalSample(false,false); game.FlushLocalCheckpoint();
         Check(sink->Cancelled && !game.bLocalRecording && sink->Batches.empty(),"failed transport published");
+    } else if(name=="unsent_final_not_saved") {
+        game.Progress.Phase=3; game.Progress.SaveState=NCAimTrainerSaveState::Pending;
+        game.TheWorld.Now=70; game.FlushLocalCheckpoint(true);
+        Check(game.Progress.SaveState==NCAimTrainerSaveState::NotSaved && game.Publishes==1,
+            "invalid final checkpoint left the result stuck saving");
+    } else if(name=="uncertain_final_preserved") {
+        game.Progress.Phase=3; game.Progress.SaveState=NCAimTrainerSaveState::Unconfirmed;
+        game.InvalidateLocalRun();
+        Check(game.Progress.SaveState==NCAimTrainerSaveState::Unconfirmed,
+            "cleanup claimed a submitted but unconfirmed final could not have saved");
     } else Check(false,"unknown case");
 }
 '''
@@ -211,7 +225,9 @@ class LocalRecordingTests(unittest.TestCase):
         functions.append(native_function(game, "bool ANCAimTrainerGame::PrepareLocalRecording"))
         source = directory / "recording.cpp"
         policy = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix() + '"'
-        source.write_text("\n".join([ADAPTER, policy] + functions + [CASES]), encoding="utf-8")
+        controller = (PLUGIN / "Source/Public/NCAimTrainerPlayerController.h").read_text(encoding="utf-8-sig")
+        save_states = native_function(controller, "namespace NCAimTrainerSaveState")
+        source.write_text("\n".join([ADAPTER, policy, save_states] + functions + [CASES]), encoding="utf-8")
         cls.executable = directory / ("recording.exe" if os.name == "nt" else "recording")
         command = ([compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
                     f"/Fe{cls.executable}", f"/Fo{directory / 'recording.obj'}"] if msvc else
@@ -227,7 +243,8 @@ class LocalRecordingTests(unittest.TestCase):
 
 for _case in ("anchor_ack", "precision", "counter_jump", "counter_reset", "tracking", "boundaries", "no_catchup",
               "no_missing_final", "preset_change", "event_bounds", "transport_failure", "rocket_batch",
-              "rocket_batch_bound", "airborne_precision_batch_bound", "precision_multihit_bound", "hard_tracking"):
+              "rocket_batch_bound", "airborne_precision_batch_bound", "precision_multihit_bound", "hard_tracking",
+              "unsent_final_not_saved", "uncertain_final_preserved"):
     setattr(LocalRecordingTests, "test_" + _case, lambda self, case=_case: self.run_case(case))
 
 if __name__ == "__main__":

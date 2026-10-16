@@ -4,6 +4,7 @@
 #include "NCAimTrainerOnline.h"
 #include "NCAimTrainerScenarioPolicy.h"
 #include "NCAimTrainerLocalHttp.h"
+#include "NCAimTrainerLocalRetry.h"
 #include "Engine/World.h"
 #include "UTLocalPlayer.h"
 #include "OnlineSubsystemUtils.h"
@@ -27,6 +28,35 @@ namespace NCAimTrainerLocal
 	constexpr int32 MaxRunEvents = 4096;
 	constexpr int32 MaxPendingCheckpoints = 4;
 	constexpr float TimeoutSeconds = 4.0f;
+	// Process-wide, rather than per run/world: R and map travel must not discard
+	// an explicit service cooldown. This never blocks restarting local practice.
+	NCAimTrainerLocalRetry::FStartCooldown StartCooldown;
+	FString StartCooldownReason;
+
+	FString ReadServerReason(const FString& Body)
+	{
+		TSharedPtr<FJsonObject> Json;
+		FString Reason;
+		if (Body.Len() <= MaxResponseBytes
+			&& FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Body), Json) && Json.IsValid())
+		{
+			if (!Json->TryGetStringField(TEXT("error"), Reason)) Json->TryGetStringField(TEXT("detail"), Reason);
+		}
+		// Display plain bounded text, never raw HTML, headers, or credentials.
+		Reason = Reason.Left(96);
+		for (int32 Index = 0; Index < Reason.Len(); ++Index)
+		{
+			if (Reason[Index] < 32 || Reason[Index] == 127) Reason[Index] = ' ';
+		}
+		return Reason.Trim().TrimTrailing();
+	}
+
+	FString CooldownReason(double Seconds)
+	{
+		const FString Reason = StartCooldownReason.IsEmpty() ? TEXT("UT4Stats requested a cooldown") : StartCooldownReason;
+		return FString::Printf(TEXT("Practice only: %s (server cooldown %.0f s). This run cannot be saved."),
+			*Reason, FMath::CeilToDouble(Seconds));
+	}
 
 	bool OnlineEnabled()
 	{
@@ -136,6 +166,8 @@ void FNCAimTrainerLocalSession::SendStartAttempt()
 	using namespace NCAimTrainerLocal;
 	if (!IsHealthy()) { Cancel(); return; }
 	if (!OnlineEnabled()) { Fail(TEXT("Practice only: online scores are disabled")); return; }
+	const double Cooldown = StartCooldown.Remaining(FPlatformTime::Seconds());
+	if (Cooldown > 0) { Fail(CooldownReason(Cooldown)); return; }
 	IOnlineIdentityPtr Identity = GetIdentity(World.Get(), ControllerId);
 	TSharedPtr<const FUniqueNetId> AccountId = Identity.IsValid() ? Identity->GetUniquePlayerId(ControllerId) : nullptr;
 	if (!Identity.IsValid() || Identity->GetLoginStatus(ControllerId) != ELoginStatus::LoggedIn
@@ -190,7 +222,8 @@ void FNCAimTrainerLocalSession::SendRequest(const FString& Url, const FString& T
 		if (!bConnected || !Response.IsValid()) Session->HandleResponse(Serial, 0, FString());
 		else if (Response->GetContent().Num() > NCAimTrainerLocal::MaxResponseBytes)
 			Session->HandleResponse(Serial, 413, FString());
-		else Session->HandleResponse(Serial, Response->GetResponseCode(), Response->GetContentAsString());
+		else Session->HandleResponse(Serial, Response->GetResponseCode(), Response->GetContentAsString(),
+			Response->GetHeader(TEXT("Retry-After")), Response->GetHeader(TEXT("Date")));
 	});
 	Active->OnRequestProgress().BindLambda([WeakSession, Serial](FHttpRequestPtr, int32, int32 Received)
 	{
@@ -201,7 +234,13 @@ void FNCAimTrainerLocalSession::SendRequest(const FString& Url, const FString& T
 	World.Get()->GetTimerManager().SetTimer(Timeout, [WeakSession, StartingSession, Serial]()
 	{
 		TSharedPtr<FNCAimTrainerLocalSession> Session = WeakSession.Pin();
-		if (Session.IsValid()) Session->HandleResponse(Serial, 0, FString());
+		if (!Session.IsValid()) return;
+		TSharedPtr<IHttpRequest> ActiveRequest = Session->Request.Pin();
+		FHttpResponsePtr Partial = ActiveRequest.IsValid() ? ActiveRequest->GetResponse() : nullptr;
+		if (Partial.IsValid() && Partial->GetResponseCode() >= 400)
+			Session->HandleResponse(Serial, Partial->GetResponseCode(), FString(),
+				Partial->GetHeader(TEXT("Retry-After")), Partial->GetHeader(TEXT("Date")));
+		else Session->HandleResponse(Serial, 0, FString());
 	}, NCAimTrainerLocal::TimeoutSeconds, false);
 	if (!Active->ProcessRequest()) HandleResponse(Serial, 0, FString());
 }
@@ -214,19 +253,44 @@ void FNCAimTrainerLocalSession::StopRequest()
 	Request.Reset();
 	if (Active.IsValid())
 	{
+		// R/map travel may cancel after error headers arrive but before the body
+		// completes. Retain the service cooldown before discarding that response.
+		FHttpResponsePtr Partial = Active->GetResponse();
+		if (Partial.IsValid() && Partial->GetResponseCode() >= 400)
+		{
+			const double Delay = NCAimTrainerLocalRetry::DelaySeconds(Partial->GetResponseCode(),
+				Partial->GetHeader(TEXT("Retry-After")), Partial->GetHeader(TEXT("Date")));
+			if (Delay > 0)
+			{
+				NCAimTrainerLocal::StartCooldown.Defer(FPlatformTime::Seconds(), Delay);
+				NCAimTrainerLocal::StartCooldownReason = NCAimTrainerLocal::ReadServerReason(Partial->GetContentAsString());
+			}
+		}
 		Active->OnProcessRequestComplete().Unbind();
 		Active->OnRequestProgress().Unbind();
 		Active->CancelRequest();
 	}
 }
 
-void FNCAimTrainerLocalSession::HandleResponse(int32 Serial, int32 Code, const FString& Body)
+void FNCAimTrainerLocalSession::HandleResponse(int32 Serial, int32 Code, const FString& Body,
+	const FString& RetryAfter, const FString& ResponseDate)
 {
 	using namespace NCAimTrainerLocal;
 	if (Serial != RequestSerial || bCancelled || !bHealthy) return;
 	StopRequest();
 	if (!IsHealthy()) { Cancel(); return; }
-	if ((Code == 0 || Code == 429 || Code >= 500) && Attempt < 3)
+	const double ServerDelay = NCAimTrainerLocalRetry::DelaySeconds(Code, RetryAfter, ResponseDate);
+	if (Code == 429 || (Code >= 400 && ServerDelay > 0))
+	{
+		// A rejected run remains practice. Waiting here would freeze the countdown
+		// or let queued checkpoints expire, and retroactive uploads are invalid.
+		// The NEXT run may request a session once the service's delay has elapsed.
+		StartCooldown.Defer(FPlatformTime::Seconds(), ServerDelay);
+		StartCooldownReason = ReadServerReason(Body);
+		Fail(CooldownReason(StartCooldown.Remaining(FPlatformTime::Seconds())));
+		return;
+	}
+	if ((Code == 0 || Code >= 500) && Attempt < 3)
 	{
 		ScheduleRetry();
 		return;
@@ -234,7 +298,8 @@ void FNCAimTrainerLocalSession::HandleResponse(int32 Serial, int32 Code, const F
 	bBusy = false;
 	if (Code != 200 && Code != 201)
 	{
-		Fail((Code == 401 || Code == 403)
+		const FString Reason = ReadServerReason(Body);
+		Fail(!Reason.IsEmpty() ? TEXT("Practice only: ") + Reason : (Code == 401 || Code == 403)
 			? TEXT("Practice only: local score authentication was not accepted")
 			: TEXT("Practice only: local score upload was not confirmed"));
 		return;
@@ -329,6 +394,7 @@ void FNCAimTrainerLocalSession::FinishStart(bool bSuccess, const FString& Messag
 void FNCAimTrainerLocalSession::BeginRecording()
 {
 	if (!IsHealthy() || bStarting || bRecording || bResultReady) return;
+	if (RunToken.IsEmpty()) { Fail(TEXT("Practice only: no accepted online run to record.")); return; }
 	bRecording = true;
 	QueueCheckpoint(0, TArray<FNCAimTrainerLocalEvent>(), false);
 }
@@ -418,6 +484,7 @@ void FNCAimTrainerLocalSession::SendCheckpointAttempt()
 {
 	if (!IsHealthy()) { Cancel(); return; }
 	if (Pending.Num() == 0 || bResultReady) return;
+	if (bStarting || RunToken.IsEmpty()) { Fail(TEXT("Practice only: no accepted online run to record.")); return; }
 	if (!NCAimTrainerLocal::OnlineEnabled()) { Fail(TEXT("Practice only: online scores are disabled")); return; }
 	const double Now = FPlatformTime::Seconds();
 	if (Now >= ExpiresAt || Now - Pending[0].QueuedAt > 15.0)

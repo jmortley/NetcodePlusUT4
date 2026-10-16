@@ -70,7 +70,7 @@ bool ANCAimTrainerTarget::CanStartTrainerDrillAction() const
     if (Role != ROLE_Authority || !bTrainerVisible || DrillMovementMode == 0 || IsDead() || bIsCrouched
         || bRecenterWiggleAfterDodge || IsTrainerSliding() || !Movement || !Movement->IsMovingOnGround()
         || !Movement->CurrentFloor.IsWalkableFloor() || !Movement->CanDodge() || Movement->bIsDodging || Movement->bIsDodgeLanding
-        || GetWorld()->GetTimeSeconds() < DrillDodgeBlockedUntil) { return false; }
+        || GetTrainerTimeSeconds() < DrillDodgeBlockedUntil) { return false; }
     return DrillMovementMode != 2 || Movement->Velocity.X <= 100.f;
 }
 
@@ -106,8 +106,8 @@ bool ANCAimTrainerTarget::TryTrainerDrillDodge(float DirectionRoll)
         ConsumeMovementInputVector();
         bRecenterWiggleAfterDodge = true;
         bDrillWallDodgePending = bUseWall;
-        DrillWallDodgeUntil = GetWorld()->GetTimeSeconds() + 0.75f;
-        NextDrillWallAttempt = GetWorld()->GetTimeSeconds() + 0.08f;
+        DrillWallDodgeUntil = GetTrainerTimeSeconds() + 0.75f;
+        NextDrillWallAttempt = GetTrainerTimeSeconds() + 0.08f;
     }
     return bDodged;
 }
@@ -117,7 +117,7 @@ bool ANCAimTrainerTarget::TryTrainerDrillWallDodge()
     UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
     if (Role != ROLE_Authority || !bTrainerVisible || DrillMovementMode != 2 || !bDrillWallDodgePending
         || !Movement || IsDead() || bIsCrouched) { return false; }
-    const float Now = GetWorld()->GetTimeSeconds();
+    const double Now = GetTrainerTimeSeconds();
     if (Now >= DrillWallDodgeUntil || Movement->IsMovingOnGround() || Movement->Velocity.X > 100.f
         || Now < DrillDodgeBlockedUntil)
     {
@@ -153,7 +153,7 @@ void ANCAimTrainerTarget::ApplyTrainerShockMomentum(const FDamageEvent& Event)
     // Damage queues its native impulse for the movement tick. Block both dodge
     // routes immediately, even before that queued impulse changes Velocity.
     bDrillWallDodgePending = false;
-    DrillDodgeBlockedUntil = GetWorld()->GetTimeSeconds() + 0.4f;
+    DrillDodgeBlockedUntil = GetTrainerTimeSeconds() + 0.4f;
     Movement->UUTCharacterMovement::AddDampedImpulse(Momentum, false);
 }
 

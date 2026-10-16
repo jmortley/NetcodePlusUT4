@@ -27,10 +27,10 @@ namespace NCAimTrainerAirbornePolicy
         if (!std::isfinite(Gravity) || !std::isfinite(HeightAboveHazard)
             || !std::isfinite(UpSpeed) || Gravity < 1.f || HeightAboveHazard <= 0.f) { return 0.f; }
         const float ContactTime = (UpSpeed + std::sqrt(UpSpeed * UpSpeed + 2.f * Gravity * HeightAboveHazard)) / Gravity;
-        // Retire a second before the previous goo-contact deadline. Very short
-        // rocket falls retain a 0.75s opportunity instead of an instant expiry.
-        // Physical goo contact can still end an appearance sooner.
-        return ContactTime > 1.75f ? ContactTime - 1.f : 0.75f;
+        // Extend the former shortened window by 0.9s for every airborne preset:
+        // normally retire 0.1s before goo contact, with a 1.65s timer floor.
+        // Physical goo/ground contact and the run deadline can still end it sooner.
+        return ContactTime > 1.75f ? ContactTime - 0.1f : 1.65f;
     }
 
     inline bool UseSideWallSeat(int DropIndex, float Roll)

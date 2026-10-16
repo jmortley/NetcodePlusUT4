@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
                 "flak burst did not reach sound playback as one combined damage value");
         Require(hud.DamageNumbers.size()==1 && hud.DamageNumbers[0].DamageAmount==105
                 && hud.DamageNumbers[0].WorldPosition.X==130.f && hud.DamageNumbers[0].WorldPosition.Y==-90.f
-                && hud.DamageNumbers[0].WorldPosition.Z==218.f && hud.DamageNumbers[0].DamagedPawn==nullptr,
+                && hud.DamageNumbers[0].WorldPosition.Z==218.f && hud.DamageNumbers[0].DamagedPawn==nullptr && hud.DamageNumbers[0].DamageTime==0.f,
                 "flak damage number lost captured position or retained a reused pawn");
     } else if (name == "flak_receiver") {
         ANCAimTrainerHUD hud; hud.PlayerOwner=&pc; pc.MyUTHUD=&hud;

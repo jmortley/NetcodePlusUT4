@@ -323,6 +323,11 @@ void ANCAimTrainerPlayerController::OnRep_TrainerProgress()
 	LastPresentedPhase = TrainerProgress.Phase;
 }
 
+double ANCAimTrainerPlayerController::GetTrainerCountdownAge(int32 Count) const
+{
+	return Count == LastAnnouncedCountdown ? FPlatformTime::Seconds() - TrainerCountdownQueuedAt : 1.0;
+}
+
 void ANCAimTrainerPlayerController::UpdateTrainerCountdownAudio()
 {
 #if !UE_SERVER
@@ -339,6 +344,7 @@ void ANCAimTrainerPlayerController::UpdateTrainerCountdownAudio()
 	const int32 Count = FMath::CeilToInt(Seconds);
 	if (Count >= LastAnnouncedCountdown) { return; }
 	LastAnnouncedCountdown = Count;
+	TrainerCountdownQueuedAt = FPlatformTime::Seconds();
 	// The existing local announcer supplies the selected NCP pack and volume.
 	// Only the current number plays if a replicated update skips a boundary.
 	Announcer->PlayAnnouncement(UNCAimTrainerCountdownMessage::StaticClass(), Count, nullptr, nullptr, this);

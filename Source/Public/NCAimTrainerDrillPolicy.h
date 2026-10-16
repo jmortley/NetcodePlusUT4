@@ -18,10 +18,10 @@ namespace NCAimTrainerDrillPolicy
         int PreviousStreak = 0;
         int Stops = 0;
         bool ShotHit = false;
-        float ShotAt = -1.f;
+        double ShotAt = -1.0;
         float FlakDamage = 0.f;
 
-        void ObserveShot(int Count, float Now)
+        void ObserveShot(int Count, double Now)
         {
             if (Count <= Shot) { return; }
             PreviousStreak = Count == Shot + 1 ? Streak : 0;

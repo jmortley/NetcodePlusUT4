@@ -11,6 +11,7 @@ namespace
 	const FLinearColor TrainerInk(0.92f, 0.95f, 0.97f, 1.f);
 	const FLinearColor TrainerMuted(0.54f, 0.63f, 0.68f, 1.f);
 	const FLinearColor TrainerAccent(0.05f, 0.84f, 0.87f, 1.f);
+	const FLinearColor TrainerWarning(1.f, 0.65f, 0.28f, 1.f);
 	const FLinearColor TrainerPanel(0.018f, 0.032f, 0.045f, 0.96f);
 	const FLinearColor TrainerCard(0.043f, 0.071f, 0.088f, 1.f);
 	const FLinearColor TrainerSelected(0.05f, 0.16f, 0.18f, 1.f);
@@ -83,7 +84,10 @@ void ANCAimTrainerHUD::AddFlakDamageNumber(int32 Damage, const FVector& HitLocat
 	// Native rendering only uses the stored world point. Keep no pawn pointer:
 	// the same training actor is reused for every appearance around the player.
 	// Match ordinary UT damage numbers' 255 cap and body-damage presentation.
-	DamageNumbers.Add(FEnemyDamageNumber(nullptr, GetWorld()->GetTimeSeconds(),
+	// DamageTime is only used by stock same-pawn hit grouping, which this
+	// authoritative grouped, pawnless entry never uses. Native rendering expires
+	// the short-lived Scale using DeltaTimeSeconds, independently of world age.
+	DamageNumbers.Add(FEnemyDamageNumber(nullptr, 0.f,
 		FMath::Min(Damage, 255), HitLocation, 0.75f, false, false));
 }
 
@@ -273,7 +277,14 @@ void ANCAimTrainerHUD::DrawResults(ANCAimTrainerPlayerController* PC)
 {
 	const FNCAimTrainerProgress& Progress = PC->GetTrainerProgress();
 	Panel(90.f, 126.f, 1100.f, 551.f, TrainerPanel);
-	Label(TEXT("RUN COMPLETE"), 640.f, 149.f, 18.f, TrainerAccent, 0.f, true);
+	const bool bSaveFailed = Progress.SaveState == NCAimTrainerSaveState::NotSaved
+		|| Progress.SaveState == NCAimTrainerSaveState::Unconfirmed;
+	const TCHAR* SaveHeading = Progress.SaveState == NCAimTrainerSaveState::Saved ? TEXT("RUN COMPLETE / SAVED")
+		: Progress.SaveState == NCAimTrainerSaveState::Pending ? TEXT("RUN COMPLETE / SAVING...")
+		: Progress.SaveState == NCAimTrainerSaveState::NotSaved ? TEXT("RUN NOT SAVED")
+		: Progress.SaveState == NCAimTrainerSaveState::Unconfirmed ? TEXT("RUN COMPLETE / SAVE NOT CONFIRMED")
+		: TEXT("RUN COMPLETE");
+	Label(SaveHeading, 640.f, 149.f, 18.f, bSaveFailed ? TrainerWarning : TrainerAccent, 1040.f, true);
 	Label(FString::FromInt(Progress.Score), 640.f, 181.f, 63.f, TrainerInk, 700.f, true);
 	const FString Detail = NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario)
 		? FString::Printf(TEXT("%.2f s ON TARGET / %.2f s FIRED     %.1f%% ACCURACY"), Progress.TrackingSeconds, Progress.FiringSeconds, Progress.Accuracy)
