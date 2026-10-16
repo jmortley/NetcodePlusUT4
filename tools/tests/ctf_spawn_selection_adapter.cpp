@@ -5,12 +5,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <string>
 #include <vector>
 using int32 = int32_t;
 using uint8 = uint8_t;
+using uint32 = uint32_t;
 using TCHAR = char;
 #define TEXT(value) value
 constexpr int32 INDEX_NONE = -1;
@@ -42,6 +44,8 @@ struct FMath {
     template<class T> static T Clamp(T a, T lo, T hi) { return Max(lo, Min(a,hi)); }
     template<class T> static T Square(T a) { return a*a; }
     static int32 TruncToInt(float value) { return static_cast<int32>(value); }
+    static float FRandRange(float lo, float hi) { return (lo+hi)*.5f; }
+    static int32 RandRange(int32 lo, int32) { return lo; }
 };
 struct UObject { bool PendingKill = false; virtual ~UObject() = default; };
 template<class T> bool IsValid(T* value) { return value && !value->PendingKill; }
@@ -63,6 +67,7 @@ template<class T> struct TArray : std::vector<T> {
     void Add(const T& value) { this->push_back(value); }
     void Reserve(int32 value) { this->reserve(static_cast<size_t>(value)); }
     void Reset() { this->clear(); }
+    void Init(const T& value, int32 count) { this->assign(static_cast<size_t>(count),value); }
     void Empty() { this->clear(); }
     void RemoveAt(int32 index, int32 count, bool) { this->erase(this->begin()+index, this->begin()+index+count); }
     bool Contains(const T& value) const { return std::find(this->begin(), this->end(), value) != this->end(); }
@@ -120,7 +125,7 @@ struct AController : UObject {
     APawn* GetPawn() const { return Pawn; }
 };
 struct AUTCTFFlagBase : AActor { AUTFlag* MyFlag = nullptr; };
-namespace CarriedObjectState { constexpr int Home = 0; }
+namespace CarriedObjectState { constexpr int Home = 0; constexpr int Held = 2; }
 struct AUTCTFGameState : UObject {
     AUTCTFFlagBase* Bases[2] = {nullptr,nullptr};
     int States[2] = {0,0};
@@ -139,9 +144,12 @@ struct FCollisionQueryParams { FCollisionQueryParams(const FName&, bool) {} };
 struct UWorld {
     std::vector<ControllerRef> Controllers;
     bool LineBlocked = true;
+    std::function<bool(const FVector&, const FVector&)> TraceBlocked;
     float TimeSeconds = 1.f;
     FConstControllerIterator GetControllerIterator() { return {&Controllers,0}; }
-    bool LineTraceTestByChannel(const FVector&, const FVector&, int, const FCollisionQueryParams&) const { return LineBlocked; }
+    bool LineTraceTestByChannel(const FVector& from, const FVector& to, int, const FCollisionQueryParams&) const {
+        return TraceBlocked ? TraceBlocked(from,to) : LineBlocked;
+    }
     float GetTimeSeconds() const { return TimeSeconds; }
 };
 std::vector<std::string> Logs;
@@ -156,7 +164,9 @@ struct StockGameMode {
         if (SpawnSucceeds && player && !player->Pawn) player->Pawn=&CreatedPawn;
     }
     float RatePlayerStart(APlayerStart* start, AController*) { return start->StockRating; }
+    AActor* ChoosePlayerStart_Implementation(AController*) { return nullptr; }
 };
+struct FGameSession { int32 MaxPlayers=16; };
 struct ANCPlusCTFGameMode : StockGameMode {
     using Super = StockGameMode;
     // PRODUCTION_HISTORY
@@ -166,7 +176,10 @@ struct ANCPlusCTFGameMode : StockGameMode {
     UWorld World;
     UWorld* GetWorld() { return &World; }
     AUTCTFGameState* CTFGameState = nullptr;
+    FGameSession* GameSession = nullptr;
     bool bSpawnUseNewCTFSelection = true, bSpawnPoolsBuilt = true, bLogSpawnChoices = false;
+    // Existing cases retain the pre-change iCTF route; weapon-CTF cases opt in below.
+    bool bIsInstagib = true;
     bool bSpawnExtrapolateMovement = true, bSpawnSecondaryEnabled = true, Live = true;
     int32 SpawnMinCycleDistance = 1, RobbedSpawnRotation[2] = {0,0};
     float SpawnRobbedBaseAvoidCount = 0.f;
@@ -175,6 +188,9 @@ struct ANCPlusCTFGameMode : StockGameMode {
     float SpawnFriendlyVisionBlockRange = 0.f, SpawnFriendlyBlockRange = 0.f;
     float SpawnFlagBlockRange = 0.f, SpawnKillerAvoidRadius = 0.f;
     float SpawnSecondaryMaxDistance = 2000.f, SpawnSecondaryOwnTeamWeight = .2f, SpawnSecondaryCarrierWeight = 2.f;
+    float SpawnFreshnessBonus=0.f, SpawnFreshnessWindow=30.f, SpawnTieBandWidth=0.f;
+    float SpawnRandomBase=1.f, SpawnRandomSpread=1.f;
+    bool bSpawnWeightedRandom=false;
     int32 SpawnSystemThreshold = 4, Competitors = 10;
     int32 StockCalls = 0, LegacyCalls = 0;
     AActor* StockResult = nullptr;
@@ -183,11 +199,13 @@ struct ANCPlusCTFGameMode : StockGameMode {
     AActor* ChooseEpicPlayerStart(AController*) { ++StockCalls; return StockResult; }
     AActor* ChooseLegacyPlayerStart(AController*) { ++LegacyCalls; return LegacyResult; }
     bool IsLiveSpawnCommitState() const { return Live; }
+    bool IsFlagNearOwnBase(uint8) const { return false; }
     void BuildTeamSpawnPools() { bSpawnPoolsBuilt=true; }
     void RestartPlayerAtPlayerStart(AController*, AActor*);
     void CommitUsedSpawn(AController*, APlayerStart*);
     AActor* ChoosePlayerStart_Implementation(AController*);
     APlayerStart* ChooseNewCTFPlayerStart(AController*);
+    AActor* ChooseLegacyPlayerStartNative(AController*);
 };
 // PRODUCTION_FUNCTIONS
 
@@ -290,8 +308,8 @@ void CycleTail() {
     }
 }
 void Emergency() {
-    for (bool colocated : {false,true}) for (bool secondary : {false,true}) {
-        Fixture f; f.Commit(f.Victim,f.A);
+    for (bool instagib : {false,true}) for (bool colocated : {false,true}) for (bool secondary : {false,true}) {
+        Fixture f; f.Game.bIsInstagib=instagib; f.Commit(f.Victim,f.A);
         if (colocated) f.SetPool({&f.Duplicate,&f.A}); else f.SetPool({&f.A});
         if (secondary) f.BlockPrimary();
         auto* chosen=f.Choose();
@@ -369,6 +387,178 @@ void WrapperNew() {
     Require(f.Game.StockCalls==0 && f.Game.LegacyCalls==0, "normal new selector called a fallback");
     Require(!HasLog("spawn emergency"), "normal protected choice logged emergency");
 }
+
+void KillerBeforeFlagPickup() {
+    for (bool secondary : {false,true}) for (bool friendlyFirst : {false,true}) {
+        Fixture f; f.Game.bIsInstagib=false; f.Game.SpawnMinCycleDistance=0;
+        f.Game.bSpawnSecondaryEnabled=secondary; f.Game.SpawnKillerAvoidRadius=2500.f;
+        f.Game.SpawnFriendlyBlockRange=6000.f; f.Game.bLogSpawnChoices=true;
+        f.VictimPS.LastKillerPlayerState=&f.EnemyPS;
+        f.EnemyPawn.Location=FVector(2000,0,0); // Killer has not picked the flag up yet.
+        f.B.Location=FVector(5000,0,0); f.SetPool({&f.A,&f.B});
+        AUTCharacter friendPawn; friendPawn.Location=f.B.Location; f.Teammate.Pawn=&friendPawn;
+        AUTFlag dropped; dropped.Location=f.EnemyPawn.Location;
+        AUTCTFFlagBase base; base.MyFlag=&dropped;
+        AUTCTFGameState state; state.Bases[0]=&base; state.States[0]=1; f.Game.CTFGameState=&state;
+        if (friendlyFirst) f.Game.World.Controllers={{&f.Teammate},{&f.Enemy}};
+        else f.Game.World.Controllers={{&f.Enemy},{&f.Teammate}};
+        // A wins the old distance fallback (2400 vs 2000) and stock rating.
+        f.A.StockRating=100.f; f.B.StockRating=1.f;
+        Require(f.Choose()==&f.B, "fallback respawned beside the last killer before flag pickup");
+        Require(HasLog(secondary ? "system=secondary" : "system=stock-rating"),
+            "friendly block did not exercise the requested fallback");
+        Require(!HasLog("no-combat-safe-start"), "safe friend-crowded start was treated as unsafe");
+        Require(f.EnemyPawn.CarriedObject==nullptr, "regression accidentally requires flag possession");
+    }
+}
+void CandidateLOS() {
+    for (bool reverse : {false,true}) {
+        Fixture f; f.Game.bIsInstagib=false; f.Game.SpawnMinCycleDistance=0;
+        f.Game.EnemyLOSBlockRange=3000.f; f.Game.SpawnFriendlyBlockRange=3000.f;
+        f.B.Location=FVector(1000,1000,0); f.SetPool({&f.A,&f.B});
+        f.EnemyPawn.Location=FVector(2000,0,0);
+        AUTCharacter friendPawn; friendPawn.Location=f.B.Location; f.Teammate.Pawn=&friendPawn;
+        f.Game.World.Controllers=reverse ? std::vector<ControllerRef>{{&f.Enemy},{&f.Teammate}}
+            : std::vector<ControllerRef>{{&f.Teammate},{&f.Enemy}};
+        // Only A is exposed. Global visibility stubs cannot establish this regression.
+        f.Game.World.TraceBlocked=[](const FVector& from, const FVector&) { return from.Y>500.f; };
+        Require(f.Choose()==&f.B, "candidate-specific enemy sightline was discarded by fallback");
+    }
+    {
+        Fixture f; f.Game.bIsInstagib=false; f.Game.SpawnMinCycleDistance=0;
+        f.Game.EnemyLOSBlockRange=3000.f; f.B.Location=FVector(1000,1000,0); f.SetPool({&f.A,&f.B});
+        f.EnemyPawn.Location=FVector(2000,0,0); f.EnemyPawn.RemoteRole=ROLE_AutonomousProxy;
+        f.EnemyPawn.Velocity=FVector(1000,0,0); f.EnemyPS.ExactPing=200.f;
+        f.Game.World.Controllers={{&f.Enemy}};
+        f.Game.World.TraceBlocked=[](const FVector& from, const FVector& to) {
+            return from.Y>500.f || to.X>2050.f;
+        };
+        Require(f.Choose()==&f.B, "blocked predicted-eye trace concealed visible current-eye threat");
+    }
+}
+void CarrierLOS() {
+    for (bool secondary : {false,true}) {
+        Fixture f; f.Game.bIsInstagib=false; f.Game.SpawnMinCycleDistance=0;
+        f.Game.bSpawnSecondaryEnabled=secondary; f.Game.SpawnFriendlyBlockRange=100.f;
+        f.Game.EnemyLOSBlockRange=3000.f; f.Game.SpawnFlagCarrierLOSAvoidRadius=3500.f;
+        f.EnemyPawn.Location=FVector(3200,0,0); f.B.Location=FVector(6400,0,0); f.SetPool({&f.A,&f.B});
+        AUTCharacter friendPawn; friendPawn.Location=f.B.Location; f.Teammate.Pawn=&friendPawn;
+        AUTFlag flag; flag.HoldingPawn=&f.EnemyPawn; f.EnemyPawn.CarriedObject=&flag;
+        AUTCTFFlagBase base; base.MyFlag=&flag;
+        AUTCTFGameState state; state.Bases[0]=&base; state.States[0]=CarriedObjectState::Held;
+        f.Game.CTFGameState=&state; f.Game.World.Controllers={{&f.Enemy},{&f.Teammate}};
+        f.Game.World.TraceBlocked=[](const FVector& from, const FVector&) { return from.X>5000.f; };
+        f.A.StockRating=100.f;
+        Require(f.Choose()==&f.B, "fallback dropped the flag carrier's extended LOS avoidance radius");
+    }
+}
+void SafetyCycle() {
+    Fixture f; f.Game.bIsInstagib=false;
+    f.Game.SpawnEnemyHardRadius=1500.f; f.Game.SpawnEnemyBelowZ=0.f;
+    f.EnemyPawn.Location=FVector(500,0,0); f.Game.World.Controllers={{&f.Enemy}};
+    f.C.Location=FVector(5000,0,0); // Safe but excluded by the team's cycle tail.
+    Require(f.Choose()==&f.C, "unsafe regular candidates beat a safe team-cycle tail start");
+    Require(HasLog("reason=no-safe-cycle-start"), "safety cycle relaxation lacked a clear emergency reason");
+    Require(!HasLog("no-combat-safe-start"), "safe tail was omitted from threat search");
+}
+void SafetyHistory() {
+    Fixture f; f.Game.bIsInstagib=false; f.Game.SpawnMinCycleDistance=0;
+    f.Commit(f.Victim,f.A); f.Commit(f.Teammate,f.C); f.Commit(f.Teammate,f.B);
+    f.Game.SpawnEnemyHardRadius=600.f; f.Game.SpawnEnemyBelowZ=0.f;
+    f.EnemyPawn.Location=FVector(1500,0,0); f.Game.World.Controllers={{&f.Enemy}};
+    auto* chosen=f.Choose();
+    Require(chosen && chosen!=&f.A, "safety preference silently re-enabled the player's previous start");
+    Require(HasLog("reason=no-combat-safe-start"), "all distinct starts unsafe did not log emergency");
+    Require(!HasLog("reason=no-distinct-team-start"), "distinct locations were incorrectly called repeats");
+}
+void AllThreatened() {
+    for (bool secondary : {false,true}) {
+        Fixture f; f.Game.bIsInstagib=false; f.Game.bSpawnSecondaryEnabled=secondary;
+        f.BlockPrimary();
+        Require(f.Choose()!=nullptr, "all unsafe starts prevented respawn");
+        Require(HasLog("reason=no-combat-safe-start"), "forced unsafe spawn did not log with logging off");
+    }
+}
+void MixedThreats() {
+    for (bool secondary : {false,true}) for (bool saferInTail : {false,true}) {
+        Fixture f; f.Game.bIsInstagib=false; f.Game.bSpawnSecondaryEnabled=secondary;
+        f.Game.SpawnMinCycleDistance=saferInTail ? 1 : 0;
+        f.Game.SpawnEnemyHardRadius=1200.f; f.Game.EnemyLOSBlockRange=3000.f;
+        f.Game.SpawnKillerAvoidRadius=2500.f; f.VictimPS.LastKillerPlayerState=&f.EnemyPS;
+        f.EnemyPawn.Location=FVector(0,0,0);
+        f.A.Location=FVector(1000,0,0); f.C.Location=FVector(-1000,0,0);
+        f.B.Location=FVector(0,1500,0); f.SetPool({&f.A,&f.C,&f.B});
+        AUTPlayerState extraPS; extraPS.Team=&f.EnemyTeam;
+        AUTCharacter extraPawn; extraPawn.Location=FVector(0,2800,0);
+        AController extra; extra.PlayerState=&extraPS; extra.Pawn=&extraPawn;
+        f.Game.World.Controllers={{&extra},{&f.Enemy}};
+        f.Game.World.TraceBlocked=[](const FVector& from, const FVector&) { return from.Y>1000.f; };
+        // Every start is inside the last-killer radius. A/C are also exposed
+        // and too close. Old distance totals prefer A/C (3000) to B (2800).
+        f.A.StockRating=100.f; f.C.StockRating=100.f; f.B.StockRating=1.f;
+        Require(f.Choose()==&f.B, "all-unsafe fallback let distance override the less dangerous start");
+        Require(HasLog("reason=no-combat-safe-start") && HasLog("threatTier=2"),
+            "forced spawn did not explain its remaining killer-proximity risk");
+        Require(HasLog("reason=no-safe-cycle-start")==saferInTail,
+            "safer unsafe cycle-tail candidate was not handled explicitly");
+    }
+}
+void FloorSeparated() {
+    for (bool isKiller : {false,true}) {
+        Fixture f; f.Game.bIsInstagib=false; f.Game.SpawnMinCycleDistance=0;
+        f.Game.SpawnEnemyHardRadius=1200.f; f.Game.EnemyLOSBlockRange=3000.f;
+        f.A.Location=FVector(0,0,300); f.B.Location=FVector(4000,0,0); f.SetPool({&f.A,&f.B});
+        f.EnemyPawn.Location=FVector(0,0,0); f.Game.World.Controllers={{&f.Enemy}};
+        if (isKiller) { f.VictimPS.LastKillerPlayerState=&f.EnemyPS; f.Game.SpawnKillerAvoidRadius=2500.f; }
+        Require(f.Choose()==(isKiller ? &f.B : &f.A),
+            "occluded lower floor exception or independent killer protection changed");
+    }
+}
+void ModeScope() {
+    for (bool instagib : {false,true}) for (int32 competitors : {2,4,10}) {
+        Fixture f; f.Game.bIsInstagib=instagib; f.Game.Competitors=competitors;
+        f.Game.StockResult=&f.A; f.Game.SpawnMinCycleDistance=0;
+        f.Game.SpawnKillerAvoidRadius=2500.f; f.Game.SpawnFriendlyBlockRange=6000.f;
+        f.VictimPS.LastKillerPlayerState=&f.EnemyPS; f.EnemyPawn.Location=FVector(2000,0,0);
+        f.B.Location=FVector(5000,0,0); f.SetPool({&f.A,&f.B});
+        AUTCharacter friendPawn; friendPawn.Location=f.B.Location; f.Teammate.Pawn=&friendPawn;
+        f.Game.World.Controllers={{&f.Enemy},{&f.Teammate}};
+        Require(f.Game.ChoosePlayerStart_Implementation(&f.Victim)==(instagib ? &f.A : &f.B),
+            "NW small-game safety or original iCTF fallback behavior changed");
+        Require(f.Game.StockCalls==(instagib && competitors<=4 ? 1 : 0),
+            "mode-specific small-game dispatch is wrong");
+        Require(f.Game.LegacyCalls==0, "new-selection mode unexpectedly called legacy");
+    }
+    Fixture f; f.Game.bIsInstagib=false; f.Game.bSpawnUseNewCTFSelection=false;
+    f.Game.Competitors=2; f.Game.LegacyResult=&f.C;
+    Require(f.Game.ChoosePlayerStart_Implementation(&f.Victim)==&f.C && f.Game.LegacyCalls==1,
+        "NW safety change overrode explicit legacy configuration");
+}
+void FlagOutRotation() {
+    for (bool instagib : {false,true}) for (int32 rotation : {0,1}) {
+        Fixture f; f.Game.bIsInstagib=instagib; f.Game.SpawnMinCycleDistance=0;
+        f.Game.SpawnRobbedBaseAvoidCount=2.f; f.Game.RobbedSpawnRotation[0]=rotation;
+        AUTFlag flag; flag.Location=FVector(9000,0,0);
+        AUTCTFFlagBase base; base.MyFlag=&flag; base.Location=f.A.Location;
+        AUTCTFGameState state; state.Bases[0]=&base; state.States[0]=1; f.Game.CTFGameState=&state;
+        Require(f.Choose()==(instagib && rotation==0 ? &f.B : &f.A),
+            "NW flag-out still excludes a near-base start or iCTF rotation changed");
+    }
+}
+void LegacyFlagOutRotation() {
+    for (bool instagib : {false,true}) for (int32 rotation : {0,1}) {
+        Fixture f; f.Game.bIsInstagib=instagib;
+        f.Game.SpawnRobbedBaseAvoidCount=2.f; f.Game.RobbedSpawnRotation[0]=rotation;
+        f.A.StockRating=100.f; f.B.StockRating=2.f; f.C.StockRating=1.f;
+        AUTFlag flag; flag.Location=FVector(9000,0,0);
+        AUTCTFFlagBase base; base.MyFlag=&flag; base.Location=f.A.Location;
+        AUTCTFGameState state; state.Bases[0]=&base; state.States[0]=1; f.Game.CTFGameState=&state;
+        Require(f.Game.ChooseLegacyPlayerStartNative(&f.Victim)==(instagib && rotation==0 ? &f.B : &f.A),
+            "legacy weapon-CTF flag-out exclusion remains or legacy iCTF rotation changed");
+        Require(f.Game.RobbedSpawnRotation[0]==rotation+(instagib ? 1 : 0),
+            "legacy flag-out exclusion advanced rotation in the wrong modes");
+    }
+}
 int main(int argc, char** argv) {
     if (argc!=2) return 2;
     const std::string which=argv[1];
@@ -385,6 +575,17 @@ int main(int argc, char** argv) {
     else if (which=="wrapper-routes") WrapperRoutes();
     else if (which=="wrapper-emergency") WrapperEmergency();
     else if (which=="wrapper-new") WrapperNew();
+    else if (which=="killer-before-pickup") KillerBeforeFlagPickup();
+    else if (which=="candidate-los") CandidateLOS();
+    else if (which=="carrier-los") CarrierLOS();
+    else if (which=="safety-cycle") SafetyCycle();
+    else if (which=="safety-history") SafetyHistory();
+    else if (which=="all-threatened") AllThreatened();
+    else if (which=="mixed-threats") MixedThreats();
+    else if (which=="floor-separated") FloorSeparated();
+    else if (which=="mode-scope") ModeScope();
+    else if (which=="flag-out-rotation") FlagOutRotation();
+    else if (which=="legacy-flag-out") LegacyFlagOutRotation();
     else return 2;
     return 0;
 }

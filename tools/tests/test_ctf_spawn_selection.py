@@ -3,6 +3,8 @@
 The selector and successful-spawn commit are extracted verbatim, including the
 production history structure. This is not a UBT, collision-world, replication,
 or multiplayer test; the adapter controls LOS and stock start ratings.
+Legacy selection is also extracted, with only its method name remapped so wrapper
+dispatch can be asserted independently. Random draws use deterministic adapter values.
 """
 
 import os
@@ -32,6 +34,10 @@ class CTFSpawnSelectionTests(unittest.TestCase):
             "AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(",
             "APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(",
         ))
+        definitions += "\n" + native_function(
+            source, "AActor* ANCPlusCTFGameMode::ChooseLegacyPlayerStart("
+        ).replace("ANCPlusCTFGameMode::ChooseLegacyPlayerStart(",
+                  "ANCPlusCTFGameMode::ChooseLegacyPlayerStartNative(", 1)
         history = native_function(header, "struct FRecentSpawns") + ";"
         adapter = Path(__file__).with_name("ctf_spawn_selection_adapter.cpp").read_text(encoding="utf-8")
         generated = directory / "ctf_spawn.cpp"
@@ -92,6 +98,39 @@ class CTFSpawnSelectionTests(unittest.TestCase):
 
     def test_normal_new_selector_does_not_call_stock_or_legacy(self):
         self.run_case("wrapper-new")
+
+    def test_last_killer_before_flag_pickup_survives_both_fallbacks_and_controller_order(self):
+        self.run_case("killer-before-pickup")
+
+    def test_each_candidate_checks_current_and_predicted_enemy_sightlines(self):
+        self.run_case("candidate-los")
+
+    def test_flag_carrier_extended_los_radius_survives_fallback(self):
+        self.run_case("carrier-los")
+
+    def test_safe_cycle_tail_beats_unsafe_regular_candidates(self):
+        self.run_case("safety-cycle")
+
+    def test_safe_previous_start_stays_excluded_when_distinct_starts_are_threatened(self):
+        self.run_case("safety-history")
+
+    def test_all_unsafe_starts_still_spawn_with_unconditional_emergency_log(self):
+        self.run_case("all-threatened")
+
+    def test_all_unsafe_prefers_concealed_killer_radius_start_including_cycle_tail(self):
+        self.run_case("mixed-threats")
+
+    def test_occluded_lower_floor_exception_keeps_independent_killer_protection(self):
+        self.run_case("floor-separated")
+
+    def test_weapon_ctf_small_games_gain_safety_while_ictf_and_legacy_routes_stay_unchanged(self):
+        self.run_case("mode-scope")
+
+    def test_weapon_ctf_flag_out_does_not_rotate_base_exclusion_but_ictf_still_does(self):
+        self.run_case("flag-out-rotation")
+
+    def test_legacy_flag_out_exclusion_is_removed_only_for_weapon_ctf(self):
+        self.run_case("legacy-flag-out")
 
 
 if __name__ == "__main__":

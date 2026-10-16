@@ -194,8 +194,8 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	float SpawnFlagCarrierLOSAvoidRadius;
 
-	/** When your OWN flag isn't home (stolen or dropped), drop this many of your
-	 *  team's starts nearest your flag base form the avoid SET — exactly ONE of
+	/** iCTF only: when your OWN flag isn't home (stolen or dropped), this many of
+	 *  your team's starts nearest your flag base form the avoid SET — exactly ONE of
 	 *  them is excluded per respawn, rotating through the set (nearest, then
 	 *  2nd-nearest, ...) so defenders always keep a base spawn available but
 	 *  can't rely on one fixed spot while the flag is out. You still respawn
@@ -631,7 +631,8 @@ protected:
 	/** Master rollback switch. False restores the pre-port weighted selector. */
 	bool bSpawnUseNewCTFSelection = true;
 
-	/** Use Epic's selector at or below this many connected competitors. */
+	/** iCTF uses Epic's selector at or below this many connected competitors.
+	 *  Weapon CTF keeps the NewCTF safety checks even in small matches. */
 	int32 SpawnSystemThreshold = 4;
 
 	/** A teammate inside this radius blocks a primary candidate. */
@@ -643,14 +644,16 @@ protected:
 	/** An enemy flag carrier or any unheld flag inside this radius blocks primary. */
 	float SpawnFlagBlockRange = 750.f;
 
-	/** Number of most recently used team starts excluded from primary and secondary. */
+	/** Number of most recently used team starts excluded from primary and secondary.
+	 *  Weapon CTF may relax this tail when it contains a safer, nonprevious start. */
 	int32 SpawnMinCycleDistance = 1;
 
 	/** Predict remote pawn movement by half RTT for spawn distance/vision checks. */
 	bool bSpawnExtrapolateMovement = true;
 
 	/** Use weighted-distance secondary scoring when primary fails. When disabled,
-	 *  use stock ratings within the filtered team candidates. */
+	 *  use stock ratings within the filtered team candidates. Weapon CTF limits
+	 *  both passes to the least threatened available starts before scoring. */
 	bool bSpawnSecondaryEnabled = true;
 
 	/** Per-player distance contribution cap in the secondary pass. */
