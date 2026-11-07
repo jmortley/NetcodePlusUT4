@@ -1,7 +1,6 @@
-// Owner-only protocol handshake. Only an exact version report authorizes 329
-// match RPCs; pawn movement and spectator status are not protocol evidence.
-// The report RPC/net-field layout deliberately stays unchanged so older builds
-// can report their version and receive a useful, non-banning disconnect reason.
+// Retired version gate. Keep the legacy actor and report RPC declarations
+// unchanged for existing 329 clients. Version reports no longer authorize
+// gameplay or disconnect players; new gate actors are not spawned.
 #pragma once
 
 #include "NetcodePlus.h"
@@ -33,8 +32,8 @@ protected:
 	void OnAdvisorCheck();
 	void WhisperOwner(const FString& Msg);
 
-	/** Actor's work is finished; actual protocol permission lives in the
-	 *  connection/world-bound registry, never in this flag alone. */
+	/** Legacy actor completion flag, retained without changing class layout.
+	 *  Neither this flag nor the old registry authorizes gameplay. */
 	UPROPERTY(Transient)
 	bool bConfirmed;
 
@@ -46,14 +45,14 @@ protected:
 
 namespace NCPlusVersionGate
 {
-	/** Server-only gate. Local authority PCs and bots do not handshake. */
+	/** Retained no-op entry points; version enforcement is retired. */
 	NETCODEPLUS_API void SpawnFor(class APlayerController* PC);
 	NETCODEPLUS_API void SpawnAdvisorFor(class APlayerController* PC);
 
-	/** Fail closed for unknown, pending, mismatched, or stale remote sessions.
-	 *  Unknown match sessions start a fresh handshake (including seamless travel).
-	 *  Confirmation requires the same weak controller, world and connection.
-	 *  This is a compatibility gate, not authentication against a modified client. */
+	/** Legacy name: validates the current authority controller and live remote
+	 *  connection, with existing local/bot exemptions. No version report, cached
+	 *  confirmation or new gate actor is required. RPC ownership and gameplay
+	 *  transaction validation remain separate checks. */
 	NETCODEPLUS_API bool IsProtocolConfirmed(class APlayerController* PC);
 
 	NETCODEPLUS_API void RegisterHubAdvisor();
