@@ -48,5 +48,5 @@ bool UNCAimTrainerCountdownMessage::ShouldStillPlay(AUTGameState* GS, const FAnn
 	return Progress.Phase == 1 && FMath::IsFinite(Progress.RemainingSeconds)
 		&& Progress.RemainingSeconds > 0.f && Progress.RemainingSeconds < 3.f
 		&& FMath::CeilToInt(Progress.RemainingSeconds) == AnnouncementInfo.Switch
-		&& PC->GetWorld()->GetTimeSeconds() - AnnouncementInfo.QueueTime <= MaxAnnouncementDelay;
+		&& PC->GetTrainerCountdownAge(AnnouncementInfo.Switch) <= MaxAnnouncementDelay;
 }

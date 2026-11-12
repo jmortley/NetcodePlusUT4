@@ -54,8 +54,24 @@ constexpr int32 INDEX_NONE = -1;
 constexpr int ROLE_Authority = 3;
 constexpr int NAME_Playing = 1, NAME_Spectating = 2;
 #define UE_SERVER 0
-enum class FKey { Other, F6, M, One, Two, Three, Four, Five, Six, NumPadOne, NumPadTwo, NumPadThree, NumPadFour, NumPadFive, NumPadSix, Enter };
+struct FKey {
+    enum ValueType { Invalid, Other, R, T, F6, M, One, Two, Three, Four, Five, Six, Seven, Eight, Nine, Zero, Hyphen, Subtract, Equals, Backslash, NumPadSeven, NumPadEight, NumPadNine, NumPadZero, NumPadOne, NumPadTwo, NumPadThree, NumPadFour, NumPadFive, NumPadSix, Enter };
+    ValueType Value;
+    FKey(ValueType value=Invalid) : Value(value) {}
+    bool IsValid() const { return Value!=Invalid; }
+    bool operator==(FKey other) const { return Value==other.Value; }
+};
 using EKeys = FKey;
+// Settings persistence/validation has its own tests; controller input reads
+// the resolved key through this narrow production accessor boundary.
+namespace NCAimTrainerInputSettings {
+    FKey RestartKey=EKeys::R;
+    FKey GetRestartKey() { return RestartKey; }
+}
+namespace NCPlusHUDDragMode {
+    bool Active=false;
+    bool IsActive() { return Active; }
+}
 enum EInputEvent { IE_Pressed, IE_Released, IE_Repeat };
 struct FPlatformTime { static double Now; static double Seconds() { return Now; } };
 double FPlatformTime::Now = 100.;
@@ -96,7 +112,7 @@ struct UCharacterMovementComponent {
 struct AUTCharacter;
 struct UNCAimTrainerMovement : UCharacterMovementComponent {
     AUTCharacter* Owner = nullptr;
-    void ResetTrainerMovement(bool practice);
+    void ResetTrainerMovement(bool practice, float laneX = -1800.f);
 };
 struct AUTCharacter : APawn {
     UNCAimTrainerMovement Move;
@@ -114,10 +130,10 @@ struct AUTCharacter : APawn {
 };
 // The actual shared reset helper is covered in test_aim_trainer_movement.py.
 // Here its effects let us test when the real controller invokes it.
-void UNCAimTrainerMovement::ResetTrainerMovement(bool practice) {
+void UNCAimTrainerMovement::ResetTrainerMovement(bool practice, float laneX) {
     StopMovementImmediately(); bWantsToCrouch = false; Owner->bPressedJump = false;
     UnCrouch(false); SetPlaneConstraintNormal(FVector(1, 0, 0));
-    SetPlaneConstraintOrigin(FVector(-1800, 0, 50108)); SetPlaneConstraintEnabled(practice);
+    SetPlaneConstraintOrigin(FVector(laneX, 0, 50108)); SetPlaneConstraintEnabled(practice);
     if (practice) SetMovementMode(MOVE_Walking); else DisableMovement();
 }
 struct FDeferredFireInput {
@@ -166,10 +182,16 @@ struct MockRetailLocalPlayer : UUTLocalPlayer {
     // reach the menu implementation; no IsQuickChatOpen inline shim exists.
     bool AreMenusOpen() override { ++WrongVirtualCalls; return !Menus; }
 };
+struct ANCAimTrainerHUD {
+    int DamageNumberUpdates = 0;
+    void UpdateTrainerDamageNumbers() { ++DamageNumberUpdates; }
+};
+template<class T> T* Cast(ANCAimTrainerHUD* hud) { return static_cast<T*>(hud); }
 template<class T> T* Cast(APawn* pawn) { return dynamic_cast<T*>(pawn); }
 template<class T> T* Cast(UCharacterMovementComponent* movement) { return dynamic_cast<T*>(movement); }
 template<class T> T* Cast(UPlayer* player) { return dynamic_cast<T*>(player); }
 struct AUTPlayerController {
+    ANCAimTrainerHUD* MyUTHUD = nullptr;
     int BaseKeys = 0;
     int Jumps = 0, Crouches = 0, CrouchToggles = 0;
     int MoveInputLocks = 0, Restarts = 0;
@@ -218,7 +240,10 @@ struct ANCAimTrainerPlayerController : AUTPlayerController {
     FNCAimTrainerProgress TrainerProgress;
     double NextTrainerRequestTime[4] = { 0., 0., 0., 0. };
     uint8 LastPresentedPhase = 255;
+    uint8 LastPresentedScenario = 255;
     int32 LastAnnouncedCountdown = 4;
+    double TrainerCountdownQueuedAt=0.;
+    double GetTrainerCountdownAge(int32) const;
     MockAnnouncer* Announcer = nullptr;
     bool bLastPresentedMovementPractice = false;
     bool bTrackingPrimaryHeld = false, bTrackingAltHeld = false;
@@ -252,6 +277,7 @@ struct ANCAimTrainerPlayerController : AUTPlayerController {
     void SetTrackingFireHeld(bool, bool);
     void SelectTrainerScenario(uint8);
     void StartTrainerRun();
+    void RestartTrainerRun();
     bool PrefersTrainerLightningGun() const;
     void ReturnToTrainerMenu();
     void ToggleTrainerMovementPractice();
@@ -303,8 +329,18 @@ void MenuControls() {
         pc.InputKey(key, IE_Released, 0.f, false);
         Require(pc.Selects == count, "SACTF repeated key generated another request");
     }
+    const FKey extraKeys[] = {EKeys::Seven, EKeys::Eight, EKeys::Nine, EKeys::Zero, EKeys::Hyphen,
+                              EKeys::NumPadSeven, EKeys::NumPadEight, EKeys::NumPadNine, EKeys::NumPadZero, EKeys::Subtract};
+    for (int i = 0; i < 10; ++i) {
+        Require(pc.InputKey(extraKeys[i], IE_Pressed, 1.f, false), "new preset key escaped");
+        Require(pc.LastSelection == 6 + i % 5, "new preset key selected wrong scenario");
+        const int count = pc.Selects;
+        pc.InputKey(extraKeys[i], IE_Repeat, 1.f, false);
+        pc.InputKey(extraKeys[i], IE_Released, 0.f, false);
+        Require(pc.Selects == count, "new preset repeated key selected twice");
+    }
     const int selects = pc.Selects;
-    pc.SelectTrainerScenario(6);
+    pc.SelectTrainerScenario(13);
     pc.SelectTrainerScenario(255);
     Require(pc.Selects == selects, "invalid scenario sent");
 }
@@ -356,6 +392,85 @@ void ActiveControls() {
     }
     Require(pc.Aborts == 2, "abort unavailable during countdown/run");
 }
+void RestartControls() {
+    ANCAimTrainerPlayerController pc;
+    TestConfig.Choice="LG";
+    for (uint8 phase : {uint8(1),uint8(2),uint8(3)}) {
+        pc.TrainerProgress.Phase=phase;
+        const int starts=pc.Starts, baseKeys=pc.BaseKeys;
+        Require(pc.InputKey(EKeys::R,IE_Pressed,1.f,false), "resolved R restart escaped to stock binds");
+        Require(pc.Starts==starts+1 && pc.LastLightningChoice, "restart did not send selected weapon preference once");
+        Require(pc.InputKey(EKeys::R,IE_Repeat,1.f,false) && pc.InputKey(EKeys::R,IE_Released,0.f,false),
+                "restart repeat or release escaped to stock binds");
+        Require(pc.Starts==starts+1 && pc.BaseKeys==baseKeys && pc.Aborts==0,
+                "held restart generated repeated requests, a separate abort, or stock input");
+    }
+    for (uint8 phase : {uint8(0),uint8(4),uint8(255)}) {
+        pc.TrainerProgress.Phase=phase;
+        const int starts=pc.Starts, baseKeys=pc.BaseKeys;
+        const size_t deferred=pc.DeferredFireInputs.size();
+        Require(!pc.InputKey(EKeys::R,IE_Pressed,1.f,false), "restart intercepted input outside a run/results");
+        pc.RestartTrainerRun();
+        Require(pc.Starts==starts && pc.BaseKeys==baseKeys+1 && pc.DeferredFireInputs.size()==deferred,
+                "picker or invalid phase restarted or interrupted weapon inputs");
+    }
+    pc.TrainerProgress.Phase=2;
+    NCAimTrainerInputSettings::RestartKey=EKeys::T;
+    int starts=pc.Starts;
+    Require(!pc.InputKey(EKeys::R,IE_Pressed,1.f,false) && pc.Starts==starts,
+            "old default remained active after binding another key");
+    Require(pc.InputKey(EKeys::T,IE_Pressed,1.f,false) && pc.Starts==starts+1,
+            "configured custom restart key was ignored");
+    NCAimTrainerInputSettings::RestartKey=EKeys::Invalid;
+    starts=pc.Starts;
+    for (FKey key : {EKeys::R,EKeys::T})
+        Require(!pc.InputKey(key,IE_Pressed,1.f,false), "unbound restart consumed a previous binding");
+    Require(pc.Starts==starts, "unbound restart still generated a request");
+}
+void RestartFocus() {
+    for (int blockedBy=0;blockedBy<5;++blockedBy) {
+        ANCAimTrainerPlayerController pc;
+        pc.TrainerProgress.Phase=2;
+        pc.bTrackingPrimaryHeld=pc.bTrackingAltHeld=true;
+        if (blockedBy==0) pc.LocalPlayer.Menus=true;
+        if (blockedBy==1) pc.LocalPlayer.QuickChat=true;
+        if (blockedBy==2) pc.LocalPlayer.Viewport.Console.Active=true;
+        if (blockedBy==3) pc.Local=false;
+        NCPlusHUDDragMode::Active=blockedBy==4;
+        Require(!pc.InputKey(EKeys::R,IE_Pressed,1.f,false), "restart stole input from another UI/controller");
+        pc.RestartTrainerRun();
+        Require(pc.BaseKeys==1 && pc.Starts==0 && pc.DeferredFireInputs.empty()
+                && pc.bTrackingPrimaryHeld && pc.bTrackingAltHeld,
+                "blocked restart disturbed the run or held firing");
+        Require(pc.LocalPlayer.WrongVirtualCalls==0, "restart focus used unsafe retail UI virtual dispatch");
+        NCPlusHUDDragMode::Active=false;
+    }
+}
+void RestartHeldFire() {
+    for (int role : {ROLE_Authority,1})
+    for (uint8 scenario : {uint8(0),uint8(6),uint8(3)})
+    for (uint8 phase : {uint8(1),uint8(2)}) {
+        ANCAimTrainerPlayerController pc; AUTCharacter pawn;
+        pc.Role=role; pc.ClientRestart_Implementation(&pawn);
+        pc.TrainerProgress.Phase=2; pc.TrainerProgress.Scenario=scenario;
+        pc.OnFire(); pc.OnAltFire(); pc.ApplyDeferredFireInputs();
+        Require(pc.bAltFirePressed, "fixture never established held firing");
+        // A restart during an unchanged countdown cannot depend on OnRep's
+        // phase-transition release. No replicated update is issued here.
+        pc.TrainerProgress.Phase=phase;
+        pc.RestartTrainerRun();
+        Require(pc.Starts==1 && !pc.bTrackingPrimaryHeld && !pc.bTrackingAltHeld
+                && !pc.bFirePressed && !pc.bAltFirePressed,
+                "restart retained local held tracking/stock fire before server response");
+        pc.ApplyDeferredFireInputs();
+        Require(pawn.Stops[0]==1 && pawn.Stops[1]==1,
+                "restart did not drain both real stock stop inputs to the possessed pawn");
+        const int priorAlt=pawn.Fires[1];
+        pc.TrainerProgress.Phase=2; pc.OnFire(); pc.ApplyDeferredFireInputs();
+        if (NCAimTrainerScenarioPolicy::IsTrackingScenario(scenario))
+            Require(pawn.Fires[1]==priorAlt+1, "new run inherited stale aggregate tracking hold");
+    }
+}
 void FireGates() {
     // Standalone and an owning network client both drain through the same stock
     // method; assert arrival at the pawn, not merely entry into Super::OnFire.
@@ -365,7 +480,7 @@ void FireGates() {
         pc.Role = role;
         pc.BeginPlay();
         pc.ClientRestart_Implementation(&pawn);
-        for (uint8 scenario = 0; scenario < 6; ++scenario) {
+        for (uint8 scenario = 0; scenario < NCAimTrainerScenarioId::ScenarioCount; ++scenario) {
             pc.TrainerProgress.Scenario = scenario;
             for (uint8 phase = 0; phase < 4; ++phase) {
                 pc.TrainerProgress.Phase = phase;
@@ -373,8 +488,8 @@ void FireGates() {
                 pc.OnFire(); pc.OnAltFire();
                 Require(pawn.Fires[0] == before, "stock fire did not remain deferred");
                 pc.ApplyDeferredFireInputs();
-                const int expectedPrimary = phase == 2 && scenario != 0 ? 1 : 0;
-                const int expectedAlt = phase == 2 ? 1 : 0;
+                const int expectedPrimary = phase == 2 && !NCAimTrainerScenarioPolicy::IsTrackingScenario(scenario) ? 1 : 0;
+                const int expectedAlt = phase == 2 && !NCAimTrainerScenarioPolicy::IsDrillScenario(scenario) ? 1 : 0;
                 Require(pawn.Fires[0] == before + expectedPrimary && pawn.Fires[1] == beforeAlt + expectedAlt,
                         "trainer fire never reached pawn or escaped its phase/scenario gate");
                 Require(pc.DeferredFireInputs.empty(), "deferred fire queue did not drain");
@@ -385,10 +500,11 @@ void FireGates() {
     }
 }
 void TrackingBeamHold() {
+    for (uint8 scenario : {uint8(0), uint8(6)})
     for (int role : {ROLE_Authority, 1}) {
         ANCAimTrainerPlayerController pc; AUTCharacter pawn;
         pc.Role = role; pc.ClientRestart_Implementation(&pawn);
-        pc.TrainerProgress.Phase = 2; pc.TrainerProgress.Scenario = 0;
+        pc.TrainerProgress.Phase = 2; pc.TrainerProgress.Scenario = scenario;
         pc.OnFire(); pc.OnFire(); pc.OnAltFire(); pc.ApplyDeferredFireInputs();
         Require(pawn.Fires[0] == 0 && pawn.Fires[1] == 1,
                 "tracking plasma fired or two buttons restarted the real beam");
@@ -511,6 +627,35 @@ void MovementPractice() {
         Require(pawn.MovementInput.Y == 0.f, "fixed mode added movement input");
     }
 }
+void ScenarioLaneReset() {
+    for (int role : {ROLE_Authority, 1}) {
+        ANCAimTrainerPlayerController pc; AUTCharacter pawn;
+        pc.Role = role; pc.TrainerProgress.bMovementPractice = true;
+        pc.TrainerProgress.Scenario = 8; pc.ClientRestart_Implementation(&pawn);
+        pc.OnRep_TrainerProgress();
+        Require(pawn.Move.Origin.X == -1800.f && pawn.Move.Constrained,
+                "ordinary airborne scenario has the wrong local movement plane");
+        // Same native pawn and movement option: only the scenario changes.
+        pc.TrainerProgress.Scenario = 10; pc.OnRep_TrainerProgress();
+        Require(pawn.Move.Origin.X == -800.f && pawn.Move.Constrained && pawn.Move.Mode == MOVE_Walking,
+                "rocket selection did not update the owner's movement plane");
+        pc.TrainerProgress.Phase = 1; pc.OnRep_TrainerProgress();
+        pc.TrainerProgress.Phase = 2; pc.OnRep_TrainerProgress();
+        pawn.Move.SetMovementMode(MOVE_Falling); pawn.Move.Speed = 400.f;
+        for (int i = 0; i < 10; ++i) pc.OnRep_TrainerProgress();
+        Require(pawn.Move.Mode == MOVE_Falling && pawn.Move.Speed == 400.f && pawn.Move.Origin.X == -800.f,
+                "rocket score replication cancelled a jump or changed the plane");
+        pc.ClientRestart_Implementation(&pawn);
+        Require(pawn.Move.Origin.X == -800.f && pawn.Move.Mode == MOVE_Walking,
+                "rocket possession restored the old movement plane");
+        pc.TrainerProgress.Phase = 0; pc.TrainerProgress.Scenario = 8; pc.OnRep_TrainerProgress();
+        Require(pawn.Move.Origin.X == -1800.f && pawn.Move.Constrained,
+                "returning to a normal scenario retained the rocket movement plane");
+        pc.TrainerProgress.Scenario = 10; pc.TrainerProgress.bMovementPractice = false; pc.OnRep_TrainerProgress();
+        Require(pawn.Move.Origin.X == -800.f && !pawn.Move.Enabled && !pawn.Move.Constrained,
+                "fixed rocket preset enabled movement or kept a stale plane");
+    }
+}
 void MovementRetryPosture() {
     for (int role : {ROLE_Authority, 1}) {
         ANCAimTrainerPlayerController pc;
@@ -537,9 +682,11 @@ void MovementRetryPosture() {
 }
 void HitsoundWarmup() {
     ANCAimTrainerPlayerController pc;
+    ANCAimTrainerHUD hud; pc.MyUTHUD = &hud;
     pc.TrainerProgress.Phase = 0;
     pc.OnRep_TrainerProgress();
     Require(AClientHitsounds::Warmups == 1, "picker did not prepare hitsound assets");
+    Require(hud.DamageNumberUpdates == 1, "progress transition did not synchronize damage-number visibility");
     for (int i = 0; i < 20; ++i) pc.OnRep_TrainerProgress();
     Require(AClientHitsounds::Warmups == 1, "progress samples repeated catalog preparation");
     ANCAimTrainerPlayerController remote;
@@ -591,6 +738,10 @@ void CountdownAudio() {
         for (float seconds : {2.99f,2.9f,2.1f,2.f,1.9f,1.f,.1f}) present(1,seconds);
         Require(selected.Counts == std::vector<int>({3,2,1}), "countdown missing or repeated cue");
         Require(selected.Context == &pc, "announcer missing owning trainer context");
+        Require(pc.TrainerCountdownQueuedAt==FPlatformTime::Now && pc.GetTrainerCountdownAge(1)==0.,
+                "countdown queue did not stamp the local monotonic clock");
+        FPlatformTime::Now+=.51;
+        Require(pc.GetTrainerCountdownAge(1)>.5,"countdown queue age failed to advance without world time");
         present(1,0.f); present(2,60.f); present(3,0.f);
         Require(selected.Counts.size() == 3, "countdown escaped active/results boundary");
         present(1,2.9f); present(0,60.f); present(1,2.9f);
@@ -623,8 +774,12 @@ int main(int argc, char** argv) {
     else if (name == "focus") Focus();
     else if (name == "retail_focus") RetailFocus();
     else if (name == "active") ActiveControls();
+    else if (name == "restart_controls") RestartControls();
+    else if (name == "restart_focus") RestartFocus();
+    else if (name == "restart_held_fire") RestartHeldFire();
     else if (name == "fire") FireGates();
     else if (name == "tracking_beam") TrackingBeamHold();
+    else if (name == "scenario_lane") ScenarioLaneReset();
     else if (name == "external_lock") ExternalFireLock();
     else if (name == "admission") Admission();
     else if (name == "state") StatePublish();
@@ -672,17 +827,20 @@ class AimTrainerControllerTests(unittest.TestCase):
             "void ANCAimTrainerPlayerController::SetTrackingFireHeld",
             "void ANCAimTrainerPlayerController::SelectTrainerScenario",
             "void ANCAimTrainerPlayerController::StartTrainerRun",
+            "void ANCAimTrainerPlayerController::RestartTrainerRun",
             "bool ANCAimTrainerPlayerController::PrefersTrainerLightningGun",
             "void ANCAimTrainerPlayerController::ReturnToTrainerMenu",
             "void ANCAimTrainerPlayerController::ToggleTrainerMovementPractice",
             "bool ANCAimTrainerPlayerController::AdmitTrainerRequest",
             "void ANCAimTrainerPlayerController::SetTrainerProgress",
             "void ANCAimTrainerPlayerController::OnRep_TrainerProgress",
+            "double ANCAimTrainerPlayerController::GetTrainerCountdownAge",
             "void ANCAimTrainerPlayerController::UpdateTrainerCountdownAudio",
         )
         source = directory / "trainer_controller.cpp"
         source.write_text("\n".join(
-            [ADAPTER] + [native_function(stock, s) for s in stock_signatures]
+            [f'#include "{(PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()}"',
+             f'#include "{(PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix()}"', ADAPTER] + [native_function(stock, s) for s in stock_signatures]
             + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_controller.exe" if os.name == "nt" else "trainer_controller")
         if msvc:
@@ -698,11 +856,15 @@ class AimTrainerControllerTests(unittest.TestCase):
         result = subprocess.run([str(self.executable), name], env=self.environment, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_scenario_changes_restore_owner_lane_without_interrupting_score_update_jumps(self): self.run_case("scenario_lane")
     def test_menu_controls_and_repeat_suppression(self): self.run_case("menu")
     def test_spoken_countdown_follows_progress_and_selected_local_announcer(self): self.run_case("countdown_audio")
     def test_stock_menu_and_chat_keep_input_focus(self): self.run_case("focus")
     def test_actual_focus_guard_uses_retail_safe_ui_calls_and_local_readiness(self): self.run_case("retail_focus")
     def test_cannot_replace_active_run_and_can_abort(self): self.run_case("active")
+    def test_restart_uses_resolved_key_once_and_respects_unbound_and_phase_gates(self): self.run_case("restart_controls")
+    def test_restart_defers_to_stock_ui_console_and_custom_f5_overlay(self): self.run_case("restart_focus")
+    def test_restart_clears_held_fire_without_waiting_for_replicated_phase_change(self): self.run_case("restart_held_fire")
     def test_each_scenario_uses_real_fire_only_during_run(self): self.run_case("fire")
     def test_tracking_buttons_hold_one_real_secondary_beam_until_both_release(self): self.run_case("tracking_beam")
     def test_external_ignore_input_still_blocks_stock_firing(self): self.run_case("external_lock")

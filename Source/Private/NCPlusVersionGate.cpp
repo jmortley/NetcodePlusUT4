@@ -47,12 +47,6 @@ namespace
             && Entry.Connection->State == USOCK_Open;
     }
 
-    bool IsConfirmedSession(const FProtocolSession& Entry, APlayerController* PC)
-    {
-        return SessionIdentityMatches(Entry, PC) && !Entry.bAdvisor
-            && Entry.State == EProtocolState::Confirmed;
-    }
-
     bool RecordVersion(FProtocolSession& Entry, APlayerController* PC,
         ANCVersionGate* Gate, int32 ClientVersion)
     {
@@ -66,16 +60,6 @@ namespace
         return true;
     }
     // END PROTOCOL IDENTITY CORE
-
-    void PruneProtocolSessions()
-    {
-        for (auto It = ProtocolSessions.CreateIterator(); It; ++It)
-        {
-            if (!SessionIdentityMatches(It.Value(), It.Key().Get())
-                || (It.Value().State == EProtocolState::Pending && !It.Value().Gate.IsValid()))
-                It.RemoveCurrent();
-        }
-    }
 
     bool GateOwnsSession(ANCVersionGate* Gate)
     {
@@ -307,12 +291,9 @@ void ANCVersionGate::WhisperOwner(const FString& Msg)
 
 void ANCVersionGate::KickOwner(const FString& Reason)
 {
-    // Non-banning disconnect. GameSession->KickPlayer would instance-ban and
-    // can hide the reason by returning to the hub; keep the existing safe path.
-    AUTBasePlayerController* PC = Cast<AUTBasePlayerController>(GetOwner());
-    if (GateOwnsSession(this) && PC && !PC->IsPendingKillPending()
-        && PC->APlayerController::GetNetConnection() != nullptr)
-        PC->AUTBasePlayerController::GuaranteedKick(FText::FromString(Reason), false);
+    // 329 GA: never disconnect a player based on the retired version gate,
+    // including any gate actor that was already alive when this code loaded.
+    (void)Reason;
     Destroy();
 }
 
@@ -324,52 +305,21 @@ namespace NCPlusVersionGate
             || (PC->PlayerState && PC->PlayerState->bIsABot));
     }
 
-    static void SpawnGate(APlayerController* PC, bool bAdvisor)
-    {
-        if (!PC || !PC->HasAuthority() || PC->IsPendingKillPending() || IsExempt(PC)
-            || !PC->GetWorld() || !PC->GetNetConnection()
-            || PC->GetNetConnection()->State != USOCK_Open) return;
-        EnsureProtocolLifecycle();
-        PruneProtocolSessions();
-        const TWeakObjectPtr<APlayerController> Key(PC);
-        FProtocolSession* Existing = ProtocolSessions.Find(Key);
-        if (Existing)
-        {
-            // Duplicate PostLogin/hooks must not reset a mismatch or restart a
-            // pending timeout. A hub-advisor entry may be upgraded to a match
-            // entry, never the reverse; it still needs a new exact report.
-            if (!Existing->bAdvisor || bAdvisor) return;
-            ANCVersionGate* OldGate = Existing->Gate.Get();
-            ProtocolSessions.Remove(Key);
-            if (OldGate) OldGate->Destroy();
-        }
-        ANCVersionGate* Gate = PC->GetWorld()->SpawnActorDeferred<ANCVersionGate>(
-            ANCVersionGate::StaticClass(), FTransform::Identity, PC, nullptr,
-            ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
-        if (!Gate) return; // Failure remains unknown/blocked; next query retries.
-        Gate->bAdvisorMode = bAdvisor;
-        FProtocolSession Entry;
-        Entry.World = PC->GetWorld();
-        Entry.Connection = PC->GetNetConnection();
-        Entry.Gate = Gate;
-        Entry.bAdvisor = bAdvisor;
-        ProtocolSessions.Add(Key, Entry);
-        Gate->FinishSpawning(FTransform::Identity);
-    }
-
-    void SpawnFor(APlayerController* PC) { SpawnGate(PC, false); }
-    void SpawnAdvisorFor(APlayerController* PC) { SpawnGate(PC, true); }
+    // The 329 rollout is complete. Keep exported entry points intact so all
+    // existing game modes and the 329 weapon RPCs remain binary/source compatible.
+    // No gate actors, handshake timers or hub advisors are spawned anymore.
+    void SpawnFor(APlayerController* PC) { (void)PC; }
+    void SpawnAdvisorFor(APlayerController* PC) { (void)PC; }
 
     bool IsProtocolConfirmed(APlayerController* PC)
     {
+        // Retired version gate: retain current controller/connection validity.
+        // A version report is not required, and this query never spawns an actor.
         if (!PC || !PC->HasAuthority() || PC->IsPendingKillPending() || !PC->GetWorld()) return false;
         if (IsExempt(PC)) return true;
-        PruneProtocolSessions();
-        FProtocolSession* Entry = ProtocolSessions.Find(TWeakObjectPtr<APlayerController>(PC));
-        if (Entry && IsConfirmedSession(*Entry, PC)) return true;
-        AUTBaseGameMode* GameMode = Cast<AUTBaseGameMode>(PC->GetWorld()->GetAuthGameMode());
-        if (GameMode && !GameMode->IsLobbyServer()) SpawnFor(PC);
-        return false;
+        const TWeakObjectPtr<UWorld> World(PC->GetWorld());
+        const TWeakObjectPtr<UNetConnection> Connection(PC->GetNetConnection());
+        return World.IsValid() && Connection.IsValid() && Connection->State == USOCK_Open;
     }
 
     static FDelegateHandle GHubAdvisorHandle;

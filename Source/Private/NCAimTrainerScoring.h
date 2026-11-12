@@ -3,10 +3,28 @@
 // Pure server scoring rules. All supported preset revisions are checked by UT4Stats.
 namespace NCAimTrainerScoring
 {
+    inline int RocketScore(int Hits, int Expired)
+    {
+        if (Hits < 0 || Hits > 200 || Expired < 0 || Expired > 200) { return 0; }
+        return 100 * Hits;
+    }
+
+    inline float RocketAccuracy(int Hits, int Expired)
+    {
+        return Hits >= 0 && Hits <= 200 && Expired >= 0 && Expired <= 200 && Hits + Expired > 0
+            ? 100.f * float(Hits) / float(Hits + Expired) : 0.f;
+    }
+
     inline int HeadshotScore(int Hits, int Shots)
     {
         if (Hits < 0 || Shots < Hits || Shots > 200) { return 0; }
         return 100 * Hits;
+    }
+
+    inline int AirborneScore(int Hits, int Shots, int Headshots = 0)
+    {
+        if (Hits < 0 || Shots < Hits || Shots > 200 || Headshots < 0 || Headshots > Hits) { return 0; }
+        return 100 * Hits + 50 * Headshots;
     }
 
     inline int PrecisionScore(int Hits, int Shots, int Expired, int Headshots = 0)

@@ -1,4 +1,5 @@
 #include "NCAimTrainerOnline.h"
+#include "NCAimTrainerScenarioPolicy.h"
 #include "Engine/World.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Paths.h"
@@ -161,8 +162,12 @@ namespace
 
 int32 FNCAimTrainerOnline::PresetRevisionForScenario(int32 Scenario)
 {
-	// Only the retuned pop-ups start fresh boards. Tracking and headshots retain their scores.
-	return Scenario == 2 || Scenario == 3 || Scenario == 5 ? 12 : PresetRevision;
+	return NCAimTrainerScenarioPolicy::IsDrillScenario(Scenario) ? DrillPresetRevision
+		: NCAimTrainerScenarioPolicy::IsHeadshotScenario(Scenario) ? HeadshotPresetRevision
+		// Faster IG evasion starts fresh IG boards; Sniper/LG and SACTF pop-up keep theirs.
+		: Scenario == NCAimTrainerScenarioId::InstagibPopup ? InstagibPopupPresetRevision
+		: NCAimTrainerScenarioPolicy::IsPopupScenario(Scenario) ? PopupPresetRevision
+		: NCAimTrainerScenarioPolicy::IsAirborneScenario(Scenario) ? AirbornePresetRevision : PresetRevision;
 }
 
 const TCHAR* FNCAimTrainerOnline::ScenarioSlug(int32 Scenario)
@@ -175,6 +180,13 @@ const TCHAR* FNCAimTrainerOnline::ScenarioSlug(int32 Scenario)
 	case 3: return TEXT("precision_popup");
 	case 4: return TEXT("sactf_headshots");
 	case 5: return TEXT("sactf_popup");
+	case 6: return TEXT("strafe_hard");
+	case 7: return TEXT("airborne_ig");
+	case 8: return TEXT("airborne_sniper");
+	case 9: return TEXT("airborne_sactf");
+	case 10: return TEXT("airborne_rockets");
+	case 11: return TEXT("flak_hexagon");
+	case 12: return TEXT("shock_defense");
 	default: return TEXT("");
 	}
 }
@@ -189,7 +201,7 @@ void FNCAimTrainerOnline::Submit(UWorld* World, const FNCAimTrainerResult& Resul
 		Completion(false, TEXT("Practice result: shared scores require an approved online server"));
 		return;
 	}
-	if (Result.Scenario < 0 || Result.Scenario > 5 || Result.PlayerId.IsEmpty())
+	if (!NCAimTrainerScenarioPolicy::IsValidScenario(Result.Scenario) || Result.PlayerId.IsEmpty())
 	{
 		Completion(false, TEXT("Practice result: no authenticated player identity"));
 		return;
@@ -222,7 +234,7 @@ void FNCAimTrainerOnline::Fetch(UWorld* World, int32 Scenario,
 	// Submission stays authority-only and uses its separate credential path.
 	if (!World) { Completion(false, TArray<FNCAimTrainerLeaderboardRow>()); return; }
 	const FTrainerOnlineConfig Config = ReadConfig();
-	if (!Config.bEnabled || Scenario < 0 || Scenario > 5)
+	if (!Config.bEnabled || !NCAimTrainerScenarioPolicy::IsValidScenario(Scenario))
 	{
 		Completion(false, TArray<FNCAimTrainerLeaderboardRow>());
 		return;

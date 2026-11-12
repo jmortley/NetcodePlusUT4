@@ -1,17 +1,27 @@
 #pragma once
 
+#include "../Public/NCAimTrainerScenarioId.h"
+
 // Timing and direction rules for the trainer presets. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {
-    enum { InstagibMaxActiveTargets = 6 };
+    enum { InstagibMaxActiveTargets = 6, ScenarioCount = NCAimTrainerScenarioId::ScenarioCount };
 
+    inline bool IsValidScenario(int Scenario) { return Scenario >= 0 && Scenario < ScenarioCount; }
+    inline bool IsTrackingScenario(int Scenario) { return Scenario == 0 || Scenario == 6; }
+    inline bool IsInstagibScenario(int Scenario) { return Scenario == 2 || Scenario == 7; }
+    inline bool IsAirborneScenario(int Scenario) { return Scenario >= 7 && Scenario <= 10; }
+    inline bool IsRocketScenario(int Scenario) { return Scenario == 10; }
+    inline bool IsFlakScenario(int Scenario) { return Scenario == NCAimTrainerScenarioId::FlakHexagon; }
+    inline bool IsShockDefense(int Scenario) { return Scenario == NCAimTrainerScenarioId::ShockDefense; }
+    inline bool IsDrillScenario(int Scenario) { return IsFlakScenario(Scenario) || IsShockDefense(Scenario); }
     inline bool IsHeadshotScenario(int Scenario) { return Scenario == 1 || Scenario == 4; }
     inline bool IsPopupScenario(int Scenario) { return Scenario == 2 || Scenario == 3 || Scenario == 5; }
-    inline bool IsSACTFScenario(int Scenario) { return Scenario == 4 || Scenario == 5; }
-    inline bool IsSniperScenario(int Scenario) { return Scenario == 1 || Scenario == 3 || IsSACTFScenario(Scenario); }
-    inline bool HasHeadshotBonus(int Scenario) { return Scenario == 3 || Scenario == 5; }
-    inline int ArenaScenario(int Scenario) { return Scenario == 0 ? 0 : IsHeadshotScenario(Scenario) ? 1 : 2; }
+    inline bool IsSACTFScenario(int Scenario) { return Scenario == 4 || Scenario == 5 || Scenario == 9; }
+    inline bool IsSniperScenario(int Scenario) { return Scenario == 1 || Scenario == 3 || Scenario == 8 || IsSACTFScenario(Scenario); }
+    inline bool HasHeadshotBonus(int Scenario) { return Scenario == 3 || Scenario == 5 || Scenario == 8 || Scenario == 9; }
+    inline int ArenaScenario(int Scenario) { return IsFlakScenario(Scenario) ? 5 : IsShockDefense(Scenario) ? 6 : IsRocketScenario(Scenario) ? 4 : IsAirborneScenario(Scenario) ? 3 : IsTrackingScenario(Scenario) ? 0 : IsHeadshotScenario(Scenario) ? 1 : 2; }
 
     inline float UnitRoll(float Roll)
     {
@@ -24,7 +34,63 @@ namespace NCAimTrainerScenarioPolicy
         return 0.12f + 0.16f * UnitRoll(Roll);
     }
 
-    inline bool HasVariedPopupMovement(int Slot) { return Slot == 0 || Slot == 1 || Slot == 4; }
+    inline bool HasVariedPopupMovement(int Slot) { return Slot == 0 || Slot == 1 || Slot == 2 || Slot == 4; }
+
+    inline bool HasPopupEvasion(int Slot) { return Slot == 0 || Slot == 1 || Slot == 4 || Slot == 5; }
+
+    inline float PopupMoveHoldSeconds(float PatternRoll, float JitterRoll, float PreviousHold)
+    {
+        const float Pattern = UnitRoll(PatternRoll), Jitter = UnitRoll(JitterRoll);
+        // Isolated feints, committed cuts, and long runs. Never chain tiny
+        // reversals that leave the target rocking under a stationary crosshair.
+        if (Pattern < 0.22f && !(PreviousHold > 0.f && PreviousHold < 0.4f)) { return 0.22f + 0.12f * Jitter; }
+        return Pattern < 0.7f ? 0.48f + 0.34f * Jitter : 0.95f + 0.65f * Jitter;
+    }
+
+    inline float PopupTurnDegrees(float PatternRoll, float AngleRoll)
+    {
+        const float Pattern = UnitRoll(PatternRoll), Angle = UnitRoll(AngleRoll);
+        // Continuing, cutting across, and reversing all remain possible. This
+        // is relative to the target's own motion, never the trainee's aim.
+        return Pattern < 0.22f ? 8.f + 22.f * Angle
+            : Pattern < 0.66f ? 50.f + 60.f * Angle : 140.f + 40.f * Angle;
+    }
+
+    inline float PopupEvasionSpeedScale(int Scenario, int Slot)
+    {
+        // Boost open-floor IG targets only. The narrow middle platform and
+        // protected peek/high-right seats retain their native movement speed.
+        return Scenario == NCAimTrainerScenarioId::InstagibPopup
+            && (Slot == 0 || Slot == 4 || Slot == 5) ? 1.2f : 1.f;
+    }
+
+    inline float InstagibPopupMoveHoldSeconds(float PatternRoll, float JitterRoll, float PreviousHold)
+    {
+        const float Pattern = UnitRoll(PatternRoll), Jitter = UnitRoll(JitterRoll);
+        // Spend less time coasting on one heading, while keeping isolated
+        // feints and genuine long runs. Never chain tiny A/D reversals.
+        if (Pattern < 0.2f && !(PreviousHold > 0.f && PreviousHold < 0.4f)) { return 0.22f + 0.12f * Jitter; }
+        return Pattern < 0.8f ? 0.44f + 0.30f * Jitter : 0.90f + 0.40f * Jitter;
+    }
+
+    inline float InstagibPopupTurnDegrees(float PatternRoll, float AngleRoll)
+    {
+        const float Pattern = UnitRoll(PatternRoll), Angle = UnitRoll(AngleRoll);
+        // Favor cross-direction cuts over barely changing course. Direction,
+        // hold time and dodge selection each use independent random rolls.
+        return Pattern < 0.1f ? 20.f + 20.f * Angle
+            : Pattern < 0.7f ? 55.f + 70.f * Angle : 135.f + 40.f * Angle;
+    }
+
+    inline float PopupDodgeChance(int Scenario)
+    {
+        return Scenario == NCAimTrainerScenarioId::InstagibPopup ? 0.75f : 0.55f;
+    }
+
+    inline float PopupDodgeSlideChance(int Scenario)
+    {
+        return Scenario == NCAimTrainerScenarioId::InstagibPopup ? 0.18f : 0.12f;
+    }
 
     inline int PopupSpawnVariant(int Slot, float Roll)
     {
@@ -35,36 +101,59 @@ namespace NCAimTrainerScenarioPolicy
         return Slot == 1 && Choice >= 0.5f ? 1 : 0;
     }
 
-    inline float PopupStrafeHoldSeconds(int Slot, float PatternRoll, float JitterRoll)
+    inline float PopupStrafeHoldSeconds(int Slot, float PatternRoll, float JitterRoll, int Variant = 0)
     {
         if (!HasVariedPopupMovement(Slot)) { return WiggleHoldSeconds(JitterRoll); }
         // Give acceleration time to produce a readable movement across the
         // lane. Mix shorter reversals with longer commitments each decision.
         const float Jitter = UnitRoll(JitterRoll);
+        if (Slot == 0 || (Slot == 4 && Variant != 1))
+        {
+            // Commit to longer runs on the left instead of mostly reversing
+            // before the wider lane has produced useful lateral travel.
+            return UnitRoll(PatternRoll) < 0.35f ? 0.35f + 0.20f * Jitter : 0.65f + 0.35f * Jitter;
+        }
         return UnitRoll(PatternRoll) < 0.6f ? 0.24f + 0.18f * Jitter : 0.45f + 0.30f * Jitter;
     }
+
+    inline float InstagibStrafeHoldSeconds(int Slot, float PatternRoll, float JitterRoll, int Variant = 0)
+    {
+        if (Slot != 0 && Slot != 4 && Slot != 5)
+        {
+            return PopupStrafeHoldSeconds(Slot, PatternRoll, JitterRoll, Variant);
+        }
+        const float Pattern = UnitRoll(PatternRoll), Jitter = UnitRoll(JitterRoll);
+        // Independent choices, rather than a short-wiggle/long-run cycle.
+        return Pattern < 0.2f ? 0.30f + 0.25f * Jitter
+            : Pattern < 0.55f ? 0.65f + 0.30f * Jitter : 1.05f + 0.45f * Jitter;
+    }
+
+    inline bool ReverseInstagibStrafe(float Roll) { return UnitRoll(Roll) < 0.6f; }
+    inline float InstagibDodgeDelay(float Roll) { return 1.1f + 2.4f * UnitRoll(Roll); }
+    inline float InstagibFirstDodgeDelay(float Roll) { return 0.45f + 1.4f * UnitRoll(Roll); }
 
     enum EPopupAction { PopupStrafe, PopupSlide, PopupLongStrafe, PopupForwardDodge, PopupBackwardDodge, PopupDodgeSlide };
 
     inline int PopupAction(int Slot, int Variant, float Roll)
     {
-        if (Slot == 2) { return PopupSlide; }
         const float Choice = UnitRoll(Roll);
+        if (Slot == 2) { return Choice < 0.35f ? PopupSlide : PopupStrafe; }
         if (Slot == 0 || (Slot == 4 && Variant != 1))
         {
-            if (Choice < 0.15f) { return PopupForwardDodge; }
-            if (Choice < 0.30f) { return PopupBackwardDodge; }
-            if (Choice < 0.40f) { return PopupDodgeSlide; }
-            // Deep left seats have a narrow outer corridor. Use their checked
-            // angled dodge/slide path instead of the foreground lateral slide.
-            if (Choice < 0.60f && !(Slot == 4 && Variant == 2)) { return PopupSlide; }
-            if (Choice < 0.80f && Slot == 0) { return PopupLongStrafe; }
+            if (Choice < 0.25f) { return PopupForwardDodge; }
+            if (Choice < 0.50f) { return PopupBackwardDodge; }
+            if (Choice < 0.65f) { return PopupDodgeSlide; }
         }
-        else if (Slot == 4 && Choice < 0.45f) { return PopupSlide; }
+        else if (Slot == 4 && Choice < 0.3f) { return PopupSlide; }
         return PopupStrafe;
     }
 
-    inline float PopupDodgeDelaySecondsForAppearance(float Roll) { return 0.65f + 0.70f * UnitRoll(Roll); }
+    inline int InstagibPopupAction(int Slot, int Variant, float Roll)
+    {
+        return PopupAction(Slot, Variant, Roll);
+    }
+
+    inline float PopupDodgeDelaySecondsForAppearance(float Roll) { return 0.45f + 1.5f * UnitRoll(Roll); }
     inline float PopupDodgeAngleDegrees(float Roll) { return 12.f + 16.f * UnitRoll(Roll); }
 
     inline float BoundedStrafeDirection(float Offset, float Velocity, float Acceleration,
@@ -84,9 +173,9 @@ namespace NCAimTrainerScenarioPolicy
     inline bool ShouldCrouch(float Roll) { return UnitRoll(Roll) < 0.65f; }
     inline float CrouchDelaySeconds(float Roll) { return 1.5f + 2.f * UnitRoll(Roll); }
     inline float CrouchHoldSeconds(float Roll) { return 0.25f + 0.20f * UnitRoll(Roll); }
-    inline float PopupSlideDelaySeconds(float Roll) { return 0.8f + 0.6f * UnitRoll(Roll); }
-    inline float PopupLongStrafeDelaySeconds(float Roll) { return 1.4f + 0.6f * UnitRoll(Roll); }
-    inline float PopupLongStrafeHoldSeconds(float Roll) { return 0.50f + 0.25f * UnitRoll(Roll); }
+    inline float PopupSlideDelaySeconds(float Roll) { return 0.45f + 1.8f * UnitRoll(Roll); }
+    inline float PopupLongStrafeDelaySeconds(float Roll) { return 0.8f + 0.5f * UnitRoll(Roll); }
+    inline float PopupLongStrafeHoldSeconds(float Roll) { return 0.70f + 0.30f * UnitRoll(Roll); }
     inline float PopupLongStrafeDirection(float Offset, float Roll)
     {
         if (Offset > 20.f) { return -1.f; }

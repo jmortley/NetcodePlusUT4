@@ -298,7 +298,8 @@ the beam reached the screen.
 
 ## 329 follow-up: one Instagib tap during weapon raise (2026-10-06)
 
-`ncp.InstagibEquipTap` defaults to `1`. A real primary or alternate press received
+`ncp.InstagibEquipTap` defaults to `0` as of the 2026-10-09 follow-up below
+(initially `1`). When enabled, a real primary or alternate press received
 while the current, living player's identical-mode Instagib rifle is equipping
 retains one shot even if released before the raise completes. Several taps
 coalesce into one intent. In ordinary one-weapon Instagib this applies to spawn
@@ -378,8 +379,8 @@ deadline or rearm completed recovery. A changed weapon, owner or blocked gamepla
 cancels it; there is no permanent polling or global held-button replay.
 
 Player-facing patch note: Holding fire through respawn now fires when your weapon
-is ready, without needing to release and click again. Instagib also remembers one
-tap during weapon raise, including the brief possession handoff. Normal fire rate
+is ready, without needing to release and click again. With `ncp.InstagibEquipTap 1`,
+Instagib also remembers one tap during weapon raise, including the brief possession handoff. Normal fire rate
 and server shot validation still apply.
 
 The fire guards and trainer input-focus check use the qualified exported
@@ -399,3 +400,15 @@ finishes raising, including simulated latency. Check menu/focus cancellation,
 release/repress, and ordinary Shock, Link and rocket held fire. In particular,
 verify one legal shot for a released Instagib tap and sustained normal cadence for
 a held button. No content recook is required for these native-only changes.
+
+## 329 follow-up: equip-tap retention is opt-in (2026-10-09)
+
+The default for `ncp.InstagibEquipTap` is now `0` after reports of unwanted shots
+when a released click during respawn weapon raise was retained. Players can opt
+in with `ncp.InstagibEquipTap 1`; explicit client configuration still takes
+precedence. This is a local client setting, so a hub cannot change it for players.
+The new default requires the updated client build. Existing clients can disable
+it immediately with `ncp.InstagibEquipTap 0`.
+
+Only the default changed. Normal firing and held-button recovery remain enabled;
+the released-tap retention path and its guards are still available when opted in.

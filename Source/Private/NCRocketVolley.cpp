@@ -1,6 +1,7 @@
 #include "NCRocketVolley.h"
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
+#include "UTWeaponStateEquipping.h"
 #include "UTPlusProj_Rocket.h"
 #include "NCPlusVersionGate.h"
 #include "NCClientFireTiming.h"
@@ -27,14 +28,31 @@ bool AUTPlusWeap_RocketLauncher::CanBeginLoadedVolleyInput()
 
 bool AUTPlusWeap_RocketLauncher::CanBeginLoadedVolley()
 {
-    return LoadedOwnershipEpoch != 0 && CanBeginLoadedVolleyInput();
+    if (LoadedOwnershipEpoch == 0) return false;
+    if (CanBeginLoadedVolleyInput()) return true;
+
+    // The owning client can already be raising rockets while authority is
+    // still lowering its previous weapon. Admit only an actual server-side
+    // switch to this launcher; this does not authorize loading while holstered.
+    AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+    return Role == ROLE_Authority && UTOwner && !UTOwner->IsDead() && !UTOwner->IsFiringDisabled()
+        && UTOwner->GetPendingWeapon() == this && UTOwner->GetWeapon() != this
+        && !bDisableAltLoading && HasAmmo(1) && CurrentState && FiringState.IsValidIndex(1)
+        && (CurrentState == InactiveState || CurrentState == EquippingState || CurrentState == UnequippingState)
+        && (!GS || !GS->PreventWeaponFire());
 }
 
 void AUTPlusWeap_RocketLauncher::ClearLoadedVolleyInput()
 {
     if (UWorld* PendingWorld = PendingLoadedVolleyWorld.Get())
         PendingWorld->GetTimerManager().ClearTimer(PendingLoadedVolleyInputHandle);
-    bPendingLoadedVolleyInput = bPendingLoadedVolleyRelease = false;
+    if (bPendingLoadedVolleyInput)
+    {
+        CurrentRocketFireMode = 0;
+        bDrawRocketModeString = false;
+    }
+    bPendingLoadedVolleyInput = false;
+    PendingLoadedVolleyMode = 0;
     PendingLoadedVolleyInputAt = 0.0;
     PendingLoadedVolleyPawn.Reset();
     PendingLoadedVolleyWorld.Reset();
@@ -47,7 +65,7 @@ void AUTPlusWeap_RocketLauncher::BufferLoadedVolleyInput()
         || Role == ROLE_Authority || !GetWorld() || !CanBeginLoadedVolleyInput()
         || !UTOwner->IsLocallyControlled() || !UTOwner->Controller) return;
     bPendingLoadedVolleyInput = true;
-    bPendingLoadedVolleyRelease = false;
+    PendingLoadedVolleyMode = 0;
     PendingLoadedVolleyInputAt = FPlatformTime::Seconds();
     PendingLoadedVolleyPawn = UTOwner;
     PendingLoadedVolleyWorld = GetWorld();
@@ -82,25 +100,14 @@ void AUTPlusWeap_RocketLauncher::TryDrainLoadedVolleyInput()
         return;
     }
 
-    const bool bReleased = bPendingLoadedVolleyRelease;
-    AUTCharacter* ExpectedPawn = PendingLoadedVolleyPawn.Get();
-    AController* ExpectedController = PendingLoadedVolleyController.Get();
-    UWorld* ExpectedWorld = PendingLoadedVolleyWorld.Get();
-    const uint32 ExpectedEpoch = LoadedOwnershipEpoch;
-    const uint32 ExpectedId = NCRocketVolley::Next(LastClientLoadedVolleyId);
+    const uint8 SelectedMode = PendingLoadedVolleyMode;
     // Consume before dispatch: epoch notifications and retry timers cannot
-    // manufacture a second request. All load/refire/ammo rules stay on StartFire.
+    // manufacture a second request. The normal load/refire/ammo checks still apply.
     ClearLoadedVolleyInput();
     if (CVarRocketVolleyDebug.GetValueOnGameThread())
-        UE_LOG(LogTemp, Log, TEXT("[RocketVolley] ownership_input_ready weapon=%s epoch=%u age=%.3f released=%d"),
-            *GetName(), LoadedOwnershipEpoch, Age, bReleased ? 1 : 0);
-    StartFire(1);
-    if (bReleased && HasLoadedVolley() && LoadedVolley.Id == ExpectedId
-        && LoadedVolleyEpoch == ExpectedEpoch && LoadedOwnershipEpoch == ExpectedEpoch
-        && GetWorld() == ExpectedWorld && UTOwner == ExpectedPawn && LoadedVolleyPawn.Get() == ExpectedPawn
-        && UTOwner->Controller == ExpectedController && !UTOwner->IsDead() && !UTOwner->IsFiringDisabled()
-        && UTOwner->GetWeapon() == this && UTOwner->GetPendingWeapon() == nullptr)
-        StopFire(1);
+        UE_LOG(LogTemp, Log, TEXT("[RocketVolley] ownership_input_ready weapon=%s epoch=%u age=%.3f mode=%u"),
+            *GetName(), LoadedOwnershipEpoch, Age, SelectedMode);
+    StartLoadedVolleyInput(SelectedMode);
 }
 
 bool AUTPlusWeap_RocketLauncher::IsLoadedVolleyModeValid(uint8 Mode) const
@@ -130,9 +137,22 @@ void AUTPlusWeap_RocketLauncher::StartFire(uint8 FireModeNum)
 {
     if (FireModeNum != 1)
     {
-        // A fresh primary press replaces the intent. An older primary retry
-        // may wake during initialization and must not erase this newer input.
+        // A physical M1 press belongs to the held load even before charge entry.
+        // Consume it before primary debounce/retry can turn it into a later shot.
+        if (FireModeNum == 0 && !bHandlingRetry && TryCycleLoadedVolleyMode()) return;
+        // Outside a valid held load, fresh input replaces any stale ownership
+        // buffer. An older primary retry must not erase newer buffered input.
         if (!bHandlingRetry) ClearLoadedVolleyInput();
+        Super::StartFire(FireModeNum);
+        return;
+    }
+    AUTWeapon* const IncomingWeapon = UTOwner ? UTOwner->GetPendingWeapon() : nullptr;
+    if (UTOwner && (CurrentState == UnequippingState || (IncomingWeapon && IncomingWeapon != this)))
+    {
+        // Alt pressed while this launcher is being put away belongs to the incoming
+        // weapon, as in stock and 328. AUTWeaponFix's swap-away branch latches the
+        // pawn's held bit and returns before any fire RPC; the loaded path below
+        // would reject the press (CanBeginLoadedVolleyInput) and drop it.
         Super::StartFire(FireModeNum);
         return;
     }
@@ -148,13 +168,44 @@ void AUTPlusWeap_RocketLauncher::StartFire(uint8 FireModeNum)
         BufferLoadedVolleyInput();
         return;
     }
+    StartLoadedVolleyInput(0);
+}
+
+bool AUTPlusWeap_RocketLauncher::TryCycleLoadedVolleyMode()
+{
+    if (!CanBeginLoadedVolleyInput() || !UTOwner
+        || (!UTOwner->IsLocallyControlled() && Cast<APlayerController>(UTOwner->Controller))) return false;
+    if (bPendingLoadedVolleyInput) TryDrainLoadedVolleyInput();
+    if (!bPendingLoadedVolleyInput)
+    {
+        if (!HasLoadedVolley() || LoadedVolleyPawn.Get() != UTOwner
+            || LoadedVolleyEpoch != LoadedOwnershipEpoch || IsLoadedVolleyReleasePending()
+            || LoadedVolley.Released) return false;
+        if (bLoadedVolleyEnteredState)
+        {
+            UUTWeaponStateFiringChargedRocket_Transactional* State =
+                Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
+            if (!State || !State->bCharging) return false;
+        }
+    }
+    GetWorldTimerManager().ClearTimer(RetryFireHandle[0]);
+    bBufferedClickPending[0] = bCrossModeRetryArmed[0] = false;
+    UTOwner->SetPendingFire(0, false);
+    OnMultiPress(0);
+    return true;
+}
+
+void AUTPlusWeap_RocketLauncher::StartLoadedVolleyInput(uint8 SelectedMode)
+{
     if (!CanBeginLoadedVolley() || HasLoadedVolley()) return;
     // Remote authority may start loads only through the version-gated RPC.
     if (Role == ROLE_Authority && !UTOwner->IsLocallyControlled()
         && Cast<APlayerController>(UTOwner->Controller)) return;
     LastClientLoadedVolleyId = NCRocketVolley::Next(LastClientLoadedVolleyId);
     ResetLoadedVolley(LastClientLoadedVolleyId);
-    if (Role < ROLE_Authority) ServerBeginLoadedVolley(LoadedVolleyEpoch, LoadedVolley.Id, UTOwner);
+    LoadedVolleySelectedMode = SelectedMode;
+    CurrentRocketFireMode = SelectedMode;
+    bDrawRocketModeString = SelectedMode != 0;
     if (CurrentFireMode == 0 && IsFiring()) Super::StopFire(0);
     TryBeginLoadedVolley();
 }
@@ -180,6 +231,14 @@ void AUTPlusWeap_RocketLauncher::TryBeginLoadedVolley()
                 *GetName(), LoadedVolleyEpoch, LoadedVolley.Id, int32(Role), Now - LoadedVolleyBeginRequestedAt,
                 *GetNameSafe(CurrentState), Ammo, LoadedVolleyPawn.Get() == UTOwner ? 1 : 0);
         CompleteLoadedVolley(true);
+        return;
+    }
+    if (UTOwner->GetWeapon() != this || UTOwner->GetPendingWeapon() != nullptr)
+    {
+        // Preserve input belonging to the outgoing weapon. The numbered Begin
+        // (and any early Release) waits without entering a state or spending ammo.
+        GetWorldTimerManager().SetTimer(LoadedVolleyBeginHandle, this,
+            &AUTPlusWeap_RocketLauncher::TryBeginLoadedVolley, 0.005f, false);
         return;
     }
     // Keep the queued request in its own identity rather than a generic held
@@ -237,33 +296,65 @@ void AUTPlusWeap_RocketLauncher::ServerBeginLoadedVolley_Implementation(uint32 E
     if (ExpectedPawn != UTOwner || !CanBeginLoadedVolley() || HasLoadedVolley())
     {
         if (CVarRocketVolleyDebug.GetValueOnGameThread())
-            UE_LOG(LogTemp, Warning, TEXT("[RocketVolley] server_reject weapon=%s epoch=%u id=%u reason=owner_state_ammo_or_busy active=%u state=%s ammo=%d"),
-                *GetName(), Epoch, Id, LoadedVolley.Id, *GetNameSafe(CurrentState), Ammo);
+            UE_LOG(LogTemp, Warning, TEXT("[RocketVolley] server_reject weapon=%s epoch=%u id=%u reason=owner_state_ammo_or_busy active=%u state=%s ammo=%d currentWeapon=%s pendingWeapon=%s"),
+                *GetName(), Epoch, Id, LoadedVolley.Id, *GetNameSafe(CurrentState), Ammo,
+                *GetNameSafe(UTOwner->GetWeapon()), *GetNameSafe(UTOwner->GetPendingWeapon()));
         ClientLoadedVolleyResult(Epoch, Id, UTOwner, uint8(NCRocketVolley::EResult::Rejected), 0, 0);
         return;
     }
     ResetLoadedVolley(Id);
+    if (CVarRocketVolleyDebug.GetValueOnGameThread() && UTOwner->GetPendingWeapon() == this)
+        UE_LOG(LogTemp, Log, TEXT("[RocketVolley] server_begin_queued weapon=%s epoch=%u id=%u reason=pending_switch currentWeapon=%s state=%s"),
+            *GetName(), Epoch, Id, *GetNameSafe(UTOwner->GetWeapon()), *GetNameSafe(CurrentState));
     if (CurrentFireMode == 0 && IsFiring()) EndFiringSequence(0);
     TryBeginLoadedVolley();
 }
 
 bool AUTPlusWeap_RocketLauncher::BeginLoadedVolleyState()
 {
+    // Stock Active scans held input synchronously when BringUp finishes. Check
+    // readiness before creating a local authority volley: a refused entry must
+    // leave ContinueLoadedVolley free to queue StartFire with its begin timer.
+    // Existing numbered requests keep their identity/timer while waiting.
+    const float Now = GetWorld()->GetTimeSeconds();
+    const bool bReady = CanBeginLoadedVolleyInput()
+        && (Role != ROLE_Authority || Is329FireProtocolReady())
+        && EarliestFireTime - Now <= KINDA_SMALL_NUMBER
+        && NCClientFireTiming::MaxRemaining(this) <= KINDA_SMALL_NUMBER;
+    if (!bReady) return false;
+
     // Bots/listen host may enter via the stock continued-fire state machinery.
     if (!HasLoadedVolley() && Role == ROLE_Authority && UTOwner
         && (UTOwner->IsLocallyControlled() || !Cast<APlayerController>(UTOwner->Controller)))
     {
         LastClientLoadedVolleyId = NCRocketVolley::Next(LastClientLoadedVolleyId);
         ResetLoadedVolley(LastClientLoadedVolleyId);
+        LoadedVolleySelectedMode = uint8(FMath::Clamp(CurrentRocketFireMode, 0, 2));
     }
     const bool bValid = HasLoadedVolley() && LoadedVolleyEpoch == LoadedOwnershipEpoch
-        && LoadedVolleyPawn.Get() == UTOwner;
+        && LoadedVolleyPawn.Get() == UTOwner && Now - LoadedVolleyBeginRequestedAt <= 5.f;
     if (bValid)
     {
+        const bool bFirstEntry = !bLoadedVolleyEnteredState;
+        // State cleanup can reset the visual mode while a load waits for equip
+        // or cooldown. The request owns its selection throughout that wait.
+        if (bFirstEntry || bLoadedVolleyReleaseReceived || (Role == ROLE_Authority
+            && !UTOwner->IsLocallyControlled() && Cast<APlayerController>(UTOwner->Controller)))
+            CurrentRocketFireMode = LoadedVolleySelectedMode;
+        if (bFirstEntry && LoadedVolleySelectedMode != 0) bDrawRocketModeString = true;
         bLoadedVolleyEnteredState = true;
         CurrentlyFiringMode = 1;
         if (FireModeActiveState.IsValidIndex(1)) FireModeActiveState[1] = 1;
         GetWorldTimerManager().ClearTimer(LoadedVolleyBeginHandle);
+        // Do not authorize a server load while the owning client is only waiting.
+        // A pre-entry release can now cancel locally without a new cancel RPC.
+        // Reliable calls on this actor preserve Begin -> Mode -> Release ordering.
+        if (Role < ROLE_Authority && bFirstEntry)
+        {
+            ServerBeginLoadedVolley(LoadedVolleyEpoch, LoadedVolley.Id, UTOwner);
+            if (LoadedVolleySelectedMode != 0)
+                ServerSetLoadedRocketMode(LoadedVolleyEpoch, LoadedVolley.Id, UTOwner, LoadedVolleySelectedMode);
+        }
     }
     return bValid;
 }
@@ -275,21 +366,42 @@ void AUTPlusWeap_RocketLauncher::StopFire(uint8 FireModeNum)
         Super::StopFire(FireModeNum);
         return;
     }
+    if (!bHandlingRetry)
+    {
+        // Mirror AUTWeaponFix::StopFire without its legacy stop RPCs: a genuine
+        // release ends held alt intent even mid-switch, so a press latched for
+        // the incoming weapon (see StartFire) cannot ghost-fire it.
+        bFireHeldByPlayer[1] = false;
+        AUTWeapon* const IncomingWeapon = UTOwner ? UTOwner->GetPendingWeapon() : nullptr;
+        if (UTOwner && (CurrentState == UnequippingState || (IncomingWeapon && IncomingWeapon != this)))
+            UTOwner->SetPendingFire(1, false);
+    }
     if (bPendingLoadedVolleyInput)
     {
-        bPendingLoadedVolleyRelease = true;
-        return; // No epoch/ID yet: retain the release without RPCs or state entry.
+        ClearLoadedVolleyInput();
+        return;
+    }
+    if (HasLoadedVolley() && !bLoadedVolleyEnteredState && UTOwner
+        && (UTOwner->IsLocallyControlled() || !Cast<APlayerController>(UTOwner->Controller)))
+    {
+        // Match 328: releasing a local press before charging starts cancels it.
+        // Remote authority can still be waiting on a client that already began;
+        // its numbered Release must retain the first-load guarantee instead.
+        CompleteLoadedVolley(true);
+        CurrentRocketFireMode = 0;
+        bDrawRocketModeString = false;
+        return;
     }
     NotifyLoadedVolleyRelease();
-    // A load requested during primary/equip has not entered its state yet.
-    // Keep the pending transition, then release at its first-load boundary.
+    // Authority may still be catching up to a load that began on the client.
     if (Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState) || !HasLoadedVolley())
         EndFiringSequence(1); // No stock Stop, byte retry, or watermark ACK for 329 loads.
 }
 
 void AUTPlusWeap_RocketLauncher::NotifyLoadedVolleyRelease()
 {
-    if (!HasLoadedVolley() || bLoadedVolleyReleaseSent || bLoadedVolleyApplyingResult) return;
+    if (!HasLoadedVolley() || !bLoadedVolleyEnteredState
+        || bLoadedVolleyReleaseSent || bLoadedVolleyApplyingResult) return;
     if (Role == ROLE_Authority && UTOwner && !UTOwner->IsLocallyControlled()
         && Cast<APlayerController>(UTOwner->Controller)) return;
     bLoadedVolleyReleaseSent = true;
@@ -325,7 +437,8 @@ void AUTPlusWeap_RocketLauncher::ServerReleaseLoadedVolley_Implementation(uint32
     }
     if (bLoadedVolleyReleaseReceived || LoadedVolley.Released) return;
     if (!UTOwner || LoadedVolleyPawn.Get() != UTOwner || UTOwner->IsDead()
-        || UTOwner->GetWeapon() != this || !IsLoadedVolleyModeValid(Mode))
+        || (UTOwner->GetWeapon() != this && (bLoadedVolleyEnteredState || !CanBeginLoadedVolley()))
+        || !IsLoadedVolleyModeValid(Mode))
     {
         CompleteLoadedVolley(true);
         return;
@@ -351,8 +464,11 @@ void AUTPlusWeap_RocketLauncher::ServerSetLoadedRocketMode_Implementation(uint32
     if (Id != LoadedVolley.Id || !HasLoadedVolley() || LoadedVolley.Released
         || bLoadedVolleyReleaseReceived || !IsLoadedVolleyModeValid(Mode)) return;
     CurrentRocketFireMode = Mode;
+    LoadedVolleySelectedMode = Mode;
     bDrawRocketModeString = true;
-    SetRocketFlashExtra(1, NumLoadedRockets + 1, Mode, true);
+    // While pending, the pawn's flash information still belongs to the old
+    // weapon. BeginState will publish the selected mode once charging starts.
+    if (bLoadedVolleyEnteredState) SetRocketFlashExtra(1, NumLoadedRockets + 1, Mode, true);
 }
 
 bool AUTPlusWeap_RocketLauncher::CommitLoadedVolley()
@@ -563,16 +679,25 @@ void AUTPlusWeap_RocketLauncher::ClientLoadedVolleyResult_Implementation(uint32 
                 Prediction.Outcome = uint8(NCRocketVolley::ERocketResult::Cancelled);
         }
     }
-    if (Epoch == LoadedVolleyEpoch && Id == LoadedVolley.Id && (Outcome == NCRocketVolley::EResult::Rejected || Outcome == NCRocketVolley::EResult::Cancelled))
+    if (HasLoadedVolley() && Epoch == LoadedVolleyEpoch && Id == LoadedVolley.Id
+        && (Outcome == NCRocketVolley::EResult::Rejected || Outcome == NCRocketVolley::EResult::Cancelled))
     {
-        TGuardValue<bool> ResultGuard(bLoadedVolleyApplyingResult, true);
-        LoadedVolley.Finish(Id);
-        if (CurrentlyFiringMode == 1) CurrentlyFiringMode = 255;
-        if (FireModeActiveState.IsValidIndex(1)) FireModeActiveState[1] = 0;
-        if (UTOwner) UTOwner->SetPendingFire(1, false);
         UUTWeaponStateFiringChargedRocket_Transactional* State =
             Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
-        if (State && State->StateVolleyEpoch == Epoch && State->StateVolleyId == Id) GotoActiveState();
+        const bool bOwnsChargedState = LoadedVolleyPawn.Get() == UTOwner
+            && UTOwner->GetWeapon() == this && State
+            && State->StateVolleyEpoch == Epoch && State->StateVolleyId == Id;
+        // Finish before callbacks, so old release/EndState work is inert without
+        // suppressing a new volley's release during a synchronous state entry.
+        CompleteLoadedVolley(true);
+        // A terminal/older volley owns only its predicted projectiles. Even a
+        // live cancellation owns pawn input only while its charge is current;
+        // a switch-away press belongs to the incoming weapon.
+        if (bOwnsChargedState)
+        {
+            if (UTOwner->GetPendingWeapon() == nullptr) UTOwner->SetPendingFire(1, false);
+            GotoActiveState(); // A pending switch is handled by stock Active.
+        }
     }
     ReconcileLoadedRockets();
 }
@@ -747,9 +872,19 @@ void AUTPlusWeap_RocketLauncher::OnRep_LoadedOwnershipEpoch()
 {
     if (LoadedVolleyEpoch == LoadedOwnershipEpoch) return;
     const bool bInitialOwnership = LoadedVolleyEpoch == 0 && LoadedOwnershipEpoch != 0;
+    UUTWeaponStateFiringChargedRocket_Transactional* State =
+        Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
+    const bool bOwnsChargedState = UTOwner && LoadedVolleyPawn.Get() == UTOwner
+        && UTOwner->GetWeapon() == this && State && LoadedVolley.Id != 0
+        && State->StateVolleyEpoch == LoadedVolleyEpoch && State->StateVolleyId == LoadedVolley.Id;
+    const bool bOwnsHeldLoad = HasLoadedVolley() && bOwnsChargedState
+        && UTOwner->GetPendingWeapon() == nullptr;
     CompleteLoadedVolley(true);
-    if (UTOwner) UTOwner->SetPendingFire(1, false);
-    if (Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState)) GotoActiveState();
+    if (bOwnsHeldLoad) UTOwner->SetPendingFire(1, false);
+    // Reset before state callbacks: Active can synchronously dispatch a newer
+    // held input. An ownership update on a holstered launcher must not activate
+    // it or clear input belonging to the pawn's current weapon.
     ResetLoadedOwnershipState(bInitialOwnership);
+    if (bOwnsChargedState) GotoActiveState();
     TryDrainLoadedVolleyInput();
 }

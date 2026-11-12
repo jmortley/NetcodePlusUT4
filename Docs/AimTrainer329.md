@@ -1,14 +1,404 @@
 # NetcodePlus Aim Trainer (UE 4.15 / 329)
 
-An opt-in game mode with real animated UT character targets, six 60-second
+An opt-in game mode with real animated UT character targets, thirteen 60-second
 scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
+
+## Precise run clock (2026-10-12)
+
+The game mode now accumulates each frame's `DeltaSeconds` into one double clock.
+It advances throughout the loaded map and is never reset between runs; countdown
+and run starts simply record new double anchors. This avoids UE4.15's accumulated
+float world-time rounding at high frame rates and restores the intended 60-second
+run, while retaining normal pause and game-time behavior. Existing rules still
+invalidate uploads after altered game speed or a long stall.
+
+Run length, target appearance/expiry, trainer strafe/crouch/dodge/slide schedules,
+drill windows, tracking contact/fired totals, event microseconds and five-second
+checkpoint elapsed times all use that clock. Double timestamps stay double
+through intermediate calculations and arrays; only the HUD countdown is narrowed
+for presentation. Cosmetic countdown audio age and tint refresh use monotonic
+platform time. Floating damage numbers use their existing short-lived scale
+timer and no longer retain an unused world-time timestamp.
+
+Engine-owned timestamps retain matching domains: rocket/pellet `CreationTime`
+is compared against separate float world-time run/appearance stamps. Native UT
+movement recovery gates still compare against native movement time. This change
+does not modify weapon refire, engine movement cooldowns or projectile physics.
+
+**No preset revision or leaderboard reset.** This repairs the intended duration
+and timing rather than defining another preset. Short-session behavior is
+effectively unchanged; previously accepted scores remain. No Django clock change
+or map reload is needed, and there are no content assets to recook.
+
+Validation across this pending trainer diff: 274 focused native-adapter tests
+passed. The new clock fixture executes production `Tick`, event stamping and
+checkpoint flushing with an independently drifting float world at age 5000,
+at both 700 and 960 fps. Accumulation stays within 1 ms of `N * dt`; all twelve
+checkpoints dispatch on their five-second deadlines within one frame, including
+checkpoint 9 at 45 real seconds. It also verifies the 60-second end, restart
+anchors, tracking credit and separate projectile time domains. Target/drill tests
+cover subsecond deadlines at large clock values.
+
+Self-review and independent review are complete. Plugin-only UE4.15 header
+generation and syntax checks passed for nine changed production translation
+units and both automation translation units (existing `Instigator` shadow
+warnings remain). Jeremy still needs the full plugin build, then execution of
+`NetcodePlus.AimTrainer.Clock.LongSessionPrecision` and
+`NetcodePlus.AimTrainer.LocalSession.Transport` in the rebuilt editor. Follow with
+a long-session 700/960 fps playtest through checkpoint 9 and final save; automated
+adapters do not substitute for engine playtesting or live HTTP verification.
+
+## Local upload cooldown and save status (2026-10-12)
+
+The Windows local-score transport now retains `Retry-After` and `Date`, including
+on rejected requests. A 429 ends that run's upload attempt and observes the
+server's delay before another local run can request an online session. Numeric
+delays and HTTP dates are supported; a missing or malformed delay on 429 falls
+back to 60 seconds. An explicit shorter delay is honored. Hinted service errors
+also respect their cooldown; ordinary connection failures keep bounded retries.
+Known rejection headers survive a response-body timeout or cancellation, so R
+cannot bypass `Retry-After` while a body is still pending.
+
+**R still restarts practice immediately.** There is no new client restart quota.
+The cooldown survives run cancellation and map travel, and pressing R during it
+does not extend it or send more start requests. A run begun during a cooldown is
+practice only, even if the cooldown ends while playing; a subsequent run can
+upload normally. The game never freezes practice for a long retry or tries to
+upload a run retroactively without its accepted checkpoints. Django controls its
+own limits; its recently relaxed limits require no duplicated client setting.
+
+Results now prominently show **RUN NOT SAVED**, **SAVING...**, **SAVED**, or
+**SAVE NOT CONFIRMED**. The latter preserves uncertainty if a final request may
+have arrived but its acknowledgement was lost. A rejected start or recording
+failure is shown as unsaved, with its reason retained below the leaderboard.
+Only an accepted final acknowledgement shows a confirmed save. Restarted runs
+remain protected from stale callbacks.
+Bounded JSON `error`/`detail` text from rejected starts and checkpoints is retained
+as the reason, rather than discarding the body and showing a generic failure.
+Checkpoint recording and transport require an accepted run credential.
+
+Validation includes bounded/error-body HTTP handling, numeric/date/default retry
+delays, save outcomes, checkpoint recording and results rendering. The expanded
+engine transport test covers 429 timeout/cancellation, restart and map travel,
+server rejection reasons, and preventing requests without an accepted run.
+Client/server plugin rebuilds are required; no pak recook, scoring change or
+leaderboard reset is included.
+
+## Harder IG pop-up movement (2026-10-12)
+
+IG pop-up's open-floor targets (slots 0, 4 and 5) move 20% faster, with matching
+acceleration, braking, horizontal dodge and slide scaling. Evasive targets favor
+stronger diagonal cuts and shorter decisions while retaining occasional longer
+travel. Short feints cannot chain into continuous A/D twitching. Dodge attempts
+increase from 55% to 75% of eligible decisions, and dodge-to-slide choices from
+12% to 18%, subject to native recovery, path safety and remaining exposure time.
+
+The rear head-peek and high-right platform behavior stays unchanged. The middle
+platform uses the IG evasive decisions at its existing speed. Other scenarios,
+hitboxes, spawn cadence, exposure, scoring and refire are unchanged. Tests cover
+the IG-only scope, actual movement decisions and bounded dodge/slide paths at the
+increased speed.
+
+**IG pop-up starts fresh revision-21 boards (2026-10-16).** The faster targets
+are a harder run, so IG pop-up alone moves from revision 19 to 21, for fixed and
+movement, local and approved-server boards. Sniper/LG and SACTF pop-up stay on
+revision 19, and Airborne keeps revision 16 despite its longer target lifetime.
+Older IG pop-up scores remain browsable as archived revision-19 results. Deploy
+Django revision-21 support before this plugin build: an older backend rejects a
+revision-21 start, so those runs would only count as practice.
+
+## Airborne target lifetime (2026-10-12)
+
+Falling targets receive 0.9 seconds more timed exposure in every Airborne preset:
+Instagib, Sniper/LG, SACTF and Rockets, in fixed-position and movement practice.
+The normal deadline is now 0.1 seconds before predicted goo contact, and the
+short-fall timer floor increases from 0.75 to 1.65 seconds. Actual goo/ground
+contact and the end of the 60-second run still retire targets immediately, so
+short falls can end before the full timer extension. The jump-pad target already
+remains active until hit or run end and continues its existing repeated jumps.
+
+Spawn cadence, trajectories, refire rates and scoring are unchanged. The extra
+time improves target availability but does not raise the rifle's maximum shots
+per run: Airborne Instagib still has roughly 60 shots at 100 points per hit.
+Existing board revisions and all leaderboard scores are retained. This tuning
+needs a rebuilt plugin, with no pak recook or backend change.
+
+## Restart binding (2026-10-11)
+
+Press **R** to restart the selected scenario during countdown, during a run, or
+from results. Change or unbind it in **F5 > Home > Aim Trainer** and click Save;
+the HUD displays the selected key. Enter still starts runs from the picker and
+replays from results. Menus, chat, and the console retain their input focus.
+
+Restart discards an unfinished run, stops held fire, clears its projectiles and
+local upload session, and starts a new three-second countdown with the selected
+scenario and movement option. Completed leaderboard scores are unaffected.
+The client preference is stored as `[NCAimTrainer] RestartKey=R` in the normal
+generated `Mod.ini`; `RestartKey=None` disables it. Both client and server need
+the updated plugin for mid-run restart. No pak recook or board reset is needed.
+
+## Flak hit feedback (2026-10-11)
+
+Flak Hexagon combines accepted pellet impacts within a fixed 35 ms window,
+matching normal NCP flak hitsound grouping. Its pitch uses that combined damage
+and the player's selected NCP sound, style and volume. A lethal hit flushes the
+pending burst immediately; partial hits do not wait for the 350 ms attempt timeout.
+Rejected or duplicate pellets produce no feedback, and restarting or leaving a
+run discards pending feedback. Scoring and the 100-damage kill threshold are unchanged.
+
+Only Flak Hexagon displays floating damage numbers. Each number uses the accepted
+burst damage at the captured impact-area position, so hiding or reusing the target
+cannot move the number to its next spawn. Numbers use UT's normal body-damage
+presentation and 255 display cap; other scenarios keep damage numbers hidden.
+This adds a trainer-only client feedback RPC, requiring matching updated client
+and server plugins. No pak recook or leaderboard reset is needed.
+
+## Flak Hexagon and Shock Defense (2026-10-10)
+
+Two fixed-position, primary-only drills use new revision-20 boards. Existing
+scenario IDs, board versions and historical scores stay unchanged. The picker
+adds `=` for Flak Hexagon and `\` for Shock Defense; both can be clicked.
+
+**Flak Hexagon:** the player stands at the center of a six-sided room. One target
+spawns in a random sector within half its normal dodge travel (at most 320 units).
+It mixes lateral cuts, inward/outward strafes, occasional crouches and frequent
+full-strength native dodges. The larger hexagon leaves space to dodge away;
+only the initial spawn is restricted to half a dodge from the player.
+The outer room and inward-turn thresholds are 10% closer than the initial
+full-dodge layout, with the same native dodge strength and timing.
+Each appearance allows one primary volley. Distinct pellets from that volley
+must total **at least 100 damage** to kill and award 100 points. A partial hit
+does not score. The volley has 0.35 seconds to resolve, then a failed attempt
+retires the target. Replacement waits 0.18 seconds and clears old projectiles;
+the shot counter, projectile owner/class, appearance time and per-pellet identity
+prevent a previous volley from scoring against a new target. Accuracy is lethal
+volleys divided by shots. Misses do not subtract points.
+
+**Shock Defense:** one carrier with a cosmetic flag approaches the capture pad
+400 units in front of the player through a walled lane. Random short strafes and
+crouch feints lead into steep diagonal dodges. Some routes approach a side wall
+and attempt one real native wall dodge back into the lane. Wall contact and
+normal UT cooldowns are required; no free midair impulse is added. Decisions
+come from the run's random stream, never the trainee's aim or crosshair.
+Accepted primary beams use their native point-damage momentum, grounded force-Z
+and UT damped impulse. Targets remain alive and moving. Five consecutive hits
+reset the carrier to the start; a miss breaks the streak, and a capture resets
+the carrier and streak. A beam cancels a pending wall dodge and briefly blocks
+new dodges so that neither route can erase its queued knockback.
+The HUD shows the current streak, stops and captures. Score is
+`max(0, 100 * hits - 25 * misses - 100 * captures)`.
+
+The configured weapons are `NPFlakCannon` (1.0-second primary) and
+`UTNPShockRifle` (0.7-second primary), verified against the existing cooked-asset
+audit and native defaults. Altered refire timing makes the run practice-only.
+Target animation, held shock attachment and forced-color preferences reuse the
+other scenarios' target presentation. The visible carrier flag has no combat
+objective state and cannot intercept shots.
+
+Deploy the matching Django update before the rebuilt client/server plugin.
+It accepts `flak_hexagon` and `shock_defense` for local and approved-server boards,
+enforces one terminal flak result per shot and carries shock streak state across
+checkpoints. No database migration or map recook is needed. The rooms are built
+from runtime geometry. Native adapter tests cover scoring, attempt isolation,
+streaks, native impulse routing and movement gates; packaged playtesting is still
+required for animation, collision, networking and difficulty.
+
+## Pop-up evasion (2026-10-09)
+
+Revision 19 replaces the revision-17 stop-at-destination routes in all three
+pop-up presets. The left and foreground persistent targets, the middle-platform
+target and the alternate floor target choose two-dimensional movement input.
+They mix isolated 0.22–0.34-second feints, 0.48–0.82-second cuts and 0.95–1.60-second
+runs. A short feint cannot be followed by another short feint. Continuing,
+turning across the previous motion, and reversing are independent choices;
+neither a waypoint nor the trainee's crosshair determines the next turn.
+
+Each decision can also attempt a native diagonal dodge, or occasionally a
+backward dodge into a landing slide. Choices repeat throughout an appearance,
+with fresh directions after landing and no forced return to the spawn corner.
+Full trajectory checks include retained
+perpendicular momentum and landing/slide drift. Native cooldown, speed,
+acceleration and posture remain in control; unsafe actions fall back to walking.
+The rear head peek keeps its cover movement. The high-right target keeps its
+short platform strafe and occasional slide, without destination walking.
+
+Deploy Django revision-19 support before these plugin builds. Only pop-up boards
+start fresh; historical results, the five-position headshot rules, tracking and
+Airborne are preserved. No migration or map recook is required. Rebuild and
+playtest the packaged client/server to assess difficulty and movement feel.
+
+## Headshot line clears (2026-10-09)
+
+Regular Sniper/LG and SACTF headshots use fresh revision-18 boards. Each confirmed
+headshot locks that station empty until all five stations have been hit. After
+the last hit, the whole line returns following a 0.35-second pause. Missed targets
+keep their existing expiry/reappearance timing, but expiries never clear a station
+or unlock an already-hit seat. Abort, scenario changes and new runs reset the locks.
+Body hits do not advance the line. Existing headshot scoring and movement are unchanged.
+
+Deploy the matching Django revision-18 support before the updated plugin. Local
+checkpoints enforce the same five-station rule across checkpoint boundaries; older
+scores remain on their historical boards. Other presets retain their board versions.
+
+## Earlier pop-up travel and a second persistent dodger (2026-10-09)
+
+Revision 17 introduced fresh pop-up boards. The left platform target becomes
+a second persistent dodger; the total remains six targets (four timed, two
+persistent). It walks and dodges lengthwise along the left side, with a small
+random diagonal angle per appearance and its own direction/dodge timers. Both
+persistent targets use longer strafe decisions and refill after a hit.
+
+Timed targets on the center/right platforms and the near/deep floor lanes pick
+random destinations at least 350 units away. They commit for 1.0–2.2 seconds,
+or select a fresh destination once they finish braking at the previous one.
+Native speed and acceleration are unchanged. Reaching a destination never
+causes an automatic tiny A/D bounce. The rear head-peek keeps its cover lane.
+
+The high-right target selects a slide on 35% of appearances, with a 0.45–2.25
+second delay, rather than always sliding shortly after spawning. Left timed
+appearances independently choose forward/backward diagonal dodges, backward
+dodge-to-slide, or walking. Native cooldown, landing, exposure and full-path
+clearance checks still apply. No movement decision reads the trainee's aim.
+
+Deploy the paired Django update before this plugin build: it accepts revision
+17 for all three pop-up presets and validates both persistent target IDs in
+local checkpoints. Fresh fixed/movement and local/server boards retain old
+scores in their archives. Tracking, headshots and Airborne keep their existing
+boards. No migration or map recook is required. A rebuilt packaged game still
+needs a playtest for movement feel.
+
+## Earlier Airborne and instagib movement variety (2026-10-09)
+
+Revision 16 introduced fresh boards for the four Airborne presets and instagib pop-up,
+for fixed/movement practice and local/approved-server results. Tracking,
+headshots, and Sniper/LG/SACTF pop-up keep their existing boards and behavior.
+The matching Django change accepts local checkpoints and server submissions;
+deploy it before the new plugin builds. No database migration or map recook is
+required. Older scores remain archived; revision numbers stay out of the UI.
+
+- Airborne falls choose diagonal momentum on 60% of appearances, mixing forward
+  and backward drift with inward lateral travel in the outer lanes. The remaining
+  falls retain their smaller drift. Existing gravity, fall rates, spawn heights,
+  compact rocket layout and native pad-to-pad trajectory are retained.
+- Falling appearances expire one second before their calculated goo-contact
+  time, with a 0.75-second minimum window for short drops. Touching goo or an
+  unexpected platform still retires them immediately. Both hit acceptance and
+  target cleanup honor the new authority deadline; this never deducts points.
+- Airborne uses the last eight confirmed hits, measured left/center/right at
+  impact. After four hits, a zone receiving over half the hits gradually loses
+  spawn opportunities, reaching 20% of its normal rate for exclusive farming.
+  Balanced recent hits restore normal chances. A skipped opportunity respects
+  the spawn timer even if the farmed side is the only free lane. Jumper respawns
+  also favor the opposite launch pad; an active jump is never redirected.
+- Instagib floor targets have wider, individually varied walking bands. Their
+  decisions mix 20% short (0.30-0.55s), 35% medium (0.65-0.95s), and 45% long
+  (1.05-1.50s) holds; 40% of decisions continue the current direction. Native
+  acceleration and boundary braking still apply. The head peek and high right
+  platform retain their established movement constraints.
+- The instagib front target starts at varying depths and lateral positions in
+  its safe floor lane, with a fresh initial direction, varied dodge delays, and
+  occasional skipped dodge decisions. Timed targets favor ordinary strafing
+  over special moves rather than repeating a wiggle-then-dodge sequence.
+
+Native regression tests cover expiry and duplicate-hit guards, trajectory bounds,
+recent-hit history, adaptive spawn opportunities, native action dispatch, lane
+geometry, and unchanged tracking behavior. Packaged 4.15 movement and rendering
+still need a playtest after rebuilding.
+
+## Airborne, hard tracking and target presentation (2026-10-09)
+
+- **Link tracking / hard** uses the NCP Link Gun and a target with 30% higher
+  horizontal speeds and acceleration. Gravity and jump height stay unchanged.
+  Faster slides turn inward sooner to remain inside the normal Link beam range.
+  Its board is separate from normal Link tracking.
+- **Hitscan Airborne** supports Instagib, Sniper/LG, and SACTF presets. A fourth
+  **Airborne / Rockets** preset uses
+  `/Game/Blueprints/Netcode/UTNPRocketLauncher.UTNPRocketLauncher_C`.
+  Every weapon preset has independent fixed-position/movement and local/server boards.
+- The room has DeckTest's goo and a raised firing ledge. A target launches between
+  offset pads at `(100,-1400)` and `(1100,1400)`, creating a diagonal crossing
+  in both directions. Launch velocity is calculated from native gravity and
+  the destination pad. Five other pooled slots spawn falling targets in varied
+  rear lanes, staggered by 0.45–0.70 seconds. Touching goo retires a target;
+  there is no requirement to clear the entire room before replacements appear.
+- The two outer falling slots each have a 45% chance per appearance to use a
+  side-wall lane instead of their rear lane: one on the left and one on the
+  right maximum, within the same six-target pool. These spawn at X550–650,
+  Y±1660 (±25 jitter) and drift inward, clearing both jump-pad platforms.
+- Falling targets now use 88.35% of the original vertical rate for Sniper/LG
+  and 90.25% for Instagib: another 5% reduction from their earlier 93%/95%
+  rates. Native gravity and launch Z are scaled together to preserve
+  arc height, with matching gravity replicated to clients. The diagonal
+  jump-pad target retains its existing rifle launch timing; SACTF stays at
+  its original fall rate.
+- Airborne Rockets retains the closer X−800 firing position and uses a compact
+  layout based on halving each target center's 3D displacement from the fixed eye position
+  `(-800,0,511)`, compared with the previous rocket layout. Its pads move to
+  `(-350,-700)` / `(150,700)`, with smaller supports and a narrower ledge;
+  side-lane falling centers spawn at Z930.5–1130.5 and the jumper apex is Z1030.5.
+  Goo rises to Z211.5 and pads to Z290.5 to preserve safe retirement/landing
+  for full-size capsules. Native gravity is retained; initial drop velocities
+  retain the compact layout's sqrt(0.5) scale. The two alternate side lanes move inward
+  with the rest of this compact layout. Movement practice uses the same
+  geometry; its changing viewpoint naturally changes individual shot ranges.
+  A subsequent rear-target adjustment moves the nearer falling band another
+  75 units forward to X375–475, and the deeper band 200 units forward to
+  X525–650. These rear falling targets spawn with 60% more capsule-bottom
+  clearance above the goo, raising their centers to Z1297.1–1617.1. Initial
+  velocities and gravity stay the same, providing more time before goo contact.
+  Jump-pad targets and alternate side lanes retain their compact-layout settings.
+  Switching back to a rifle restores the original supports, goo and lane.
+- All Airborne presets award 100 per hit with **no miss or expiry deductions**.
+  Sniper/LG and SACTF retain the 50-point headshot bonus. Rifle accuracy still
+  reflects missed shots. Rockets award 100 per destroyed target; their displayed
+  rate is hits divided by hits plus expiries; splash can hit several targets
+  with one projectile. Native rocket/grenade collision, LOS, damage types and
+  NCP validation remain in charge of damage. Old-run or pre-appearance
+  projectiles cannot score against a newly reused target.
+- Headshot-only presets increase native head radius by 15%, replicated to
+  clients. Visible head size and body capsule do not change. This includes
+  NCP's inline claimed-head validation, not just the ordinary `IsHeadShot` call.
+  Pop-up and airborne headshot bonuses retain their normal radius.
+- Every trainer target now requires
+  `/Game/RestrictedAssets/Character/Base/Blueprints/Base_3p_AnimBP_UT3` and holds
+  a cosmetic stock shock-rifle attachment. It has no weapon collision or
+  firing inventory. Forced-model enemy colors/brightness apply to the trainer
+  mesh; model selection cannot replace its skeleton, size or animation class.
+
+The shared UT3 animation change reset all eleven presets at revision 14.
+The four Airborne presets advanced to revision 15 for positive-only scoring
+and the compact rocket layout; the later movement refresh above advances only
+Airborne and instagib pop-up to 16. This applies to
+both movement settings and score sources. Previous results stay archived under
+their original versions and never mix
+with these boards. Deploy matching Django code before testing
+uploads; no new database migration is required. Existing authentication,
+five-second local checkpoints, and approved-server allowlists still apply.
+New slugs are `strafe_hard`, `airborne_ig`, `airborne_sniper`, `airborne_sactf`,
+and `airborne_rockets`. The menu accepts keys 1–9, 0, and minus, or mouse selection.
+
+The goo uses DM-DeckTest's
+`/Game/RestrictedAssets/Environments/Materials/SlimePit.SlimePit` on its
+`SM_Sheet_500` mesh, both verified in the retail client and server paks. The
+single sheet avoids overlapping faces beneath this translucent material.
+Their optional cosmetic load happens in `BeginPlay` on rendering clients,
+with the existing grid as a fallback if either asset is absent. The
+previous lava reference was absent from retail and produced a CDO
+default-property error on startup. Scenario changes keep the rendered goo top
+aligned with the corresponding target-retirement height.
+
+Rebuild the plugin and verify that the UT3 animation and stock goo,
+jump-pad, shock-attachment and NCP weapon assets are available in the cooked
+installation. No new map asset was authored. Portable tests exercise native
+trainer methods and the backend protocol; they do not replace an actual
+4.15 build and standalone/remote-client playtest.
 
 ## Pop-up movement refresh (2026-10-09)
 
 The IG, Sniper/LG and SACTF pop-up presets now use fresh revision-12 boards.
-Link tracking, ordinary headshots and SACTF headshots continue to use their
-revision-11 boards. Old pop-up scores remain archived; they are not deleted or
+At that refresh, Link tracking and headshots retained revision 11; the later
+UT3 animation reset above moves every preset to 14. Old scores remain archived; they are not deleted or
 mixed into the tuned preset. Fixed/movement and local/approved-server results
 remain separate. Deploy the matching Django update before the new game build;
 this board change needs no database migration and adds no revision labels to
@@ -17,6 +407,14 @@ the current leaderboard UI.
 - Ordinary pop-ups mix 0.24-0.42-second reversals with 0.45-0.75-second holds,
   wider lateral movement and a random initial direction. The rear-center head
   peek and high-right platform target keep their previous movement and seats.
+- Left pop-ups now favor longer runs: 65% of direction decisions hold for
+  0.65-1.0 seconds, with 35% using shorter 0.35-0.55-second holds. The low-left
+  and near-left strafe half-widths are 180 units, and the deep-left corridor
+  uses 150 units. The low-left special long strafe reaches 220 units for
+  0.70-1.0 seconds, starting 0.8-1.3 seconds after spawn so it still fits the
+  shorter SACTF appearances. Tighter low-left spawn jitter keeps full capsules
+  supported. Other seats retain their existing timing and widths; native
+  braking and collision safety can still turn a target inward before a hold ends.
 - The middle platform can use either of two side perches. The outer floor
   target alternates between near-left, deep-left and far-right positions. The
   right seat stays ahead of the tall platform so it remains visible. This
@@ -127,7 +525,7 @@ The first version supports **one trainee per server instance**. Use separate
 instances for simultaneous players. Scores from approved instances share the
 same UT4Stats leaderboard.
 
-Click a scenario card or press **1** through **6**. Press **Enter** or click
+Click a scenario card or press **1–9**, **0**, or **minus**. Press **Enter** or click
 Start for the countdown. **F6** cancels an incomplete run and returns to the
 picker. **Enter** retries from the results screen. **Escape** retains the normal
 UT menu. Cancelled runs and disconnects do not submit partial scores.
@@ -177,7 +575,7 @@ Fixed-position and movement results never compete on the same board;
 jumping/crouching changes the headshot cover challenge. Movement runs follow
 the same eligibility and submission checks as fixed-position runs.
 
-All six scenarios support offline standalone practice. A hub is not required.
+All eleven scenarios support offline standalone practice. A hub is not required.
 Eligible local results use the separate account-authenticated checkpoint board.
 An approved network host submits to the approved-server board. A directly
 connected dedicated server can be used for network testing without a hub.
@@ -354,22 +752,21 @@ that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=11&movement=0&limit=10`
-(also `headshots`, `instagib`, `precision_popup`, `sactf_headshots` and
-`sactf_popup`). Add `scope=local_checkpoints`
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=14&movement=0&limit=10`
+(substitute any of the eleven scenario slugs). Add `scope=local_checkpoints`
 for local results; the default source is `approved_servers`. Use `movement=1`
 for movement practice. The web page is `/aimtrainer/`. Each board shows one best
 run per player, isolated by scenario, revision, source and movement setting.
 Successful menu reads are cached for one minute. Approved hosts send aggregate
 results; authenticated local runs send the checkpoints described below.
 
-Revision 10 and 11 submissions require a Boolean `movement` field. Django retains
+Revision 10 and later submissions require a Boolean `movement` field. Django retains
 revision-1 through revision-9 submissions and explicit older boards, treating
 them as fixed-position results. Older payload digests remain unchanged.
 Revision 4 onward includes `fired_ms`: measured firing time for tracking and
 zero for precision scenarios. Apply migrations through
-`0068_nc_aimtrainer_movement` and deploy revision-11 API support before enabling
-revision-11 hosts. Revision 11 needs no additional migration. Rebuild trainer clients and servers together for the new
+`0068_nc_aimtrainer_movement` and deploy revision-14 API support before enabling
+updated hosts. This board reset needs no additional migration. Rebuild trainer clients and servers together for the new
 scenario and movement-scoped submission notification. These classes are used
 only by the trainer game mode.
 

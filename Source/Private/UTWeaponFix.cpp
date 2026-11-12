@@ -3096,7 +3096,8 @@ void AUTWeaponFix::CompleteAcceptedRateFire(uint8 FireModeNum, uint32 ContextGen
     AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
     UUTWeaponState* Target = Context->ExpectedFiringState.Get();
     const float Now = World ? World->GetTimeSeconds() : -1.f;
-    const bool bStateAllowed = CurrentState == ActiveState
+    const bool bLeavingZoom = Cast<UUTWeaponStateZooming>(CurrentState) != nullptr;
+    const bool bStateAllowed = CurrentState == ActiveState || bLeavingZoom
         || Cast<UUTWeaponStateFiring_Transactional>(CurrentState) != nullptr;
     if (!World || !RequiresTransactionalRequest() || !UTOwner || UTOwner->IsDead()
         || UTOwner->IsPendingKillPending() || IsPendingKillPending()
@@ -3151,7 +3152,9 @@ void AUTWeaponFix::CompleteAcceptedRateFire(uint8 FireModeNum, uint32 ContextGen
     const TWeakObjectPtr<AUTCharacter> ExpectedOwner(UTOwner);
     const int32 Event = Context->FireEventIndex;
     ClearDeferredActiveState();
-    if (CurrentState != ActiveState && CurrentState != Target)
+    // Zoom has no firing tail to cancel. Keep its held input, as the ordinary
+    // stock zoom-to-primary handoff does, while dispatching this accepted shot.
+    if (CurrentState != ActiveState && CurrentState != Target && !bLeavingZoom)
         UTOwner->SetPendingFire(CurrentFireMode, false);
     CurrentFireMode = FireModeNum;
     CurrentlyFiringMode = FireModeNum;
@@ -4209,7 +4212,8 @@ bool AUTWeaponFix::CanReserveServerRateFire(uint8 FireModeNum, float Delay)
         || UTOwner->GetWeapon() != this || UTOwner->GetPendingWeapon()
         || !FiringState.IsValidIndex(FireModeNum)
         || !Cast<UUTWeaponStateFiring_Transactional>(FiringState[FireModeNum])
-        || (CurrentState != ActiveState && !Cast<UUTWeaponStateFiring_Transactional>(CurrentState))
+        || (CurrentState != ActiveState && !Cast<UUTWeaponStateFiring_Transactional>(CurrentState)
+            && !Cast<UUTWeaponStateZooming>(CurrentState))
         || !HasAmmo(FireModeNum) || UTOwner->IsFiringDisabled() || !AllowServerFireMode(FireModeNum)) return false;
     AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
     if (GS && GS->PreventWeaponFire()) return false;
@@ -4650,9 +4654,13 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 	const bool bQueuedDeferredEquip = CurrentState == EquippingState
 		&& bCommitsImmediateFireShot;
     const bool bRequestedTransactional = Cast<UUTWeaponStateFiring_Transactional>(RequestedFiringState) != nullptr;
+    // Zoom hands off synchronously in BeginFiringSequence; it has no firing
+    // tail to wait for. Deferring here leaves bDispatchReady false, blocks that
+    // handoff in GotoState, and traps subsequent held shots behind the request.
     const bool bQueuedDeferredState = RequiresTransactionalRequest() && bRequestedTransactional
         && Cast<UUTWeaponStateFiring>(CurrentState) != nullptr
         && Cast<UUTWeaponStateFiring_Transactional>(CurrentState) == nullptr
+        && Cast<UUTWeaponStateZooming>(CurrentState) == nullptr
         && CurrentState != RequestedFiringState;
     const bool bQueuedDeferredCharged = bQueuedDeferredState
         && Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState) != nullptr;

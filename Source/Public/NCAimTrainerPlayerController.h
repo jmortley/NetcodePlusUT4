@@ -3,7 +3,13 @@
 #include "NetcodePlus.h"
 #include "UTPlayerController.h"
 #include "NCAimTrainerTypes.h"
+#include "NCAimTrainerScenarioId.h"
 #include "NCAimTrainerPlayerController.generated.h"
+
+namespace NCAimTrainerSaveState
+{
+	enum Type : uint8 { None, Pending, Saved, NotSaved, Unconfirmed };
+}
 
 /** Small, owner-only presentation snapshot. Scores are calculated by the game mode. */
 USTRUCT()
@@ -14,6 +20,8 @@ struct FNCAimTrainerProgress
 	UPROPERTY() uint8 Scenario = 0;
 	/** 0 picker, 1 countdown, 2 running, 3 results. */
 	UPROPERTY() uint8 Phase = 0;
+	/** A completed run is saved only after the score service confirms it. */
+	UPROPERTY() uint8 SaveState = NCAimTrainerSaveState::None;
 	/** Optional lateral/jump/dodge practice, ranked separately from fixed position. */
 	UPROPERTY() bool bMovementPractice = false;
 	/** Selected from the owning player's existing NCP hitscan preference. */
@@ -63,6 +71,7 @@ public:
 	bool HasTrainerInputFocus() const;
 	void SelectTrainerScenario(uint8 Scenario);
 	void StartTrainerRun();
+	void RestartTrainerRun();
 	void ReturnToTrainerMenu();
 	void ToggleTrainerMovementPractice();
 
@@ -73,6 +82,8 @@ public:
 	void SetTrainerOnlineStatus(const FString& Status);
 	/** Called only after the authority accepts a scoring hit on a practice target. */
 	void NotifyTrainerHit(float Damage);
+	/** One accepted flak pellet burst, with its captured location for HUD feedback. */
+	void NotifyTrainerFlakHit(float Damage, const FVector& HitLocation);
 
 	UFUNCTION(Server, Reliable, WithValidation)
 	void ServerTrainerSelectScenario(uint8 Scenario, bool bUseLightningGun);
@@ -90,6 +101,11 @@ public:
 	void ClientTrainerOnlineStatus(const FString& Status);
 	UFUNCTION(Client, Reliable)
 	void ClientTrainerConfirmedHit(int32 Damage);
+	UFUNCTION(Client, Reliable)
+	void ClientTrainerFlakHit(int32 Damage, FVector_NetQuantize HitLocation);
+
+	/** Local monotonic queue age; the announcer engine QueueTime is float world time. */
+	double GetTrainerCountdownAge(int32 Count) const;
 
 private:
 	UPROPERTY(ReplicatedUsing=OnRep_TrainerProgress)
@@ -97,13 +113,13 @@ private:
 	UPROPERTY(Transient)
 	FString OnlineStatus;
 	// Public boards are read by the owning client. No credentials or browser
-	// selection cross the gameplay connection. Keys are scenario + 6 * local + 12 * movement.
-	TArray<FNCAimTrainerLeaderboardRow> LeaderboardCache[24];
-	double NextLeaderboardFetch[24] = {};
-	uint32 LeaderboardGeneration[24] = {};
-	bool LeaderboardInFlight[24] = {};
-	bool LeaderboardLoaded[24] = {};
-	bool LeaderboardFailed[24] = {};
+	// selection cross gameplay. Each preset has local/server and fixed/movement boards.
+	TArray<FNCAimTrainerLeaderboardRow> LeaderboardCache[NCAimTrainerScenarioId::LeaderboardCount];
+	double NextLeaderboardFetch[NCAimTrainerScenarioId::LeaderboardCount] = {};
+	uint32 LeaderboardGeneration[NCAimTrainerScenarioId::LeaderboardCount] = {};
+	bool LeaderboardInFlight[NCAimTrainerScenarioId::LeaderboardCount] = {};
+	bool LeaderboardLoaded[NCAimTrainerScenarioId::LeaderboardCount] = {};
+	bool LeaderboardFailed[NCAimTrainerScenarioId::LeaderboardCount] = {};
 	bool bLeaderboardSourceSelected = false;
 	bool bLeaderboardLocal = false;
 	bool bLeaderboardEnded = false;
@@ -120,7 +136,9 @@ private:
 	bool PrefersTrainerLightningGun() const;
 	double NextTrainerRequestTime[4] = { 0.0, 0.0, 0.0, 0.0 };
 	uint8 LastPresentedPhase = 255;
+	uint8 LastPresentedScenario = 255;
 	int32 LastAnnouncedCountdown = 4;
+	double TrainerCountdownQueuedAt = 0.0;
 	bool bLastPresentedMovementPractice = false;
 	bool bTrackingPrimaryHeld = false;
 	bool bTrackingAltHeld = false;

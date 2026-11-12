@@ -406,6 +406,7 @@ void UUTWeaponStateFiring::EndState() { Weapon->GetWorldTimerManager().ClearTime
 template<class T, class U> T* Cast(U* p) { return dynamic_cast<T*>(p); }
 template<class T> struct CVar { T Value; T GetValueOnGameThread() const { return Value; } };
 CVar<int32> CVarInstagibSharedHold{1};
+// Opt in for feature coverage; EquipGuards and PossessionTap also exercise 0.
 CVar<int32> CVarInstagibEquipTap{1};
 CVar<float> CVarMouseDebounceCap{0.01f};
 bool GhostEnabled = false;

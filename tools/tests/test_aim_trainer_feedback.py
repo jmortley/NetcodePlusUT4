@@ -133,11 +133,14 @@ struct AUTCharacter : AActor {
 };
 struct ANCAimTrainerTarget : AUTCharacter {
     using Super=AUTCharacter;
+    struct Attachment { void SetActorHiddenInGame(bool) {} };
+    Attachment* WeaponAttachment=nullptr;
     bool bTrainerVisible=true,Hidden=false,Collision=true;
     int NetUpdates=0;
     void SetActorHiddenInGame(bool hidden) { Hidden=hidden; }
     void SetActorEnableCollision(bool enabled) { Collision=enabled; }
     void ForceNetUpdate() { ++NetUpdates; }
+    void UpdateDrillFlag() {}
     void OnRep_TrainerVisible();
     float TakeDamage(float,const FDamageEvent&,AController*,AActor*);
     void PlayTakeHitEffects_Implementation() override;
