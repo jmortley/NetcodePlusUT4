@@ -56,7 +56,8 @@ private:
 	void SendStartAttempt();
 	void SendCheckpointAttempt();
 	void SendRequest(const FString& Url, const FString& Token, const FString& Body);
-	void HandleResponse(int32 Serial, int32 Code, const FString& Body);
+	void HandleResponse(int32 Serial, int32 Code, const FString& Body,
+		const FString& RetryAfter = FString(), const FString& ResponseDate = FString());
 	void StopRequest();
 	void ScheduleRetry();
 	void Fail(const FString& Reason);

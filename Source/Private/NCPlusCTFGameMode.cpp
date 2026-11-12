@@ -36,6 +36,7 @@
 #include "CTFStatsReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
 #include "NCICTFFlagLiftGuard.h"
+#include "NCSACTFPickupOpening.h"
 #include "NCPlusCTFOTInfo.h"
 #include "NCPlusCTFRatingSystem.h"
 #include "NCEloUploader.h"
@@ -2255,9 +2256,9 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		return ChooseLegacyPlayerStart(Player);
 	}
 
-	// NewCTF keys this threshold to connected competitors, not server capacity
-	// and not the number of pawns that happen to be alive this frame.
-	if (!Player || CountSpawnSystemCompetitors() <= SpawnSystemThreshold)
+	// Keep iCTF's connected-player threshold unchanged. Weapon CTF (including
+	// SACTF) needs enemy/last-killer protection even in 1v1 and 2v2 matches.
+	if (!Player || (bIsInstagib && CountSpawnSystemCompetitors() <= SpawnSystemThreshold))
 	{
 		return ChooseEpicPlayerStart(Player);
 	}
@@ -2268,7 +2269,7 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 	}
 
 	// No usable team pool/context: do not silently bypass the NewCTF filters.
-	// Small games and the explicit legacy selector return above, unchanged.
+	// Small iCTF games and the explicit legacy selector return above, unchanged.
 	AActor* StockStart = ChooseEpicPlayerStart(Player);
 	const AUTPlayerState* PS = Cast<AUTPlayerState>(Player->PlayerState);
 	UE_LOG(LogGameMode, Warning,
@@ -2337,6 +2338,7 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 	}
 
 	bool bRelaxedTeamCycle = false;
+	bool bRelaxedTeamCycleForSafety = false;
 	bool bRelaxedPreviousSpawn = false;
 	if (Candidates.Num() == 0)
 	{
@@ -2369,7 +2371,8 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 			UE_LOG(LogGameMode, Warning,
 				TEXT("NCPlusCTF spawn emergency: %s(T%d) -> %s | system=%s reason=%s previousRelaxed=%s cycleRelaxed=%s last=%s lastLocation=%s chosenLocation=%s radius=%.0f"),
 				*SpawnPS->PlayerName, TeamIndex, *Selected->GetName(), System,
-				bRelaxedPreviousSpawn ? TEXT("no-distinct-team-start") : TEXT("team-cycle-exhausted"),
+				bRelaxedPreviousSpawn ? TEXT("no-distinct-team-start")
+					: (bRelaxedTeamCycleForSafety ? TEXT("no-safe-cycle-start") : TEXT("team-cycle-exhausted")),
 				bRelaxedPreviousSpawn ? TEXT("true") : TEXT("false"), bRelaxedTeamCycle ? TEXT("true") : TEXT("false"),
 				Recent && Recent->Last.IsValid() ? *Recent->Last->GetName() : TEXT("expired"),
 				Recent && Recent->bHasLastLocation ? *Recent->LastLocation.ToString() : TEXT("unknown"),
@@ -2441,9 +2444,12 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 		}
 	}
 
-	// Preserve NCP's rotating robbed-base exclusion as one extra primary rule.
+	// Preserve iCTF's rotating robbed-base exclusion as one extra primary rule.
 	APlayerStart* RobbedBlockedStart = nullptr;
-	const int32 RobbedAvoidCount = FMath::Clamp(FMath::TruncToInt(SpawnRobbedBaseAvoidCount), 0, FMath::Max(0, Pool.Num() - 1));
+	// Weapon CTF no longer rotates an artificial exclusion near the flag stand.
+	// Keep the existing rule for iCTF; actual enemy/carrier checks still apply below.
+	const int32 RobbedAvoidCount = bIsInstagib
+		? FMath::Clamp(FMath::TruncToInt(SpawnRobbedBaseAvoidCount), 0, FMath::Max(0, Pool.Num() - 1)) : 0;
 	if (bOwnFlagOut && RobbedAvoidCount > 0)
 	{
 		TArray<int32> Nearest;
@@ -2483,6 +2489,101 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 		return !GetWorld()->LineTraceTestByChannel(SpawnLocation, TargetEye, COLLISION_TRACE_WEAPONNOCHARACTER, Params)
 			|| !GetWorld()->LineTraceTestByChannel(SpawnEye, TargetEye, COLLISION_TRACE_WEAPONNOCHARACTER, Params);
 	};
+
+	bool bForcedThreatenedSpawn = false;
+	uint8 LowestThreat = 0;
+	if (!bIsInstagib)
+	{
+		// Like IGPlus's safe-spawn scoring, keep enemy LOS/proximity relevant
+		// through the final choice; this is not an enemy-facing view-cone check.
+		// Our distance-only secondary used to discard every primary safety rule,
+		// letting a victim respawn beside their killer before a flag was picked up.
+		// Keep the safest combat tier for BOTH passes; friendly crowding and a
+		// nearby unheld flag remain soft preferences. Close enemies outrank LOS,
+		// then last-killer and carrier proximity. If all starts are threatened,
+		// unrelated distant players cannot outweigh a less dangerous alternative.
+		// Evaluate enemies independently: an earlier friendly rejection must not
+		// hide a later killer/LOS threat in the controller iteration order.
+		auto GetThreatTier = [&](APlayerStart* Candidate) -> uint8
+		{
+			uint8 Threat = 0;
+			const FVector SpawnLocation = Candidate->GetActorLocation();
+			for (const FSpawnParticipant& Other : Participants)
+			{
+				if (Other.TeamNum == uint8(TeamIndex)) continue;
+				const FVector SpawnEye = SpawnLocation + FVector(0.f, 0.f, Other.DefaultEyeHeight);
+				const float Distance = FMath::Min((SpawnLocation - Other.PawnLocation).Size(),
+					(SpawnEye - Other.PredictedEye).Size());
+				const float VisionRange = Other.Character == EnemyFlagCarrier
+					? FMath::Max(EnemyLOSBlockRange, SpawnFlagCarrierLOSAvoidRadius) : EnemyLOSBlockRange;
+				const bool bBelowCandidate = SpawnEnemyBelowZ > 0.f
+					&& (SpawnLocation.Z - Other.PawnLocation.Z) >= SpawnEnemyBelowZ;
+				const bool bNeedLOS = (VisionRange > 0.f && Distance <= VisionRange)
+					|| (bBelowCandidate && SpawnEnemyHardRadius > 0.f && Distance <= SpawnEnemyHardRadius);
+				const bool bVisible = bNeedLOS
+					&& (HasLineOfSight(SpawnLocation, SpawnEye, Other.PredictedEye)
+						|| (Other.bPredicted && HasLineOfSight(SpawnLocation, SpawnEye, Other.CurrentEye)));
+				if (SpawnEnemyHardRadius > 0.f && Distance <= SpawnEnemyHardRadius
+					&& !(bBelowCandidate && !bVisible))
+				{
+					Threat |= 8;
+				}
+				if (VisionRange > 0.f && Distance <= VisionRange && bVisible)
+				{
+					Threat |= 4;
+				}
+				if (SpawnKillerAvoidRadius > 0.f && SpawnPS->LastKillerPlayerState == Other.PlayerState
+					&& Distance <= SpawnKillerAvoidRadius)
+				{
+					Threat |= 2;
+				}
+				if (Other.bFlagCarrier && SpawnFlagBlockRange > 0.f && Distance <= SpawnFlagBlockRange)
+				{
+					Threat |= 1;
+				}
+			}
+			return Threat;
+		};
+
+		TArray<APlayerStart*> SafestCandidates;
+		LowestThreat = 255;
+		for (APlayerStart* Candidate : Candidates)
+		{
+			const uint8 Threat = GetThreatTier(Candidate);
+			if (Threat < LowestThreat)
+			{
+				LowestThreat = Threat;
+				SafestCandidates.Reset();
+			}
+			if (Threat == LowestThreat) SafestCandidates.Add(Candidate);
+		}
+		if (LowestThreat > 0 && !bRelaxedPreviousSpawn)
+		{
+			// Safety outranks the team's recent-use tail, but never silently
+			// re-enables this player's previous location or a duplicate of it.
+			bool bFoundSaferTail = false;
+			for (int32 Index = EligibleCount; Index < Pool.Num(); ++Index)
+			{
+				APlayerStart* Candidate = Pool[Index].Get();
+				if (IsPreviousSpawn(Candidate) || Candidates.Contains(Candidate)) continue;
+				const uint8 Threat = GetThreatTier(Candidate);
+				if (Threat < LowestThreat)
+				{
+					LowestThreat = Threat;
+					SafestCandidates.Reset();
+					bFoundSaferTail = true;
+				}
+				if (bFoundSaferTail && Threat == LowestThreat)
+				{
+					SafestCandidates.Add(Candidate);
+				}
+			}
+			bRelaxedTeamCycleForSafety = bFoundSaferTail && !bRelaxedTeamCycle;
+			bRelaxedTeamCycle = bRelaxedTeamCycle || bFoundSaferTail;
+		}
+		Candidates = SafestCandidates;
+		bForcedThreatenedSpawn = LowestThreat > 0;
+	}
 
 	// Rejection counters follow NewCTF's documented order, followed by NCP's
 	// last-killer and robbed-base protections.
@@ -2658,6 +2759,13 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 	const TCHAR* FallbackSystem = bSpawnSecondaryEnabled ? TEXT("secondary") : TEXT("stock-rating");
 	if (Secondary)
 	{
+		if (bForcedThreatenedSpawn)
+		{
+			UE_LOG(LogGameMode, Warning,
+				TEXT("NCPlusCTF spawn emergency: %s(T%d) -> %s | system=%s reason=no-combat-safe-start candidates=%d threatTier=%d previousRelaxed=%s cycleRelaxed=%s"),
+				*SpawnPS->PlayerName, TeamIndex, *Secondary->GetName(), FallbackSystem, Candidates.Num(), int32(LowestThreat),
+				bRelaxedPreviousSpawn ? TEXT("true") : TEXT("false"), bRelaxedTeamCycle ? TEXT("true") : TEXT("false"));
+		}
 		if (bLogSpawnChoices)
 		{
 			UE_LOG(LogGameMode, Warning,
@@ -2754,12 +2862,12 @@ AActor* ANCPlusCTFGameMode::ChooseLegacyPlayerStart(AController* Player)
 		}
 	}
 
-	// When our OWN flag isn't home, drop ONE of the deepest starts at our
+	// For iCTF, when our OWN flag isn't home, drop ONE of the deepest starts at our
 	// (just-robbed) base — alternating which — so we respawn biased forward toward
 	// the carrier's escape rather than behind it: a lightweight slice of UT99's
 	// "hard to leave" that no longer locks defenders out of the whole base area.
 	FVector OwnBaseLoc = FVector::ZeroVector;
-	const int32 RobbedAvoid = FMath::TruncToInt(SpawnRobbedBaseAvoidCount);
+	const int32 RobbedAvoid = bIsInstagib ? FMath::TruncToInt(SpawnRobbedBaseAvoidCount) : 0;
 	bool bOwnFlagOut = false;
 	if (RobbedAvoid > 0 && CTFGameState)
 	{
@@ -3761,10 +3869,12 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 
 	// Only call super (which starts replay recording, announces match, etc.) on first half.
 	// Non-halftime games always call super (there's no second half).
+	if (bFirstLiveStart) { NCSACTFPickupOpening::Prepare(this); }
 	if (!bHasHalftime || !NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		Super::HandleMatchHasStarted();
 	}
+	if (bFirstLiveStart) { NCSACTFPickupOpening::Finish(this); }
 	if (HasAuthority() && AutoPauseReadyCountdownIds.Num() > 0)
 	{
 		// Super may perform the final stock balance. Initial start trusts the frozen
@@ -3886,6 +3996,8 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 
 void ANCPlusCTFGameMode::HandleMatchIntermission()
 {
+	// Restore a still-pending opening amp before any halftime reset can read 30s.
+	NCSACTFPickupOpening::Cancel(GetWorld());
 	Super::HandleMatchIntermission();
 
 	// Clear advantage state for halftime
@@ -3903,6 +4015,7 @@ void ANCPlusCTFGameMode::HandleMatchIntermission()
 
 void ANCPlusCTFGameMode::HandleExitingIntermission()
 {
+	NCSACTFPickupOpening::Cancel(GetWorld());
 	const bool bWasSecondHalf = NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf"));
 	ClearCachedRespawnChoices();
 	AUTWorldSettings* Settings = GetWorld() ? Cast<AUTWorldSettings>(GetWorld()->GetWorldSettings()) : nullptr;

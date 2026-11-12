@@ -17,7 +17,8 @@ class RocketVolleyTests(unittest.TestCase):
     def test_actual_rpc_lifecycle_methods(self):
         compiler, environment, msvc = find_compiler()
         source = "\n".join((PLUGIN / path).read_text(encoding="utf-8") for path in (
-            "Source/Private/NCRocketVolley.cpp", "Source/Private/UTPlusWeap_RocketLauncher.cpp"))
+            "Source/Private/NCRocketVolley.cpp", "Source/Private/UTPlusWeap_RocketLauncher.cpp",
+            "Source/Private/UTWeaponStateFiringChargedRocket_Transactional.cpp"))
         methods = [
             "void AUTPlusWeap_RocketLauncher::ResetLoadedOwnershipState",
             "void AUTPlusWeap_RocketLauncher::GivenTo",
@@ -26,6 +27,8 @@ class RocketVolleyTests(unittest.TestCase):
             "void AUTPlusWeap_RocketLauncher::StartFire",
             "void AUTPlusWeap_RocketLauncher::StopFire",
             "void AUTPlusWeap_RocketLauncher::NotifyLoadedVolleyRelease",
+            "bool AUTPlusWeap_RocketLauncher::TryCycleLoadedVolleyMode",
+            "void AUTPlusWeap_RocketLauncher::StartLoadedVolleyInput",
             "bool AUTPlusWeap_RocketLauncher::CanBeginLoadedVolleyInput",
             "void AUTPlusWeap_RocketLauncher::BufferLoadedVolleyInput",
             "void AUTPlusWeap_RocketLauncher::TryDrainLoadedVolleyInput",
@@ -41,6 +44,8 @@ class RocketVolleyTests(unittest.TestCase):
             "bool AUTPlusWeap_RocketLauncher::IsLoadedVolleyModeValid",
             "void AUTPlusWeap_RocketLauncher::ResetLoadedVolley",
             "void AUTPlusWeap_RocketLauncher::TryBeginLoadedVolley",
+            "bool AUTPlusWeap_RocketLauncher::BeginLoadedVolleyState",
+            "void AUTPlusWeap_RocketLauncher::ContinueLoadedVolley",
             "void AUTPlusWeap_RocketLauncher::ServerBeginLoadedVolley_Implementation",
             "void AUTPlusWeap_RocketLauncher::ServerReleaseLoadedVolley_Implementation",
             "void AUTPlusWeap_RocketLauncher::ServerSetLoadedRocketMode_Implementation",
@@ -54,12 +59,40 @@ class RocketVolleyTests(unittest.TestCase):
             "void AUTPlusWeap_RocketLauncher::CaptureLoadedRocketSpawn",
             "AUTProjectile* AUTPlusWeap_RocketLauncher::SpawnNetPredictedProjectile",
         ]
+        charged = "\n".join(native_function(source, signature) for signature in (
+            "void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation",
+            "void UUTWeaponStateFiringChargedRocket_Transactional::BeginState",
+            "void UUTWeaponStateFiringChargedRocket_Transactional::EndState",
+            "void UUTWeaponStateFiringChargedRocket_Transactional::ClearAllTimers",
+        ))
+        # UE_LOG is stubbed out: these state methods have diagnostic-only locals;
+        # OnMultiPress also retains its inherited, unused mode parameter. Keep all
+        # other warnings (and the rest of the adapter/cases) under -Werror /WX.
+        charged = """
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4100 4189)
+#else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#endif
+""" + charged + """
+#ifdef _MSC_VER
+#pragma warning(pop)
+#else
+#pragma GCC diagnostic pop
+#endif
+"""
         with tempfile.TemporaryDirectory(prefix="ncp-volley-lifecycle-") as temporary:
             directory = Path(temporary)
             tests = Path(__file__).parent
             unit = directory / "lifecycle.cpp"
             unit.write_text((tests / "rocket_volley_adapter.h").read_text()
                             + "\n".join(native_function(source, signature) for signature in methods)
+                            + charged
+                            + (tests / "rocket_volley_switch_cases.cpp").read_text()
+                            + (tests / "rocket_volley_quick_input_cases.cpp").read_text()
                             + (tests / "rocket_volley_lifecycle_cases.cpp").read_text(), encoding="utf-8")
             executable = directory / ("lifecycle.exe" if os.name == "nt" else "lifecycle")
             include = PLUGIN / "Source/Public"

@@ -13,15 +13,24 @@ class NETCODEPLUS_API ANCAimTrainerTarget : public ATeamArenaCharacter
 public:
     ANCAimTrainerTarget(const FObjectInitializer& ObjectInitializer);
     virtual void PostInitializeComponents() override;
+    virtual void ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data) override;
     virtual void BeginPlay() override;
+    virtual void UpdateWeaponAttachment() override;
     virtual void Tick(float DeltaSeconds) override;
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     virtual float TakeDamage(float Damage, const FDamageEvent& Event, AController* Instigator, AActor* Causer) override;
     virtual void PlayTakeHitEffects_Implementation() override;
     virtual FVector GetHeadLocation(float PredictionTime = 0.f) override;
+    void SetTrainerHeadshotScale(float Scale);
     virtual void NotifyBlockedHeadShot(AUTCharacter* ShotInstigator) override;
 
     void ActivateTarget(const FVector& Location, bool bStrafe);
+    /** Native fall/launch; FlightRate slows vertical time while preserving horizontal velocity. */
+    void ActivateAirborneTarget(const FVector& Location, const FVector& LaunchVelocity, float FlightRate = 1.f);
+    bool LaunchAirborneTarget(const FVector& LaunchVelocity);
+    bool IsAirborneTarget() const { return bTrainerAirborne; }
+    /** Derive horizontal speeds from this variant's CDO; never multiply a previous run. */
+    void SetTrainerSpeedScale(float Scale);
     void StartWiggle(float HalfWidth);
     /** Temporarily replaces short A/D decisions with a longer native strafe. */
     bool StartPopupLongStrafe(float HalfWidth, float HoldSeconds, float DirectionRoll);
@@ -30,9 +39,17 @@ public:
     bool SetTrainerCrouched(bool bCrouch);
     void HideTarget();
     bool IsAvailable() const { return bTrainerVisible; }
-    float GetAppearanceTime() const { return AppearanceTime; }
+    double GetAppearanceTime() const { return AppearanceTime; }
+    /** Engine projectile CreationTime comparisons must stay in the engine world-time domain. */
+    float GetAppearanceWorldTime() const { return AppearanceWorldTime; }
     bool HasCharacterAssets() const;
     void ReverseStrafe();
+    void ConfigurePopupStrafe(const FVector& Center, float HalfWidth, float DirectionRoll);
+    /** A persistent pop-up dodger can use a diagonal lane without changing tracking. */
+    void SetPopupStrafeAxis(const FVector& Axis);
+    /** Native movement input with predictive bounds, not a stop at a waypoint. */
+    bool SetPopupMovement(const FVector& Minimum, const FVector& Maximum, const FVector& Direction);
+    bool NeedsPopupMovementDecision() const;
     bool TryTrainerDodge(float DirectionRoll);
     /** Guarded native diagonal dodge, optionally holding slide through a backward landing. */
     bool TryTrainerPopupDodge(int32 Slot, const FVector& Direction, const FVector& ArenaOrigin, bool bSlideOnLanding = false);
@@ -43,23 +60,63 @@ public:
     /** Native lateral slide for the tracking target; turns inward near lane edges. */
     bool TryTrainerTrackingSlide(float DirectionRoll);
     bool IsTrainerSliding() const;
+    void ConfigureDrillMovement(bool bShock, const FVector& Origin);
+    void ChooseDrillStrafe(float SideRoll, float DepthRoll);
+    bool CanStartTrainerDrillAction() const;
+    bool TryTrainerDrillDodge(float DirectionRoll);
+    bool TryTrainerDrillWallDodge();
+    void ApplyTrainerShockMomentum(const FDamageEvent& Event);
 
 private:
     UPROPERTY(ReplicatedUsing=OnRep_TrainerVisible)
     bool bTrainerVisible = false;
     UFUNCTION() void OnRep_TrainerVisible();
+    UPROPERTY(ReplicatedUsing=OnRep_TrainerHeadshotScale) float TrainerHeadshotScale = 1.f;
+    UFUNCTION() void OnRep_TrainerHeadshotScale();
+    UPROPERTY(ReplicatedUsing=OnRep_TrainerFlightRate) float TrainerFlightRate = 1.f;
+    UFUNCTION() void OnRep_TrainerFlightRate();
+    bool bTrainerAirborne = false;
     bool bTrainerStrafe = false;
     bool bTrainerWiggle = false;
     float StrafeDirection = 1.0f;
     float StrafeRange = 800.f;
     float WiggleRange = 0.f;
-    float PopupLongStrafeEndTime = 0.f;
+    double PopupLongStrafeEndTime = 0.0;
     bool bRecenterWiggleAfterSlide = false;
     bool bRecenterWiggleAfterDodge = false;
     bool bTrainerDodgeSlidePending = false;
     FVector StrafeCenter = FVector::ZeroVector;
+    FVector StrafeAxis = FVector(0.f, 1.f, 0.f);
+    FVector PopupMoveMinimum = FVector::ZeroVector;
+    FVector PopupMoveMaximum = FVector::ZeroVector;
+    FVector PopupMoveDirection = FVector::ZeroVector;
+    bool bPopupEvasion = false;
+    bool bPopupNeedsDecision = false;
     FVector TrainerSlideDirection = FVector::ZeroVector;
-    float AppearanceTime = 0.f;
+    double AppearanceTime = 0.0;
+    float AppearanceWorldTime = 0.f;
+    double GetTrainerTimeSeconds() const;
+    int32 DrillMovementMode = 0;
+    FVector DrillOrigin = FVector::ZeroVector;
+    float DrillStrafeSide = 1.f;
+    float DrillAdvance = 0.4f;
+    double DrillDodgeBlockedUntil = 0.0;
+    bool bDrillWallDodgePending = false;
+    double DrillWallDodgeUntil = 0.0;
+    double NextDrillWallAttempt = 0.0;
+    TWeakObjectPtr<class UStaticMeshComponent> DrillFlagPole;
+    TWeakObjectPtr<class UStaticMeshComponent> DrillFlagBanner;
+    void TickDrillMovement(float DeltaSeconds);
+    void UpdateDrillFlag();
+    struct FTrainerMaterialTint
+    {
+        TWeakObjectPtr<UMaterialInstanceDynamic> Material;
+        TMap<FName, FLinearColor> Vectors;
+        TMap<FName, float> Scalars;
+    };
+    TArray<FTrainerMaterialTint> TrainerTintMaterials;
+    double NextTrainerTintTime = 0.0;
+    void UpdateTrainerTint();
     void ResetTargetMovement();
     bool StartTrainerSlide(const FVector& Direction);
 };
@@ -99,6 +156,9 @@ private:
     UPROPERTY() UStaticMesh* BlockMesh;
     UPROPERTY() UMaterialInterface* BlockMaterial;
     UPROPERTY() TArray<class UStaticMeshComponent*> Cover;
+    UPROPERTY() TArray<class UStaticMeshComponent*> AirbornePlatforms;
+    UPROPERTY() TArray<class UStaticMeshComponent*> AirbornePadVisuals;
+    UPROPERTY() class UStaticMeshComponent* GooSurface;
     UPROPERTY(ReplicatedUsing=OnRep_Scenario) uint8 Scenario = 0;
     UFUNCTION() void OnRep_Scenario();
     class UStaticMeshComponent* AddBlock(FName Name, const FVector& Center, const FVector& Size);

@@ -1,8 +1,13 @@
 #include "NCAimTrainerPlayerController.h"
 #include "NCAimTrainerGame.h"
+#include "NCAimTrainerHUD.h"
 #include "NCAimTrainerOnline.h"
+#include "NCAimTrainerScenarioPolicy.h"
+#include "NCAimTrainerLayout.h"
 #include "NCAimTrainerCharacter.h"
 #include "NCAimTrainerCountdownMessage.h"
+#include "NCAimTrainerInputSettings.h"
+#include "NCPlusHUDLayout.h"
 #include "UTAnnouncer.h"
 #include "UTPlayerCameraManager.h"
 #include "UTLocalPlayer.h"
@@ -47,7 +52,8 @@ void ANCAimTrainerPlayerController::ApplyTrainerMovementMode()
 	bIsHoldingFloorSlide = false;
 	// bIsCrouched only replicates to simulated proxies, so the owning client
 	// must restore its capsule too when the server starts another fixed preset.
-	Movement->ResetTrainerMovement(TrainerProgress.bMovementPractice);
+	Movement->ResetTrainerMovement(TrainerProgress.bMovementPractice,
+		NCAimTrainerLayout::PracticeLaneX(TrainerProgress.Scenario));
 }
 
 void ANCAimTrainerPlayerController::MoveForward(float /*Value*/)
@@ -95,6 +101,8 @@ bool ANCAimTrainerPlayerController::IsTrainerMenuVisible() const
 bool ANCAimTrainerPlayerController::HasTrainerInputFocus() const
 {
 #if !UE_SERVER
+	// F5 and the NCP editors are viewport widgets, not stock UT menu windows.
+	if (NCPlusHUDDragMode::IsActive()) { return false; }
 	UUTLocalPlayer* LP = Cast<UUTLocalPlayer>(Player);
 	// Use retail exports rather than UTLocalPlayer virtual slots/member offsets.
 	if (LP && (LP->UUTLocalPlayer::AreMenusOpen() || LP->GetQuickChatWidget().IsValid())) { return false; }
@@ -108,6 +116,13 @@ bool ANCAimTrainerPlayerController::InputKey(FKey Key, EInputEvent EventType, fl
 {
 	if (HasTrainerInputFocus())
 	{
+		const FKey RestartKey = NCAimTrainerInputSettings::GetRestartKey();
+		if (TrainerProgress.Phase >= 1 && TrainerProgress.Phase <= 3
+			&& RestartKey.IsValid() && Key == RestartKey)
+		{
+			if (EventType == IE_Pressed) { RestartTrainerRun(); }
+			return true; // Consume repeats/releases without restarting again.
+		}
 		if (Key == EKeys::F6)
 		{
 			if (EventType == IE_Pressed) { ReturnToTrainerMenu(); }
@@ -127,6 +142,13 @@ bool ANCAimTrainerPlayerController::InputKey(FKey Key, EInputEvent EventType, fl
 			if (Key == EKeys::Four || Key == EKeys::NumPadFour) { Scenario = 3; }
 			if (Key == EKeys::Five || Key == EKeys::NumPadFive) { Scenario = 4; }
 			if (Key == EKeys::Six || Key == EKeys::NumPadSix) { Scenario = 5; }
+			if (Key == EKeys::Seven || Key == EKeys::NumPadSeven) { Scenario = 6; }
+			if (Key == EKeys::Eight || Key == EKeys::NumPadEight) { Scenario = 7; }
+			if (Key == EKeys::Nine || Key == EKeys::NumPadNine) { Scenario = 8; }
+			if (Key == EKeys::Zero || Key == EKeys::NumPadZero) { Scenario = 9; }
+			if (Key == EKeys::Hyphen || Key == EKeys::Subtract) { Scenario = 10; }
+			if (Key == EKeys::Equals) { Scenario = 11; }
+			if (Key == EKeys::Backslash) { Scenario = 12; }
 			if (Scenario != INDEX_NONE)
 			{
 				if (EventType == IE_Pressed) { SelectTrainerScenario(uint8(Scenario)); }
@@ -145,26 +167,27 @@ bool ANCAimTrainerPlayerController::InputKey(FKey Key, EInputEvent EventType, fl
 void ANCAimTrainerPlayerController::OnFire()
 {
 	if (TrainerProgress.Phase != 2) { return; }
-	if (TrainerProgress.Scenario == 0) { SetTrackingFireHeld(true, true); }
+	if (NCAimTrainerScenarioPolicy::IsTrackingScenario(TrainerProgress.Scenario)) { SetTrackingFireHeld(true, true); }
 	else { Super::OnFire(); }
 }
 
 void ANCAimTrainerPlayerController::OnAltFire()
 {
 	if (TrainerProgress.Phase != 2) { return; }
-	if (TrainerProgress.Scenario == 0) { SetTrackingFireHeld(false, true); }
+	if (NCAimTrainerScenarioPolicy::IsDrillScenario(TrainerProgress.Scenario)) { return; }
+	if (NCAimTrainerScenarioPolicy::IsTrackingScenario(TrainerProgress.Scenario)) { SetTrackingFireHeld(false, true); }
 	else { Super::OnAltFire(); }
 }
 
 void ANCAimTrainerPlayerController::OnStopFire()
 {
-	if (TrainerProgress.Scenario == 0) { SetTrackingFireHeld(true, false); }
+	if (NCAimTrainerScenarioPolicy::IsTrackingScenario(TrainerProgress.Scenario)) { SetTrackingFireHeld(true, false); }
 	else { Super::OnStopFire(); }
 }
 
 void ANCAimTrainerPlayerController::OnStopAltFire()
 {
-	if (TrainerProgress.Scenario == 0) { SetTrackingFireHeld(false, false); }
+	if (NCAimTrainerScenarioPolicy::IsTrackingScenario(TrainerProgress.Scenario)) { SetTrackingFireHeld(false, false); }
 	else { Super::OnStopAltFire(); }
 }
 
@@ -183,12 +206,23 @@ void ANCAimTrainerPlayerController::SetTrackingFireHeld(bool bPrimary, bool bHel
 
 void ANCAimTrainerPlayerController::SelectTrainerScenario(uint8 Scenario)
 {
-	if (Scenario < 6 && IsTrainerMenuVisible()) { ServerTrainerSelectScenario(Scenario, PrefersTrainerLightningGun()); }
+	if (NCAimTrainerScenarioPolicy::IsValidScenario(Scenario) && IsTrainerMenuVisible()) { ServerTrainerSelectScenario(Scenario, PrefersTrainerLightningGun()); }
 }
 
 void ANCAimTrainerPlayerController::StartTrainerRun()
 {
 	if (IsTrainerMenuVisible()) { ServerTrainerStart(PrefersTrainerLightningGun()); }
+}
+
+void ANCAimTrainerPlayerController::RestartTrainerRun()
+{
+	if (!HasTrainerInputFocus() || TrainerProgress.Phase < 1 || TrainerProgress.Phase > 3) { return; }
+	// Stop local held fire immediately, including a restart during countdown
+	// where the replicated phase can remain unchanged on the owning client.
+	bTrackingPrimaryHeld = bTrackingAltHeld = false;
+	Super::OnStopFire();
+	Super::OnStopAltFire();
+	ServerTrainerStart(PrefersTrainerLightningGun());
 }
 
 bool ANCAimTrainerPlayerController::PrefersTrainerLightningGun() const
@@ -220,7 +254,7 @@ bool ANCAimTrainerPlayerController::AdmitTrainerRequest(uint8 Action)
 	return true;
 }
 
-bool ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Validate(uint8 Scenario, bool bUseLightningGun) { return Scenario < 6; }
+bool ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Validate(uint8 Scenario, bool bUseLightningGun) { return NCAimTrainerScenarioPolicy::IsValidScenario(Scenario); }
 void ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Implementation(uint8 Scenario, bool bUseLightningGun)
 {
 	ANCAimTrainerGame* Game = GetWorld() ? Cast<ANCAimTrainerGame>(GetWorld()->GetAuthGameMode()) : nullptr;
@@ -231,7 +265,7 @@ bool ANCAimTrainerPlayerController::ServerTrainerStart_Validate(bool bUseLightni
 void ANCAimTrainerPlayerController::ServerTrainerStart_Implementation(bool bUseLightningGun)
 {
 	ANCAimTrainerGame* Game = GetWorld() ? Cast<ANCAimTrainerGame>(GetWorld()->GetAuthGameMode()) : nullptr;
-	if (Game && AdmitTrainerRequest(1)) { Game->StartTraining(this, bUseLightningGun); }
+	if (Game && AdmitTrainerRequest(1)) { Game->RestartTraining(this, bUseLightningGun); }
 }
 
 bool ANCAimTrainerPlayerController::ServerTrainerAbort_Validate() { return true; }
@@ -259,13 +293,16 @@ void ANCAimTrainerPlayerController::SetTrainerProgress(const FNCAimTrainerProgre
 
 void ANCAimTrainerPlayerController::OnRep_TrainerProgress()
 {
+	if (ANCAimTrainerHUD* TrainerHUD = Cast<ANCAimTrainerHUD>(MyUTHUD)) { TrainerHUD->UpdateTrainerDamageNumbers(); }
 	UpdateTrainerCountdownAudio();
 	if (bLastPresentedMovementPractice != TrainerProgress.bMovementPractice
+		|| LastPresentedScenario != TrainerProgress.Scenario
 		|| (TrainerProgress.Phase == 1 && LastPresentedPhase != 1))
 	{
 		// A regular score update must never turn an ongoing jump back into Walking.
 		ApplyTrainerMovementMode();
 		bLastPresentedMovementPractice = TrainerProgress.bMovementPractice;
+		LastPresentedScenario = TrainerProgress.Scenario;
 	}
 #if !UE_SERVER
 	if (IsLocalController() && LastPresentedPhase == 255 && TrainerProgress.Phase == 0)
@@ -286,6 +323,11 @@ void ANCAimTrainerPlayerController::OnRep_TrainerProgress()
 	LastPresentedPhase = TrainerProgress.Phase;
 }
 
+double ANCAimTrainerPlayerController::GetTrainerCountdownAge(int32 Count) const
+{
+	return Count == LastAnnouncedCountdown ? FPlatformTime::Seconds() - TrainerCountdownQueuedAt : 1.0;
+}
+
 void ANCAimTrainerPlayerController::UpdateTrainerCountdownAudio()
 {
 #if !UE_SERVER
@@ -302,6 +344,7 @@ void ANCAimTrainerPlayerController::UpdateTrainerCountdownAudio()
 	const int32 Count = FMath::CeilToInt(Seconds);
 	if (Count >= LastAnnouncedCountdown) { return; }
 	LastAnnouncedCountdown = Count;
+	TrainerCountdownQueuedAt = FPlatformTime::Seconds();
 	// The existing local announcer supplies the selected NCP pack and volume.
 	// Only the current number plays if a replicated update skips a boundary.
 	Announcer->PlayAnnouncement(UNCAimTrainerCountdownMessage::StaticClass(), Count, nullptr, nullptr, this);
@@ -332,8 +375,9 @@ bool ANCAimTrainerPlayerController::IsTrainerLeaderboardLocal() const
 
 int32 ANCAimTrainerPlayerController::SelectedLeaderboardKey() const
 {
-	return FMath::Clamp(int32(TrainerProgress.Scenario), 0, 5) + (IsTrainerLeaderboardLocal() ? 6 : 0)
-		+ (TrainerProgress.bMovementPractice ? 12 : 0);
+	const int32 Count = NCAimTrainerScenarioId::ScenarioCount;
+	return FMath::Clamp(int32(TrainerProgress.Scenario), 0, Count - 1) + (IsTrainerLeaderboardLocal() ? Count : 0)
+		+ (TrainerProgress.bMovementPractice ? Count * 2 : 0);
 }
 
 const TArray<FNCAimTrainerLeaderboardRow>& ANCAimTrainerPlayerController::GetTrainerLeaderboard() const
@@ -376,7 +420,8 @@ void ANCAimTrainerPlayerController::RefreshTrainerLeaderboard()
 	const uint32 Generation = LeaderboardGeneration[Key];
 	TWeakObjectPtr<ANCAimTrainerPlayerController> WeakPC(this);
 	TWeakObjectPtr<UWorld> WeakWorld(GetWorld());
-	FNCAimTrainerOnline::Fetch(GetWorld(), Key % 6,
+	const int32 Count = NCAimTrainerScenarioId::ScenarioCount;
+	FNCAimTrainerOnline::Fetch(GetWorld(), Key % Count,
 		[WeakPC, WeakWorld, Key, Generation](bool bSuccess, const TArray<FNCAimTrainerLeaderboardRow>& Rows)
 	{
 		ANCAimTrainerPlayerController* PC = WeakPC.Get();
@@ -393,18 +438,19 @@ void ANCAimTrainerPlayerController::RefreshTrainerLeaderboard()
 			if (PC->LeaderboardCache[Key].Num() > 10) { PC->LeaderboardCache[Key].SetNum(10); }
 			PC->LeaderboardLoaded[Key] = true;
 		}
-	}, (Key % 12) >= 6, Key >= 12);
+	}, (Key % (Count * 2)) >= Count, Key >= Count * 2);
 }
 
 void ANCAimTrainerPlayerController::NotifyTrainerLeaderboardSubmission(uint8 Scenario, bool bLocal, bool bMovementPractice)
 {
-	if (Role == ROLE_Authority && Scenario < 6) { ClientTrainerLeaderboardSubmitted(Scenario, bLocal, bMovementPractice); }
+	if (Role == ROLE_Authority && NCAimTrainerScenarioPolicy::IsValidScenario(Scenario)) { ClientTrainerLeaderboardSubmitted(Scenario, bLocal, bMovementPractice); }
 }
 
 void ANCAimTrainerPlayerController::ClientTrainerLeaderboardSubmitted_Implementation(uint8 Scenario, bool bLocal, bool bMovementPractice)
 {
-	if (!IsLocalController() || Scenario >= 6 || bLeaderboardEnded) { return; }
-	const int32 Key = int32(Scenario) + (bLocal ? 6 : 0) + (bMovementPractice ? 12 : 0);
+	if (!IsLocalController() || !NCAimTrainerScenarioPolicy::IsValidScenario(Scenario) || bLeaderboardEnded) { return; }
+	const int32 Count = NCAimTrainerScenarioId::ScenarioCount;
+	const int32 Key = int32(Scenario) + (bLocal ? Count : 0) + (bMovementPractice ? Count * 2 : 0);
 	++LeaderboardGeneration[Key];
 	NextLeaderboardFetch[Key] = 0.0;
 	LeaderboardFailed[Key] = false;
@@ -420,6 +466,32 @@ void ANCAimTrainerPlayerController::NotifyTrainerHit(float Damage)
 {
 	if (Role != ROLE_Authority || !FMath::IsFinite(Damage) || Damage <= 0.f) { return; }
 	ClientTrainerConfirmedHit(FMath::RoundToInt(FMath::Clamp(Damage, 1.f, 10000.f)));
+}
+
+void ANCAimTrainerPlayerController::NotifyTrainerFlakHit(float Damage, const FVector& HitLocation)
+{
+	if (Role != ROLE_Authority || !GetWorld() || !FMath::IsFinite(Damage) || Damage <= 0.f
+		|| HitLocation.ContainsNaN() || TrainerProgress.Phase != 2
+		|| !NCAimTrainerScenarioPolicy::IsFlakScenario(TrainerProgress.Scenario)) { return; }
+	ClientTrainerFlakHit(FMath::RoundToInt(FMath::Clamp(Damage, 1.f, 10000.f)), HitLocation);
+}
+
+void ANCAimTrainerPlayerController::ClientTrainerFlakHit_Implementation(int32 Damage, FVector_NetQuantize HitLocation)
+{
+#if !UE_SERVER
+	if (!IsLocalController() || !GetWorld() || Damage <= 0 || Damage > 10000
+		|| HitLocation.ContainsNaN() || TrainerProgress.Phase != 2
+		|| !NCAimTrainerScenarioPolicy::IsFlakScenario(TrainerProgress.Scenario)) { return; }
+	// Keep the chosen NCP sound/style/volume and prediction deduplication. The
+	// server has already coalesced this burst, so pitch represents its damage.
+	ClientTrainerConfirmedHit_Implementation(Damage);
+	if (ANCAimTrainerHUD* TrainerHUD = Cast<ANCAimTrainerHUD>(MyUTHUD))
+	{
+		// Targets are hidden and reused immediately after lethal hits. Sending
+		// the captured point avoids reading a later appearance's pawn location.
+		TrainerHUD->AddFlakDamageNumber(Damage, HitLocation);
+	}
+#endif
 }
 
 void ANCAimTrainerPlayerController::ClientTrainerConfirmedHit_Implementation(int32 Damage)

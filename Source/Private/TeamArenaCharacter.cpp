@@ -71,6 +71,16 @@ static TAutoConsoleVariable<int32> CVarHiddenCorpseCleanup(
 	TEXT("Waits for local cameras, carried objects, the queued death sound and replay recording. ")
 	TEXT("0 = retain stock corpse lifetime. Does not affect servers or replay playback. Default 1."), ECVF_Default);
 
+static TAutoConsoleVariable<float> CVarDarkenBodiesValue(
+	TEXT("ncp.DarkenBodiesValue"), 0.1f,
+	TEXT("Brightness of bodies darkened by F5 Force Models 'Darken Bodies': the value their team colours drop to ")
+	TEXT("at death (same hue, low saturation, never brighter). 0 = black. Applies to fresh deaths. Default 0.1."), ECVF_Default);
+
+static float GetCorpseDarkenValue()
+{
+	return FMath::Clamp(CVarDarkenBodiesValue.GetValueOnGameThread(), 0.f, 1.f);
+}
+
 static TAutoConsoleVariable<int32> CVarDeathBloodDecals(
 	TEXT("ncp.DeathBloodDecals"), -1,
 	TEXT("Diagnostic override: -1 = follow F5 Show Death Blood; 0 = suppress new death/corpse blood decals; 1 = force them on. ")
@@ -586,7 +596,8 @@ void ATeamArenaCharacter::ApplyCharacterData(TSubclassOf<AUTCharacterContent> Da
 	}
 	// A model change can rebuild MIDs without NotifyTeamChanged. Reuse the existing one-shot
 	// dirty flush, but do not recursively dirty a forced-model apply that is already painting them.
-	if (!bApplyingForcedModel && NCPlusForceModels::IsFourTeamGame(GetWorld()))
+	// A darkened corpse needs the same flush in any mode: rebuilt MIDs start bright again.
+	if (!bApplyingForcedModel && (bCorpseDarkened || NCPlusForceModels::IsFourTeamGame(GetWorld())))
 	{
 		bForcedModelDirty = true;
 		bForcedArmourOverlayDirty = true;
@@ -750,6 +761,13 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// Client-side render preference only — never on a dedicated server, never replicated.
 	if (GetNetMode() == NM_DedicatedServer) { return; }
 	if (bApplyingForcedModel) { return; }                 // re-entrancy guard (ApplyCharacterData / base NotifyTeamChanged)
+	// Darkened corpse: team/config refreshes re-assert the dead look instead of repainting the live
+	// highlight. Once settled this costs parameter lookups only.
+	if (bCorpseDarkened)
+	{
+		DarkenCorpseMaterials();
+		return;
+	}
 	// MY OWN pawn → COLOUR-ONLY: keep your real model, run the team-colour tint only (gated below) so your
 	// own body matches the recoloured teammates and the line-up / post-game line-up. (NOT IsLocallyControlled
 	// — that's true for every pawn offline; see IsLocalPlayerPawn.)
@@ -1154,6 +1172,7 @@ void ATeamArenaCharacter::PlayDying()
 	StopAmpAmbientSound();
 	Super::PlayDying();
 	ClearLocalOutlineRenderState();
+	DarkenCorpse();
 	SpawnSkeletonDissolve();
 }
 
@@ -1208,6 +1227,37 @@ void ATeamArenaCharacter::ClearLocalOutlineRenderState()
 	}
 }
 
+// F5 Force Models "Darken Bodies": a dead body loses its live-player highlight, so a bright forced colour
+// can't read as a standing enemy. One pass over the existing body MIDs at death (parameter lookups plus
+// writes of the values that change); no material is created and nothing runs per frame.
+void ATeamArenaCharacter::DarkenCorpse()
+{
+	if (GetNetMode() == NM_DedicatedServer || IsPendingKillPending() || bCorpseDarkened) { return; }
+	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
+	if (!C.bEnabled || !C.bDarkenBodies) { return; }
+	bCorpseDarkened = true;
+
+	// A body that dies inside its spawn-protection window would keep the full-body flash: the torn-off
+	// corpse never receives the expiry. Tick's one-shot cleanup clears those MID values next frame.
+	// The stock lethal-hit flash (BodyColorFlashCurve) is kept on purpose: it is kill feedback and
+	// clears itself when its curve ends. It writes HitFlashColor only, never the darkened team params.
+	bSpawnProtectionEligible = false;
+
+	DarkenCorpseMaterials();
+	// Deaths that skip TakeDamage keep ArmorAmount, and with it an overlay; its refresh darkens it.
+	bForcedArmourOverlayDirty = true;
+	RefreshForcedArmourOverlay();
+}
+
+void ATeamArenaCharacter::DarkenCorpseMaterials()
+{
+	const float Value = GetCorpseDarkenValue();
+	for (UMaterialInstanceDynamic* MID : BodyMIs)
+	{
+		NCPlusForceModels::DarkenCorpseMaterial(MID, Value, /*bOverlay=*/false);
+	}
+}
+
 void ATeamArenaCharacter::SetOutlineLocal(bool bNowOutlined, bool bWhenUnoccluded)
 {
 	// UT renders outlines with a separate CustomDepth skeletal-mesh duplicate. SetVisibility(false)
@@ -1225,10 +1275,11 @@ void ATeamArenaCharacter::SetOutlineLocal(bool bNowOutlined, bool bWhenUnocclude
 }
 
 // On death, hide the corpse mesh after a delay. Two roles:
-//  (1) "Darken Bodies" toggle (any mode): hide after the ~1s death-effects fade (instant hide looked abrupt).
-//      Replaces dc's ModelDissolveEffect (exec-chain dissolve that didn't run reliably across models); this
-//      clean hide works on any model with zero asset dependency.
-//  (2) Instagib safety net (iCTF and xTDM, regardless of DarkenBodies): remove the body after
+//  (1) F5 "Show Ragdoll" unticked (any mode): hide after the ~1s death-effects fade (instant hide looked
+//      abrupt). Replaces dc's ModelDissolveEffect (exec-chain dissolve that didn't run reliably across
+//      models); this clean hide works on any model with zero asset dependency. "Darken Bodies" no longer
+//      hides anything: it keeps the body and drops its highlight (DarkenCorpse).
+//  (2) Instagib safety net (iCTF and xTDM): remove the body after
 //      [InstagibCTF] RagdollTime even when the BP CleanUpRagdoll event never fires. A low Ragdoll Time
 //      reliably makes the body vanish. Online clients then retire hidden corpses when cameras, carried
 //      objects and the queued death sound no longer need them. Dedicated servers retain stock cleanup.
@@ -1236,23 +1287,16 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 {
 	if (GetNetMode() == NM_DedicatedServer || IsPendingKillPending()) { return; }
 
-	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
-	const bool bDarken = (C.bEnabled && C.bDarkenBodies);
-
 	FString Val;
 	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
 	// F5 "Show Ragdoll" retains its legacy [InstagibCTF] config section. The BP damage type
-	// consumes it for instagib kills; this native path also handles other modes. An explicit
-	// preference takes precedence over ForceModels' DarkenBodies in both directions. With
-	// Show Ragdoll enabled, iCTF/xTDM still honor RagdollTime below. If the key has never
-	// been saved, preserve the old DarkenBodies fade behavior.
+	// consumes it for instagib kills; this native path also handles other modes. Unsaved means
+	// shown. With Show Ragdoll enabled, iCTF/xTDM still honor RagdollTime below.
 	bool bShowRagdoll = true;
-	bool bShowRagdollExplicit = false;
 	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowRagdoll"), Val, ConfigPath))
 	{
 		bShowRagdoll = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
-		bShowRagdollExplicit = true;
 	}
 
 	// xTDM uses the same instagib pawn/rifle and ragdoll preferences, but has no CTF
@@ -1269,10 +1313,9 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 		}
 	}
 
-	// Fade-hide when: Show Ragdoll explicitly unticked (any mode), or with the key never written,
-	// the legacy DarkenBodies fade. iCTF/xTDM keep their ragdoll-cleanup backup regardless. Outside all of
-	// that, leave corpses to the stock/engine cleanup — no change to ElimPlus and friends.
-	const bool bFadeHide = bShowRagdollExplicit ? !bShowRagdoll : bDarken;
+	// Fade-hide when Show Ragdoll is unticked (any mode). iCTF/xTDM keep their ragdoll-cleanup backup
+	// regardless. Otherwise leave corpses to the stock/engine cleanup — no change to ElimPlus and friends.
+	const bool bFadeHide = !bShowRagdoll;
 	if (!bFadeHide && !bIsInstagib) { return; }
 
 	float RagdollTime = 3.0f;
@@ -1288,7 +1331,7 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 		RagdollTime = 1.0f;
 	}
 
-	// The fade paths (Show-Ragdoll-off / legacy DarkenBodies) hide early (~1s death-effects fade, but never
+	// The fade path (Show Ragdoll off) hides early (~1s death-effects fade, but never
 	// longer than the ragdoll lives); otherwise (iCTF/xTDM, no fade) hide exactly at the ragdoll lifespan so the
 	// body still vanishes when the BP CleanUpRagdoll doesn't. Floor 0.01s (SetTimer never schedules
 	// rate<=0). Timer is bound to this actor, so it auto-clears if the corpse is destroyed/cleaned up
@@ -1459,7 +1502,9 @@ void ATeamArenaCharacter::RefreshForcedArmourOverlay()
 	// Redirect that yellow to our match/complimentary armour colour, for pawns we reskin. Client-only
 	// (OverlayMesh's MID only exists off the dedicated server). Callers run this after stock overlay
 	// setup, on viewer-team/config changes, or when Tick observes a replacement material.
-	if (GetNetMode() == NM_DedicatedServer || IsLocalPlayerPawn())
+	// The own pawn keeps the stock overlay while alive. Its corpse can still be possessed when
+	// PlayDying runs (listen host, standalone), so Darken Bodies must reach the corpse branch.
+	if (GetNetMode() == NM_DedicatedServer || (IsLocalPlayerPawn() && !bCorpseDarkened))
 	{
 		bForcedArmourOverlayDirty = false;
 		return;
@@ -1476,6 +1521,15 @@ void ATeamArenaCharacter::RefreshForcedArmourOverlay()
 	UMaterialInterface* const OverlayMaterial = OverlayMesh->GetMaterial(0);
 	ObservedArmourOverlayMaterial = OverlayMaterial;
 	bForcedArmourOverlayDirty = false;
+
+	if (bCorpseDarkened)
+	{
+		// Darken Bodies covers any overlay a corpse keeps, whatever the armour settings, and returns
+		// before the live recolour below can re-tint it.
+		NCPlusForceModels::DarkenCorpseMaterial(Cast<UMaterialInstanceDynamic>(OverlayMaterial),
+			GetCorpseDarkenValue(), /*bOverlay=*/true);
+		return;
+	}
 
 	const int32 MyTeam = (int32)GetTeamNum();
 	if (MyTeam == 255) { return; }                                  // FFA: deferred

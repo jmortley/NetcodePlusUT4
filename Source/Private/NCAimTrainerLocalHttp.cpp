@@ -43,12 +43,24 @@ namespace NCAimTrainerLocalHttp
 	{
 	public:
 		FString Url;
+		FString RetryAfter, Date;
 		int32 Code = 0;
 		TArray<uint8> Bytes;
 		virtual FString GetURL() override { return Url; }
 		virtual FString GetURLParameter(const FString&) override { return FString(); }
-		virtual FString GetHeader(const FString&) override { return FString(); }
-		virtual TArray<FString> GetAllHeaders() override { return TArray<FString>(); }
+		virtual FString GetHeader(const FString& Name) override
+		{
+			if (Name.Equals(TEXT("Retry-After"), ESearchCase::IgnoreCase)) return RetryAfter;
+			if (Name.Equals(TEXT("Date"), ESearchCase::IgnoreCase)) return Date;
+			return FString();
+		}
+		virtual TArray<FString> GetAllHeaders() override
+		{
+			TArray<FString> Result;
+			if (!RetryAfter.IsEmpty()) Result.Add(TEXT("Retry-After: ") + RetryAfter);
+			if (!Date.IsEmpty()) Result.Add(TEXT("Date: ") + Date);
+			return Result;
+		}
 		virtual FString GetContentType() override { return TEXT("application/json"); }
 		virtual int32 GetContentLength() override { return Bytes.Num(); }
 		virtual const TArray<uint8>& GetContent() override { return Bytes; }
@@ -111,6 +123,7 @@ namespace NCAimTrainerLocalHttp
 		EHttpRequestStatus::Type Status = EHttpRequestStatus::NotStarted;
 		double StartedAt = 0;
 		int32 ResponseCode = 0;
+		FString ResponseRetryAfter, ResponseDate;
 		bool bFinished = false;
 
 		virtual ~FRequest() { CancelRequest(); }
@@ -228,6 +241,9 @@ namespace NCAimTrainerLocalHttp
 			if (bFinished) return;
 			TSharedPtr<IHttpRequest> ThisRequest = KeepAlive;
 			bFinished = true;
+			// An error body can be interrupted after its status/headers arrived.
+			// Preserve the rejection and Retry-After even when no reason was read.
+			bConnected = bConnected || ResponseCode >= 400;
 			Status = bConnected ? EHttpRequestStatus::Succeeded : EHttpRequestStatus::Failed;
 			if (Native.IsValid()) { Native->Close(); Native.Reset(); }
 			Headers.Empty();
@@ -236,12 +252,38 @@ namespace NCAimTrainerLocalHttp
 				TSharedPtr<FResponse, ESPMode::ThreadSafe> Result = MakeShareable(new FResponse);
 				Result->Url = Url;
 				Result->Code = ResponseCode;
+				Result->RetryAfter = ResponseRetryAfter;
+				Result->Date = ResponseDate;
 				Result->Bytes = MoveTemp(ResponseBytes);
 				Response = Result;
 			}
 			FHttpRequestCompleteDelegate Callback = Complete;
 			Callback.ExecuteIfBound(ThisRequest, Response, bConnected);
 			KeepAlive.Reset();
+		}
+
+		void CaptureErrorHeaders()
+		{
+			// Expose known rejections while their bounded body is still arriving,
+			// so a session timeout cannot erase an already received cooldown.
+			TSharedPtr<FResponse, ESPMode::ThreadSafe> Result = MakeShareable(new FResponse);
+			Result->Url = Url;
+			Result->Code = ResponseCode;
+			Result->RetryAfter = ResponseRetryAfter;
+			Result->Date = ResponseDate;
+			Response = Result;
+		}
+
+		FString ReadResponseHeader(DWORD Query)
+		{
+			// Only the two small, non-sensitive retry headers are exposed. Never
+			// allocate an unbounded buffer based on an untrusted header length.
+			WCHAR Buffer[512] = {};
+			DWORD Size = sizeof(Buffer);
+			if (!WinHttpQueryHeaders(Native->Request, Query, WINHTTP_HEADER_NAME_BY_INDEX,
+				Buffer, &Size, WINHTTP_NO_HEADER_INDEX)) return FString();
+			Buffer[ARRAY_COUNT(Buffer) - 1] = 0;
+			return FString(Buffer);
 		}
 
 		void HandleStatus(DWORD Notification, const TArray<uint8>& Data)
@@ -259,13 +301,18 @@ namespace NCAimTrainerLocalHttp
 				if (!WinHttpQueryHeaders(Native->Request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
 					WINHTTP_HEADER_NAME_BY_INDEX, &Code, &Size, WINHTTP_NO_HEADER_INDEX)) { Finish(false); return; }
 				ResponseCode = int32(Code);
-				if (ResponseCode != 200 && ResponseCode != 201) { Finish(true); return; }
+				// Error replies must retain retry metadata too. The old adapter
+				// discarded it before the session could honor the server cooldown.
+				ResponseRetryAfter = ReadResponseHeader(WINHTTP_QUERY_RETRY_AFTER);
+				ResponseDate = ReadResponseHeader(WINHTTP_QUERY_DATE);
+				if (ResponseCode >= 400) CaptureErrorHeaders();
+				else if (ResponseCode != 200 && ResponseCode != 201) { Finish(true); return; }
 				DWORD ContentLength = 0;
 				Size = sizeof(ContentLength);
 				if (WinHttpQueryHeaders(Native->Request, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
 					WINHTTP_HEADER_NAME_BY_INDEX, &ContentLength, &Size, WINHTTP_NO_HEADER_INDEX) && ContentLength > ResponseLimit)
 				{
-					ResponseCode = 413;
+					if (ResponseCode < 400) ResponseCode = 413;
 					Finish(true);
 					return;
 				}
@@ -276,7 +323,7 @@ namespace NCAimTrainerLocalHttp
 				if (Data.Num() == 0) { Finish(true); return; }
 				if (ResponseBytes.Num() + Data.Num() > ResponseLimit)
 				{
-					ResponseCode = 413;
+					if (ResponseCode < 400) ResponseCode = 413;
 					ResponseBytes.Empty();
 					Finish(true);
 					return;

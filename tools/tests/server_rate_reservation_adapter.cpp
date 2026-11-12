@@ -24,6 +24,7 @@ struct FVector{float X=0,Y=0,Z=0; bool ContainsNaN()const{return !std::isfinite(
 struct AUTWeaponFix; struct AUTGameState{bool Prevent=false; bool PreventWeaponFire(){return Prevent;}};
 struct UUTWeaponState{virtual~UUTWeaponState(){} AUTWeaponFix*W=nullptr;};
 struct UUTWeaponStateFiring_Transactional:UUTWeaponState{void TransactionalFire();};
+struct UUTWeaponStateZooming:UUTWeaponState{};
 template<class T,class U>T*Cast(U*x){return dynamic_cast<T*>(x);}
 struct FSavedPosition{float Time=0;bool bTeleported=false;};
 struct AController{virtual~AController(){}};struct APlayerState{std::string PlayerName="test";std::string GetPlayerName()const{return PlayerName;}};using AUTPlayerState=APlayerState;struct AUTPlayerController:AController{APlayerState*PlayerState=nullptr;template<class T>T*GetPlayerState(){return PlayerState;}};
@@ -61,7 +62,68 @@ static void Check(bool b,const char*m){if(!b)throw std::runtime_error(m);}
 
 // NATIVE_METHODS
 
+static void TestZoomRateHandoff()
+{
+ // Admission and dispatch use the extracted production methods. Engine zoom
+ // callbacks and actual hits remain covered by the separate handoff/playtest.
+ for (bool held : {false, true})
+ {
+  AUTWeaponFix w;
+  UUTWeaponStateZooming zoom;
+  w.CurrentState = &zoom;
+  w.CurrentFireMode = 1;
+  w.Pawn.Pending[1] = true;
+  float delay = 0;
+  Check(w.ValidateFireRequest(0, 1, 10, &delay, 0) && delay > .049f,
+        "scoped primary must reserve a slightly early shot");
+  w.Reserve();
+  w.Pawn.Pending[0] = true;
+  if (!held) w.ApplyStop(0, 1);
+  w.World.Now = 10.02f;
+  w.CompleteAcceptedRateFire(0, 11);
+  Check(w.Shots.empty(), "zoom must not bypass primary cadence");
+  w.World.Now = 10.051f;
+  w.World.Timer.Drain();
+  Check(w.Shots == std::vector<int>{1} && w.Acks == w.Shots,
+        "scoped accepted shot must dispatch and acknowledge once");
+  Check(w.CurrentState == w.FiringState[0] && w.CurrentFireMode == 0,
+        "rate dispatch must enter primary from zoom");
+  Check(w.Pawn.Pending[1] && w.Pawn.Pending[0] == held,
+        "zoom handoff must preserve scope hold and honor primary release");
+  w.CompleteAcceptedRateFire(0, 11);
+  Check(w.Shots.size() == 1, "duplicate scoped callback must not fire twice");
+ }
+ {
+  AUTWeaponFix w;
+  UUTWeaponState stockTail;
+  w.CurrentState = &stockTail;
+  Check(!w.CanReserveServerRateFire(0, .05f), "other stock tails remain excluded");
+  w.Reserve();
+  w.World.Now = 10.051f;
+  w.CompleteAcceptedRateFire(0, 11);
+  Check(w.Shots.empty() && !w.Cancels.empty(), "other stock tails cannot dispatch early");
+ }
+ for (int reason = 0; reason < 5; ++reason)
+ {
+  AUTWeaponFix w;
+  UUTWeaponStateZooming zoom;
+  w.CurrentState = &zoom;
+  w.CurrentFireMode = 1;
+  w.Reserve();
+  w.World.Now = 10.051f;
+  if (reason == 0) w.Pawn.Dead = true;
+  if (reason == 1) w.Pawn.Weapon = nullptr;
+  if (reason == 2) w.Ammo[0] = false;
+  if (reason == 3) w.Allow[0] = false;
+  if (reason == 4) w.World.Now = 10.30f;
+  w.CompleteAcceptedRateFire(0, 11);
+  Check(w.Shots.empty() && w.Acks.empty() && !w.Cancels.empty(),
+        "zoom must not bypass ownership, policy or age checks");
+ }
+}
+
 int main(){try{
+ TestZoomRateHandoff();
  Check(ServerRateReservationDelay(10,9.05f,9.05f,1,100)>.049f,"ordinary compression");
  Check(ServerRateReservationDelay(10,9.05f,9.2f,1,100)==0,"actual dispatch bound");
  Check(ServerRateReservationDelay(10,9.952f,9.952f,.1f,100)==0,"half-refire bound");

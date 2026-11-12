@@ -441,7 +441,7 @@ protected:
 	 *  when transitioning back to false. Called from ApplyForcedModel. */
 	void UpdateCosmeticStrip(bool bShouldStrip);
 
-	/** Schedule corpse hiding from Show Ragdoll, Darken Bodies and the iCTF Ragdoll Time settings. */
+	/** Schedule corpse hiding from the Show Ragdoll and iCTF Ragdoll Time settings. */
 	void SpawnSkeletonDissolve();
 	/** Permanently retire this pawn's client-local body and weapon CustomDepth render state. */
 	void ClearLocalOutlineRenderState();
@@ -450,6 +450,13 @@ protected:
 	/** Retire hidden online-client corpses once local cameras, carried objects and death audio allow it. */
 	void CleanupHiddenCorpse();
 	FTimerHandle HiddenCorpseCleanupHandle;
+	/** F5 Force Models "Darken Bodies": at death, drop this body's live highlight (dark, desaturated
+	 *  team colour, no highlight emissive). One pass over the existing MIDs; no per-frame work. */
+	void DarkenCorpse();
+	/** Re-assert the corpse look on the body MIDs. Idempotent: a settled corpse costs lookups only. */
+	void DarkenCorpseMaterials();
+	/** Set once this corpse is darkened; Force Models repaint paths keep it dark from then on. */
+	bool bCorpseDarkened = false;
 
 	/** Client-local AMP hum, driven by the stock replicated weapon-overlay bits. */
 	void UpdateAmpAmbientSound();

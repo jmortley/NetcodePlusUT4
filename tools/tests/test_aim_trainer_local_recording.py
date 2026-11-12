@@ -22,6 +22,7 @@ ADAPTER = r'''
 #include <vector>
 #define TEXT(x) x
 using int32 = int32_t;
+using uint8 = uint8_t;
 struct FString : std::string {
     using std::string::string;
     bool IsEmpty() const { return empty(); }
@@ -61,9 +62,10 @@ struct Sink {
 };
 struct PC { void SetTrainerOnlineStatus(const FString&) {} };
 struct ANCAimTrainerGame {
-    struct { int Scenario=1,Hits=0,Shots=0; } Progress;
+    struct { int Scenario=1,Hits=0,Shots=0,Phase=2; uint8 SaveState=0; } Progress;
     struct World { double Now=10; double GetTimeSeconds() const { return Now; } } TheWorld;
     World* GetWorld() { return &TheWorld; }
+    double GetTrainerTimeSeconds() const { return TheWorld.Now; }
     double PhaseStartedAt=10;
     TSharedPtr<Sink> LocalSession;
     TArray<FNCAimTrainerLocalEvent> LocalEvents;
@@ -74,6 +76,8 @@ struct ANCAimTrainerGame {
     PC* Trainee=nullptr;
     bool IsTrainee(PC* pc) const { return pc!=nullptr; }
     bool IsStandardPreset() const { return Standard; }
+    int Publishes=0;
+    void PublishProgress() { ++Publishes; }
     int RecordingStarts=0;
     void BeginLocalRecording() { ++RecordingStarts; bLocalRecording=true; }
     bool PrepareLocalRecording();
@@ -116,11 +120,45 @@ int main(int argc,char** argv) {
     } else if(name=="counter_jump") {
         auto sink=game.LocalSession; game.Progress.Shots=2; game.RecordLocalShotCount();
         Check(!game.bLocalRecording && sink->Cancelled && game.LocalEvents.Num()==0,"invented times for accumulated shots");
+    } else if(name=="rocket_batch") {
+        game.Progress.Scenario=10; game.TheWorld.Now=10.5; game.Progress.Shots=3;
+        game.RecordLocalShotCount(); game.RecordLocalShotCount();
+        Check(game.bLocalRecording && game.LocalLastShotCount==3 && game.LocalEvents.Num()==3,
+              "loaded volley was cancelled, omitted or recorded twice");
+        for(const auto& event:game.LocalEvents)
+            Check(event.Type==FNCAimTrainerLocalEvent::Shot && event.TimeUs==500000,
+                  "loaded rocket projectile timestamps were fabricated instead of sharing observed batch time");
+        game.TheWorld.Now=12; game.Progress.Hits=4;
+        for(int slot=0;slot<4;++slot) game.RecordLocalTarget(slot,true,false);
+        auto sink=game.LocalSession; game.TheWorld.Now=15; game.FlushLocalCheckpoint();
+        Check(game.bLocalRecording && !sink->Cancelled && sink->Batches.size()==1
+              && sink->Batches[0].Events.size()==7,
+              "rocket splash hits greater than projectile count cancelled a valid checkpoint");
+        Check(sink->Batches[0].Events[3].TimeUs==2000000 && !sink->Batches[0].Events[3].bHead,
+              "delayed rocket body hit lost its real timestamp");
+    } else if(name=="rocket_batch_bound") {
+        game.Progress.Scenario=10; auto sink=game.LocalSession;
+        game.Progress.Shots=4; game.RecordLocalShotCount();
+        Check(!game.bLocalRecording && sink->Cancelled && game.LocalEvents.Num()==0,
+              "more than three projectiles were accepted as one loaded volley");
+    } else if(name=="airborne_precision_batch_bound") {
+        for(int scenario:{7,8,9}) {
+            ANCAimTrainerGame precision; precision.Progress.Scenario=scenario;
+            auto sink=precision.LocalSession; precision.Progress.Shots=2; precision.RecordLocalShotCount();
+            Check(!precision.bLocalRecording && sink->Cancelled && precision.LocalEvents.Num()==0,
+                  "rocket batching exemption leaked to airborne hitscan presets");
+        }
+    } else if(name=="precision_multihit_bound") {
+        auto sink=game.LocalSession; game.Progress.Scenario=8; game.Progress.Shots=1; game.Progress.Hits=2;
+        game.TheWorld.Now=15; game.FlushLocalCheckpoint();
+        Check(!game.bLocalRecording && sink->Cancelled && sink->Batches.empty(),
+              "rocket multi-hit exemption leaked to airborne hitscan checkpoints");
     } else if(name=="counter_reset") {
         auto sink=game.LocalSession; game.LocalLastShotCount=2; game.Progress.Shots=1; game.RecordLocalShotCount();
         Check(!game.bLocalRecording && sink->Cancelled,"counter reset accepted");
-    } else if(name=="tracking") {
-        game.Progress.Scenario=0; game.TheWorld.Now=10.04; game.RecordLocalSample(false,false);
+    } else if(name=="tracking" || name=="hard_tracking") {
+        game.Progress.Scenario=name=="hard_tracking"?6:0;
+        game.TheWorld.Now=10.04; game.RecordLocalSample(false,false);
         game.TheWorld.Now=10.08; game.RecordLocalSample(true,false);
         game.TheWorld.Now=10.12; game.RecordLocalSample(true,true); game.RecordLocalTarget(0,true);
         Check(game.LocalEvents.Num()==3,"tracking emitted precision event");
@@ -159,6 +197,16 @@ int main(int argc,char** argv) {
         auto sink=game.LocalSession; sink->Healthy=false; game.TheWorld.Now=15;
         game.RecordLocalSample(false,false); game.FlushLocalCheckpoint();
         Check(sink->Cancelled && !game.bLocalRecording && sink->Batches.empty(),"failed transport published");
+    } else if(name=="unsent_final_not_saved") {
+        game.Progress.Phase=3; game.Progress.SaveState=NCAimTrainerSaveState::Pending;
+        game.TheWorld.Now=70; game.FlushLocalCheckpoint(true);
+        Check(game.Progress.SaveState==NCAimTrainerSaveState::NotSaved && game.Publishes==1,
+            "invalid final checkpoint left the result stuck saving");
+    } else if(name=="uncertain_final_preserved") {
+        game.Progress.Phase=3; game.Progress.SaveState=NCAimTrainerSaveState::Unconfirmed;
+        game.InvalidateLocalRun();
+        Check(game.Progress.SaveState==NCAimTrainerSaveState::Unconfirmed,
+            "cleanup claimed a submitted but unconfirmed final could not have saved");
     } else Check(false,"unknown case");
 }
 '''
@@ -176,7 +224,10 @@ class LocalRecordingTests(unittest.TestCase):
             "RecordLocalSample", "FlushLocalCheckpoint")]
         functions.append(native_function(game, "bool ANCAimTrainerGame::PrepareLocalRecording"))
         source = directory / "recording.cpp"
-        source.write_text("\n".join([ADAPTER] + functions + [CASES]), encoding="utf-8")
+        policy = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix() + '"'
+        controller = (PLUGIN / "Source/Public/NCAimTrainerPlayerController.h").read_text(encoding="utf-8-sig")
+        save_states = native_function(controller, "namespace NCAimTrainerSaveState")
+        source.write_text("\n".join([ADAPTER, policy, save_states] + functions + [CASES]), encoding="utf-8")
         cls.executable = directory / ("recording.exe" if os.name == "nt" else "recording")
         command = ([compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
                     f"/Fe{cls.executable}", f"/Fo{directory / 'recording.obj'}"] if msvc else
@@ -191,7 +242,9 @@ class LocalRecordingTests(unittest.TestCase):
 
 
 for _case in ("anchor_ack", "precision", "counter_jump", "counter_reset", "tracking", "boundaries", "no_catchup",
-              "no_missing_final", "preset_change", "event_bounds", "transport_failure"):
+              "no_missing_final", "preset_change", "event_bounds", "transport_failure", "rocket_batch",
+              "rocket_batch_bound", "airborne_precision_batch_bound", "precision_multihit_bound", "hard_tracking",
+              "unsent_final_not_saved", "uncertain_final_preserved"):
     setattr(LocalRecordingTests, "test_" + _case, lambda self, case=_case: self.run_case(case))
 
 if __name__ == "__main__":

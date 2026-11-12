@@ -54,6 +54,16 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
     RocketLauncher = Cast<AUTPlusWeap_RocketLauncher>(GetOuterAUTWeapon());
     if (!RocketLauncher || !RocketLauncher->BeginLoadedVolleyState())
     {
+        if (RocketLauncher)
+        {
+            // Stock ActiveState can enter directly from alt-fire held across a
+            // switch, without StartFire having created a numbered volley. Clear
+            // that held bit before returning to Active, then use the normal
+            // owning-client start path (remote authority must wait for its RPC).
+            RocketLauncher->ContinueLoadedVolley();
+            // Recovery can synchronously re-enter this same state object.
+            return;
+        }
         if (GetUTOwner()) GetUTOwner()->SetPendingFire(1, false);
         if (GetOuterAUTWeapon()) GetOuterAUTWeapon()->GotoActiveState();
         return;

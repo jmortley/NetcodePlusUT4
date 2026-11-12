@@ -29,9 +29,9 @@ const FName NAME_ShockPrimaryShots(TEXT("ShockPrimaryShots"));
 const FName NAME_ShockPrimaryHits(TEXT("ShockPrimaryHits"));
 
 static TAutoConsoleVariable<int32> CVarInstagibEquipTap(
-	TEXT("ncp.InstagibEquipTap"), 1,
+	TEXT("ncp.InstagibEquipTap"), 0,
 	TEXT("Retain one real Instagib fire press during weapon raise, even if released. ")
-	TEXT("Fires at legal readiness using current aim; no cooldown-tap buffering. 0=off."),
+	TEXT("Fires at legal readiness using current aim; no cooldown-tap buffering. 0=off (default), 1=on."),
 	ECVF_Default);
 
 namespace

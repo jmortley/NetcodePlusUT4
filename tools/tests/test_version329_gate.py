@@ -1,9 +1,6 @@
-"""Compile the 329 version gate's actual identity/registry/admission code.
+"""Compile retired gate admission plus the real weapon readiness wrapper.
 
-The adapter covers weak-object identity, same-controller travel, connection
-replacement, mismatch terminality, hub isolation, and unknown/pending denial.
-It does not validate UE actor replication, UHT layout, timeout delivery, or an
-old client's RPC decoding; the documented mixed-version playtest remains needed.
+Engine ownership, UHT, timers and mixed-binary play remain runtime checks.
 """
 import os
 from pathlib import Path
@@ -117,133 +114,72 @@ template<class T> T* UWorld::SpawnActorDeferred(int, FTransform, APlayerControll
     return result;
 }
 template<class T, class U> T* Cast(U* source) { return dynamic_cast<T*>(source); }
-void EnsureProtocolLifecycle() {}
+enum { ROLE_Authority = 3 };
+struct AUTBot : AController {};
+struct Pawn { AController* Controller = nullptr; };
+struct AUTWeaponFix {
+    int Role = ROLE_Authority;
+    Pawn* UTOwner = nullptr;
+    TWeakObjectPtr<AController> FireProtocolController;
+    bool Is329FireProtocolReady() const;
+};
 '''
 
 CASES = r'''
 static int Passed = 0;
 #define CHECK(value) do { if (!(value)) { std::cerr << "FAILED at " << __LINE__ << ": " #value "\n"; return 1; } ++Passed; } while(0)
 int main() {
-    AUTBaseGameMode match;
-    AUTBaseGameMode lobby;
-    lobby.Lobby = true;
-    UWorld world, nextWorld, hub;
-    world.Mode = &match;
-    nextWorld.Mode = &match;
-    hub.Mode = &lobby;
+    UWorld world, nextWorld;
     UNetConnection connection, nextConnection;
     APlayerController pc;
     APlayerState state;
-    pc.PlayerState = &state;
-    pc.World = &world;
-    pc.Connection = &connection;
-    auto entry = [&]() { return ProtocolSessions.Find(TWeakObjectPtr<APlayerController>(&pc)); };
+    pc.PlayerState = &state; pc.World = &world; pc.Connection = &connection;
+    Pawn pawn; pawn.Controller = &pc;
+    AUTWeaponFix weapon; weapon.UTOwner = &pawn;
     CHECK(!NCPlusVersionGate::IsProtocolConfirmed(nullptr));
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    CHECK(world.SpawnCount == 1 && entry() && entry()->State == EProtocolState::Pending);
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc) && world.SpawnCount == 1);
-    ANCVersionGate* gate = entry()->Gate.Get();
-    CHECK(GateOwnsSession(gate));
-    CHECK(RecordVersion(*entry(), &pc, gate, 329));
-    gate->Destroy();
-    CHECK(NCPlusVersionGate::IsProtocolConfirmed(&pc)); // Confirmation outlives gate actor.
-    CHECK(!RecordVersion(*entry(), &pc, gate, 328)); // Report outcome is terminal.
-    pc.World = &nextWorld;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    CHECK(nextWorld.SpawnCount == 1);
-    CHECK(!GateOwnsSession(gate));
-    CHECK(!RecordVersion(*entry(), &pc, gate, 329)); // Old world report cannot approve.
-    gate = entry()->Gate.Get();
-    CHECK(RecordVersion(*entry(), &pc, gate, 328));
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    CHECK(nextWorld.SpawnCount == 1); // Wrong version cannot restart its timeout.
-    CHECK(!RecordVersion(*entry(), &pc, gate, 329)); // Can't undo mismatch in place.
-    pc.Connection = &nextConnection;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    CHECK(nextWorld.SpawnCount == 2);
-    CHECK(!GateOwnsSession(gate));
-    gate = entry()->Gate.Get();
-    CHECK(RecordVersion(*entry(), &pc, gate, 329));
-    CHECK(NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    pc.Connection = nullptr;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc) && !entry());
-    pc.Connection = &nextConnection;
-    pc.World = &hub;
+    CHECK(NCPlusVersionGate::IsProtocolConfirmed(&pc)); // No report or registry entry.
+    CHECK(weapon.Is329FireProtocolReady());
+    NCPlusVersionGate::SpawnFor(&pc);
+    NCPlusVersionGate::SpawnFor(&pc);
     NCPlusVersionGate::SpawnAdvisorFor(&pc);
-    CHECK(entry() && entry()->bAdvisor);
-    gate = entry()->Gate.Get();
-    CHECK(RecordVersion(*entry(), &pc, gate, 329));
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc) && hub.SpawnCount == 1);
-    hub.Mode = &match; // Even same-world advisor -> match needs a new report.
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    CHECK(hub.SpawnCount == 2 && !entry()->bAdvisor);
-    CHECK(!RecordVersion(*entry(), &pc, gate, 329));
-    gate = entry()->Gate.Get();
-    CHECK(RecordVersion(*entry(), &pc, gate, 329));
-    CHECK(NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    CleanupProtocolWorld(&hub, false, false);
-    CHECK(!entry());
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    gate = entry()->Gate.Get();
-    OnProtocolLogout(&match, &pc);
-    CHECK(!entry() && !gate->Alive);
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    gate = entry()->Gate.Get();
-    gate->Destroy(); // Unexpected loss of pending gate must retry.
-    const int BeforeRespawn = hub.SpawnCount;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    CHECK(hub.SpawnCount == BeforeRespawn + 1 && entry()->Gate.Get() != gate);
-    gate = entry()->Gate.Get();
-    CHECK(RecordVersion(*entry(), &pc, gate, 329));
-    pc.Authority = false;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    pc.Local = true;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc)); // Client cannot exempt itself.
-    pc.Authority = true;
-    CHECK(NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    pc.Local = false;
-    state.bIsABot = true;
-    CHECK(NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    state.bIsABot = false;
-    pc.PendingKill = true;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    pc.PendingKill = false;
-    ++pc.Serial; // Same address, different weak identity = reconnect/new UObject.
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    CHECK(entry() && entry()->State == EProtocolState::Pending);
-    nextConnection.Alive = false;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    PruneProtocolSessions();
-    CHECK(!entry());
-    nextConnection.Alive = true;
-    hub.FailSpawn = true;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc) && !entry());
-    hub.FailSpawn = false;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc) && entry());
-    CHECK(RecordVersion(*entry(), &pc, entry()->Gate.Get(), 329));
-    CHECK(NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    nextConnection.State = USOCK_Closed;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc) && !entry());
-    nextConnection.State = USOCK_Open;
-    CHECK(!NCPlusVersionGate::IsProtocolConfirmed(&pc));
-    std::cout << "PASS " << Passed << " protocol boundary checks\n";
+    CHECK(world.SpawnCount == 0 && AllocatedGates.empty());
+    CHECK(weapon.Is329FireProtocolReady());
+    pc.Connection = nullptr; CHECK(!weapon.Is329FireProtocolReady());
+    pc.Connection = &connection; connection.State = USOCK_Closed;
+    CHECK(!weapon.Is329FireProtocolReady()); connection.State = USOCK_Open;
+    connection.Alive = false; CHECK(!weapon.Is329FireProtocolReady()); connection.Alive = true;
+    pc.Authority = false; CHECK(!weapon.Is329FireProtocolReady()); pc.Authority = true;
+    pc.PendingKill = true; CHECK(!weapon.Is329FireProtocolReady()); pc.PendingKill = false;
+    pc.World = nullptr; CHECK(!weapon.Is329FireProtocolReady()); pc.World = &world;
+    world.Alive = false; CHECK(!weapon.Is329FireProtocolReady()); world.Alive = true;
+    pc.World = &nextWorld; CHECK(weapon.Is329FireProtocolReady()); // Travel needs no handshake.
+    pc.Connection = &nextConnection; CHECK(weapon.Is329FireProtocolReady()); // Reconnect.
+    nextConnection.State = USOCK_Closed; CHECK(!weapon.Is329FireProtocolReady());
+    pc.Local = true; pc.Connection = nullptr; CHECK(weapon.Is329FireProtocolReady()); pc.Local = false;
+    state.bIsABot = true; CHECK(NCPlusVersionGate::IsProtocolConfirmed(&pc)); state.bIsABot = false;
+    AUTBot bot; pawn.Controller = &bot; CHECK(weapon.Is329FireProtocolReady());
+    pawn.Controller = nullptr; CHECK(!weapon.Is329FireProtocolReady());
+    pawn.Controller = &pc; pc.Connection = &connection;
+    weapon.UTOwner = nullptr; weapon.FireProtocolController = &pc;
+    CHECK(weapon.Is329FireProtocolReady()); // Existing trade-grace controller fallback.
+    connection.State = USOCK_Closed; CHECK(!weapon.Is329FireProtocolReady()); connection.State = USOCK_Open;
+    pc.Alive = false; CHECK(!weapon.Is329FireProtocolReady()); pc.Alive = true;
+    ++pc.Serial; CHECK(!weapon.Is329FireProtocolReady()); // Cached weak identity is stale.
+    weapon.UTOwner = &pawn; weapon.Role = 1; CHECK(!weapon.Is329FireProtocolReady());
+    CHECK(world.SpawnCount == 0 && nextWorld.SpawnCount == 0 && AllocatedGates.empty());
+    std::cout << "PASS " << Passed << " retired gate boundary checks\n";
 }
 '''
 
 
 class Version329GateTests(unittest.TestCase):
-    def test_exact_gate_identity_registry_and_travel(self):
+    def test_retired_gate_live_connection_and_weapon_readiness(self):
         source = (PLUGIN / "Source/Private/NCPlusVersionGate.cpp").read_text(encoding="utf-8-sig")
-        definitions = source[source.index("    enum class EProtocolState"):source.index("    FDelegateHandle ProtocolCleanupHandle;")]
-        names = ("bool SessionIdentityMatches", "bool IsConfirmedSession", "bool RecordVersion",
-                 "void PruneProtocolSessions", "bool GateOwnsSession", "void CleanupProtocolWorld",
-                 "void OnProtocolLogout")
-        code = ADAPTER + "\n#define NETCODE_PLUGIN_VERSION 329\n" + definitions
-        code += "\n".join(native_function(source, name) for name in names)
-        code += "\nnamespace NCPlusVersionGate {\n"
-        names = ("static bool IsExempt", "static void SpawnGate", "void SpawnFor(",
-                 "void SpawnAdvisorFor(", "bool IsProtocolConfirmed")
-        code += "\n".join(native_function(source, name) for name in names) + "\n}\n" + CASES
+        names = ("static bool IsExempt", "void SpawnFor(", "void SpawnAdvisorFor(", "bool IsProtocolConfirmed")
+        code = ADAPTER + "\nnamespace NCPlusVersionGate {\n"
+        code += "\n".join(native_function(source, name) for name in names) + "\n}\n"
+        weapon = (PLUGIN / "Source/Private/UTWeaponFix.cpp").read_text(encoding="utf-8-sig")
+        code += native_function(weapon, "bool AUTWeaponFix::Is329FireProtocolReady") + "\n" + CASES
         compiler, environment, msvc = find_compiler()
         with tempfile.TemporaryDirectory(prefix="ncp-329-version-gate-") as temporary:
             directory = Path(temporary)
@@ -258,7 +194,7 @@ class Version329GateTests(unittest.TestCase):
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             run = subprocess.run([str(executable)], cwd=directory, env=environment, capture_output=True, text=True, timeout=60)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            self.assertIn("PASS 52 protocol boundary checks", run.stdout)
+            self.assertIn("retired gate boundary checks", run.stdout)
 
     def test_version_and_existing_gate_wire_contract(self):
         public = (PLUGIN / "Source/Public/NCPlusVersionGate.h").read_text(encoding="utf-8-sig")
@@ -276,6 +212,13 @@ class Version329GateTests(unittest.TestCase):
         self.assertIn("ClearTimer(KickHandle)", end_play)
         self.assertIn("FWorldDelegates::OnWorldCleanup", source)
         self.assertIn("FGameModeEvents::GameModeLogoutEvent", source)
+        self.assertNotIn("GuaranteedKick", source)
+        self.assertNotIn("SpawnActorDeferred", source)
+        query = native_function(source, "bool IsProtocolConfirmed")
+        self.assertNotIn("ProtocolSessions", query)
+        self.assertNotIn("SpawnFor", query)
+        for name in ("void SpawnFor(", "void SpawnAdvisorFor("):
+            self.assertNotIn("SpawnGate", native_function(source, name))
 
 
 if __name__ == "__main__":

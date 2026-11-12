@@ -1,8 +1,9 @@
 """Run actual trainer startup functions against a minimal UE lifecycle adapter.
 
 The adapter exposes the stock first-frame deferral and records inventory work.
-It covers standalone map startup and a later joining player; it does not replace
-a packaged playtest of Unreal's attachment actors or cooked weapon assets.
+It also exercises restart cleanup with the real abort, start, target-reset, and
+local-session-reset methods. Session creation is a recorded service boundary;
+these tests do not replace HTTP integration or a packaged gameplay test.
 """
 import os
 from pathlib import Path
@@ -34,12 +35,14 @@ using FString = std::string;
 constexpr int CLASS_Abstract = 1, LOAD_NoWarn = 1, NAME_None = 0, NAME_Spectating = 1;
 constexpr int MOVE_None = 0, MOVE_Walking = 1, NM_Standalone = 0;
 struct FVector {
+    static const FVector ZeroVector;
     float X, Y, Z;
     FVector(float x, float y, float z) : X(x), Y(y), Z(z) {}
     FVector operator+(const FVector& b) const { return FVector(X+b.X, Y+b.Y, Z+b.Z); }
     FVector operator-(const FVector& b) const { return FVector(X-b.X, Y-b.Y, Z-b.Z); }
     float SizeSquared() const { return X*X+Y*Y+Z*Z; }
 };
+const FVector FVector::ZeroVector(0.f,0.f,0.f);
 struct FMath {
     static bool IsFinite(float n) { return std::isfinite(n); }
     static float Abs(float n) { return std::abs(n); }
@@ -52,7 +55,11 @@ struct Text : std::string {
     Text ToLower() const { Text result(*this); std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) { return char(std::tolower(c)); }); return result; }
 };
 enum class EGuidFormats { DigitsWithHyphens };
-struct FGuid { static FGuid NewGuid() { return FGuid(); } Text ToString(EGuidFormats) { return Text("unique-run"); } };
+struct FGuid {
+    int Id;
+    static FGuid NewGuid() { static int next=0; return FGuid{++next}; }
+    Text ToString(EGuidFormats) { Text result("unique-run-"); result+=std::to_string(Id); return result; }
+};
 int GetTypeHash(const Text&) { return 123; }
 struct FRotator {
     float Pitch=0.f, Yaw=0.f, Roll=0.f;
@@ -75,7 +82,7 @@ struct UClass {
 };
 UClass SniperType{1}, InstagibType{2}, LinkType{3}, LinkBaseType{4}, BeamStateType{5}, LightningType{6};
 UClass TrainerType{7}, InstagibTrainerType{8}, TargetType{9}, InstagibTargetType{10};
-UClass SACTFSniperType{11}, SACTFTrainerType{12}, SACTFTargetType{13};
+UClass SACTFSniperType{11}, SACTFTrainerType{12}, SACTFTargetType{13}, RocketType{14};
 struct ANCAimTrainerCharacter { static UClass* StaticClass() { return &TrainerType; } };
 struct ANCAimTrainerInstagibCharacter { static UClass* StaticClass() { return &InstagibTrainerType; } };
 struct ANCAimTrainerSACTFCharacter { static UClass* StaticClass() { return &SACTFTrainerType; } };
@@ -89,7 +96,9 @@ template<class T> struct TSubclassOf {
     TSubclassOf() = default;
     TSubclassOf(UClass* value) : Value(value) {}
     TSubclassOf& operator=(UClass* value) { Value = value; return *this; }
-    explicit operator bool() const { return Value != nullptr; }
+    // UE4.15 converts both ways. A bool-only adapter hides ambiguous mixed
+    // UClass*/TSubclassOf conditional expressions in the production selector.
+    operator UClass*() const { return Value; }
     UClass* operator->() const { return Value; }
     UClass* operator*() const { return Value; }
 };
@@ -106,6 +115,7 @@ template<class T> UClass* LoadClass(void*, const char* path, void*, int) {
         ++SACTFLoads;
         return MissingSACTFAsset ? nullptr : WrongSACTFAsset ? &InstagibType : &SACTFSniperType;
     }
+    if (LastLoadedPath == "/Game/Blueprints/Netcode/UTNPRocketLauncher.UTNPRocketLauncher_C") return &RocketType;
     return std::string(path).find("Instagib") != std::string::npos ? &InstagibType : &SniperType;
 }
 struct AUTWeapon {
@@ -113,8 +123,10 @@ struct AUTWeapon {
     int Ammo = 0, MaxAmmo = 100, ShotsStatsName = 1;
     float BeamRefire = .12f;
     float GetRefireTime(int) const { return BeamRefire; }
-    void StopFire(int) {}
+    int Stops[2] = {};
+    void StopFire(int mode) { ++Stops[mode]; }
 };
+struct AUTPlusWeap_RocketLauncher : AUTWeapon { static UClass* StaticClass() { return &RocketType; } };
 struct AUTPlusSniper : AUTWeapon {
     bool bTrackImpressive = true;
     int HeadshotDamageType = 11;
@@ -126,6 +138,7 @@ struct LightningGun : AUTPlusSniper {
 struct SACTFSniper : AUTPlusSniper {
     SACTFSniper() { ShotsStatsName = 3; HeadshotDamageType = 33; BeamRefire = .7f; }
 };
+struct AUTPlusFlakCannon : AUTWeapon { static UClass* StaticClass() { static UClass Type{9}; return &Type; } };
 struct AUTPlusShockRifle : AUTWeapon {
     bool bTrackImpressive = true;
     static UClass* StaticClass() { return &InstagibType; }
@@ -162,10 +175,10 @@ struct Movement {
     void SetPlaneConstraintOrigin(FVector n) { PlaneOrigin = n; }
     void SetPlaneConstraintEnabled(bool v) { Constrained = v; }
     void SetMovementMode(int v) { Mode = v; }
-    void ResetTrainerMovement(bool practice) {
+    void ResetTrainerMovement(bool practice,float laneX=-1800.f) {
         StopMovementImmediately(); bWantsToCrouch=false; UnCrouch(false);
         SetPlaneConstraintNormal(FVector(1,0,0));
-        SetPlaneConstraintOrigin(FVector(-1800,0,50108));
+        SetPlaneConstraintOrigin(FVector(laneX,0,50108));
         SetPlaneConstraintEnabled(practice);
         if(practice) SetMovementMode(MOVE_Walking); else DisableMovement();
     }
@@ -193,6 +206,7 @@ struct AUTCharacter : APawn {
     SACTFSniper SACTF;
     AUTPlusShockRifle Instagib;
     AUTWeap_LinkGun_NCP Link;
+    AUTPlusWeap_RocketLauncher Rocket;
     bool bCanBeDamaged = true, Dead = false;
     int Discards = 0, Creates = 0, Switches = 0;
     bool IsDead() const { return Dead; }
@@ -202,6 +216,7 @@ struct AUTCharacter : APawn {
     void DiscardAllInventory() { ++Discards; }
     AUTWeapon* CreateInventory(TSubclassOf<AUTWeapon> type) {
         ++Creates;
+        if (type->Kind == 14) return &Rocket;
         if (type->Kind == 11) return &SACTF;
         if (type->Kind == 6) return &Lightning;
         if (type->Kind == 3) return &Link;
@@ -246,6 +261,7 @@ struct FActorSpawnParameters { ESpawnActorCollisionHandlingMethod SpawnCollision
 template<class T> struct TArray : std::vector<T> {
     int Num() const { return int(this->size()); }
     void Add(T value) { this->push_back(value); }
+    void Empty() { this->clear(); }
     template<class Predicate> void RemoveAll(Predicate predicate) {
         this->erase(std::remove_if(this->begin(), this->end(), predicate), this->end());
     }
@@ -316,13 +332,25 @@ struct BaseGame {
 struct FNCAimTrainerProgress {
     uint8 Scenario = 0, Phase = 0;
     bool bMovementPractice = false, bUseLightningGun = false;
+    int32 Score=0, Shots=0, Hits=0, Headshots=0, TargetsExpired=0;
+    float Accuracy=0.f, TrackingSeconds=0.f, FiringSeconds=0.f;
     float RemainingSeconds = 60;
+};
+struct LocalSessionAdapter {
+    int Cancels=0;
+    void Cancel() { ++Cancels; }
+};
+template<class T> struct TSharedPtr {
+    std::shared_ptr<T> Value;
+    bool IsValid() const { return bool(Value); }
+    T* operator->() const { return Value.get(); }
+    void Reset() { Value.reset(); }
 };
 struct ANCAimTrainerGame : BaseGame {
     using Super = BaseGame;
     ANCAimTrainerPlayerController* Trainee = nullptr;
     AUTWeapon* RunWeapon = nullptr;
-    TSubclassOf<AUTWeapon> SniperClass, LightningClass, SACTFSniperClass, InstagibClass, LinkClass;
+    TSubclassOf<AUTWeapon> SniperClass, LightningClass, SACTFSniperClass, InstagibClass, LinkClass, RocketClass;
     FVector ArenaOrigin{0.f, 0.f, 50000.f};
     FNCAimTrainerProgress Progress;
     int Publishes = 0, Fetches = 0;
@@ -331,7 +359,8 @@ struct ANCAimTrainerGame : BaseGame {
     int NetMode=NM_Standalone;
     void* BaseMutator=nullptr;
     bool bRankedRun=false, bPreviousContact=false, bPreviousFiring=false;
-    float PhaseStartedAt=0;
+    double PhaseStartedAt=0;
+    double GetTrainerTimeSeconds() const { return TheWorld.TimeSeconds; }
     double TrackedSeconds=0, FiredSeconds=0;
     struct { void Initialize(int) {} } Schedule;
     using Room = ANCAimTrainerArena;
@@ -344,22 +373,45 @@ struct ANCAimTrainerGame : BaseGame {
     static int StaticClass() { return 1; }
     int GetClass() { return StaticClass(); }
     bool IsTrainee(const ANCAimTrainerPlayerController* pc) const { return pc && pc==Trainee; }
-    void HideAllTargets() {}
+    NCAimTrainerDrillPolicy::FAttempt Drill;
+    FNCAimTrainerSpawnBalance AirborneSpawnBalance;
+    int32 FlakAttemptShot=0, HeadshotClearedSlots=0;
+    float PendingFlakHitDamage=0.f; double FlakHitFeedbackAt=0.0;
+    FVector FlakHitFeedbackLocation{0.f,0.f,0.f};
+    TArray<int> FlakPellets, PopupSpawnVariants, PopupDodgeActions;
+    TArray<double> NextCrouchTime, CrouchEndTime;
+    TArray<float> PopupLastMoveHold;
+    TArray<double> NextPopupSlideTime, NextPopupLongStrafeTime, NextPopupDodgeTime;
+    double NextTrackingSlideTime=0.0;
+    void HideAllTargets();
     bool EnsureArena();
     bool FailSetup(const char* message) { SetupError = message; return false; }
     void PublishProgress() { ++Publishes; }
     void RefreshLeaderboard() { ++Fetches; }
-    void ResetLocalSession() {}
-    void StartLocalSession() {}
+    TSharedPtr<LocalSessionAdapter> LocalSession;
+    TArray<int> LocalEvents;
+    int32 LocalAppearances[6]={}, LocalNextCheckpoint=1, LocalLastShotCount=0;
+    bool bLocalAuthPending=false, bLocalRecording=false;
+    int SessionStarts=0;
+    Text RequestedRunId;
+    void ResetLocalSession();
+    // Service-boundary stand-in: authenticate asynchronously without changing
+    // the production cleanup state being asserted below.
+    void StartLocalSession() { ++SessionStarts; bLocalAuthPending=true; RequestedRunId=RunId; }
     bool ReadyToStartMatch_Implementation();
     void PostLogin(APlayerController*);
     void RestartPlayer(AController*) override;
     UClass* GetDefaultPawnClassForController_Implementation(AController*) override;
+    int ProjectileClears = 0;
+    void ClearTrainerProjectiles() { ++ProjectileClears; }
+    float PracticeFloorZ() const;
+    float PracticeLaneX() const;
     bool ConfigurePawn();
     bool IsInsidePracticeLane(const AUTCharacter*) const;
     void SelectScenario(ANCAimTrainerPlayerController*,uint8,bool=false);
     void SetMovementPractice(ANCAimTrainerPlayerController*,bool);
     void StartTraining(ANCAimTrainerPlayerController*,bool=false);
+    void RestartTraining(ANCAimTrainerPlayerController*,bool=false);
     void AbortTraining(ANCAimTrainerPlayerController*);
 };
 void Require(bool value, const char* why) {
@@ -378,7 +430,56 @@ CASES = r'''
 int main(int argc, char** argv) {
     Require(argc == 2, "case required"); const std::string name(argv[1]);
     Fixture f;
-    if (name == "first_frame") {
+    if (name == "new_presets") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        f.Game.SelectScenario(&f.Player,6);
+        Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.Link,"hard tracking equipped wrong gun");
+        for (int scenario : {7,8,9,10}) {
+            f.Game.SelectScenario(&f.Player,uint8(scenario),scenario==8);
+            Require(f.Game.IsInsidePracticeLane(&f.Game.SpawnedPawn),"airborne spawn outside lane");
+            const float expectedX=scenario==10?-800.f:-1800.f;
+            Require(f.Game.SpawnedPawn.Position.Z > 50400.f && f.Game.TheRoom.AssignedScenario==(scenario==10?4:3)
+                && f.Game.SpawnedPawn.Position.X==expectedX && f.Game.SpawnedPawn.Move.PlaneOrigin.X==expectedX,
+                "airborne trainee not on safe ledge or wrong arena");
+            if(scenario==7) Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.Instagib,"airborne IG wrong weapon");
+            if(scenario==8) Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.Lightning,"airborne LG wrong weapon");
+            if(scenario==9) Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.SACTF,"airborne SACTF wrong weapon");
+            if(scenario==10) Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.Rocket,"airborne rocket wrong weapon");
+        }
+        f.Game.SetMovementPractice(&f.Player,true);
+        f.Game.SpawnedPawn.Position.Y=1400.f;
+        Require(f.Game.IsInsidePracticeLane(&f.Game.SpawnedPawn),"airborne movement lane rejected");
+        f.Game.SpawnedPawn.Position.Z=50108.f;
+        Require(!f.Game.IsInsidePracticeLane(&f.Game.SpawnedPawn),"under-ledge pawn admitted");
+        f.Game.SelectScenario(&f.Player,1);
+        Require(f.Game.SpawnedPawn.Position.Z==50108.f && f.Game.SpawnedPawn.Position.X==-1800.f
+                && f.Game.SpawnedPawn.Move.PlaneOrigin.X==-1800.f,"previous ledge offset leaked into headshots");
+        Require(f.Game.ProjectileClears>=6,"scenario changes left old projectiles alive");
+    } else if (name == "rocket_lane") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        for(bool movement:{false,true}) {
+            f.Game.SelectScenario(&f.Player,10);
+            f.Game.SetMovementPractice(&f.Player,movement);
+            auto& pawn=f.Game.SpawnedPawn;
+            Require(pawn.Position.X==-800.f && pawn.Move.PlaneOrigin.X==-800.f
+                    && pawn.Move.Constrained==movement && f.Game.IsInsidePracticeLane(&pawn),
+                    "rocket setup did not anchor trainee and movement plane on closer ledge");
+            pawn.Position.X=-1800.f;
+            Require(!f.Game.IsInsidePracticeLane(&pawn),"rocket practice accepted old distant firing lane");
+            pawn.Position.X=-794.f;
+            Require(!f.Game.IsInsidePracticeLane(&pawn),"rocket practice accepted displacement beyond lane tolerance");
+            f.Game.SelectScenario(&f.Player,8);
+            Require(pawn.Position.X==-1800.f && pawn.Move.PlaneOrigin.X==-1800.f
+                    && f.Game.TheRoom.AssignedScenario==3 && f.Game.IsInsidePracticeLane(&pawn),
+                    "returning to hitscan airborne retained rocket distance or arena variant");
+            pawn.Position.X=-800.f;
+            Require(!f.Game.IsInsidePracticeLane(&pawn),"normal airborne accepted closer rocket firing lane");
+            f.Game.SelectScenario(&f.Player,0);
+            Require(pawn.Position.X==-1800.f && pawn.Position.Z==50108.f
+                    && pawn.Move.PlaneOrigin.X==-1800.f && f.Game.TheRoom.AssignedScenario==0
+                    && f.Game.IsInsidePracticeLane(&pawn),"normal Link failed to restore original ground lane");
+        }
+    } else if (name == "first_frame") {
         Require(!f.Game.ReadyToStartMatch_Implementation(), "started on first frame");
         Require(f.Game.ReadyCalls == 1 && f.Game.NextTickStarts == 1,
                 "stock next-tick deferral was bypassed");
@@ -459,6 +560,117 @@ int main(int argc, char** argv) {
             f.Game.Progress.Phase=2;
             f.Game.AbortTraining(&f.Player);
         }
+    } else if (name == "restart_countdown" || name == "restart_active" || name == "restart_results") {
+        // Exercise both retained LG preference and a projectile-bearing preset.
+        for (int scenario : {3,10}) {
+            Fixture run;
+            run.BeginWorld(); run.Game.PostLogin(&run.Player);
+            auto& game=run.Game;
+            game.SelectScenario(&run.Player,uint8(scenario),true);
+            game.SetMovementPractice(&run.Player,true);
+            game.StartTraining(&run.Player,true);
+            game.Progress.Phase=name=="restart_countdown" ? 1 : name=="restart_active" ? 2 : 3;
+            game.Progress.Score=900; game.Progress.Shots=12; game.Progress.Hits=9;
+            game.Progress.Headshots=4; game.Progress.TargetsExpired=3;
+            game.Progress.Accuracy=75.f; game.Progress.TrackingSeconds=6.f; game.Progress.FiringSeconds=9.f;
+            game.TrackedSeconds=6.0; game.FiredSeconds=9.0;
+            game.bPreviousContact=game.bPreviousFiring=true;
+            game.HeadshotClearedSlots=7; game.Drill.Streak=4; game.FlakAttemptShot=12;
+            game.PendingFlakHitDamage=80.f; game.FlakHitFeedbackAt=42.035f;
+            game.FlakHitFeedbackLocation=FVector(1.f,2.f,3.f);
+            game.FlakPellets.Add(17); game.AirborneSpawnBalance.RecordHit(-500.f);
+            game.NextTrackingSlideTime=23.f;
+            game.NextCrouchTime.Add(23.f); game.CrouchEndTime.Add(24.f); game.PopupLastMoveHold.Add(1.f);
+            game.NextPopupSlideTime.Add(25.f); game.NextPopupLongStrafeTime.Add(26.f); game.NextPopupDodgeTime.Add(27.f);
+            game.PopupSpawnVariants.Add(2); game.PopupDodgeActions.Add(3);
+            auto oldSession=std::make_shared<LocalSessionAdapter>();
+            game.LocalSession.Value=oldSession;
+            game.LocalEvents.Add(41); game.LocalAppearances[2]=5;
+            game.LocalNextCheckpoint=7; game.LocalLastShotCount=12;
+            game.bLocalRecording=true;
+            const Text oldRun=game.RunId;
+            const int oldStarts=game.SessionStarts, oldDiscards=game.SpawnedPawn.Discards;
+            const int oldClears=game.ProjectileClears, oldHides=game.Targets[0]->Hides;
+            AUTWeapon* oldWeapon=game.RunWeapon;
+            const int oldPrimaryStops=oldWeapon->Stops[0], oldAltStops=oldWeapon->Stops[1];
+            game.TheWorld.TimeSeconds=42.f;
+
+            game.RestartTraining(&run.Player,true);
+
+            Require(game.Progress.Phase==1 && game.Progress.RemainingSeconds==3.f && game.PhaseStartedAt==42.f,
+                    "restart did not begin a full new countdown");
+            Require(game.Progress.Scenario==scenario && game.Progress.bMovementPractice && game.Progress.bUseLightningGun
+                    && game.RunWeapon==(scenario==3 ? static_cast<AUTWeapon*>(&game.SpawnedPawn.Lightning)
+                                                   : static_cast<AUTWeapon*>(&game.SpawnedPawn.Rocket)),
+                    "restart lost scenario, movement, weapon preference, or selected weapon");
+            Require(!game.RunId.empty() && game.RunId!=oldRun && game.RequestedRunId==game.RunId
+                    && game.SessionStarts==oldStarts+1,
+                    "restart reused old run identity or did not request exactly one new session");
+            Require(oldSession->Cancels==1 && !game.LocalSession.IsValid() && game.LocalEvents.empty()
+                    && game.LocalAppearances[2]==0 && game.LocalNextCheckpoint==1 && game.LocalLastShotCount==0
+                    && !game.bLocalRecording && game.bLocalAuthPending,
+                    "restart left cancelled-run checkpoint events or recording state attached to new authentication");
+            Require(game.Progress.Score==0 && game.Progress.Shots==0 && game.Progress.Hits==0
+                    && game.Progress.Headshots==0 && game.Progress.TargetsExpired==0 && game.Progress.Accuracy==0.f
+                    && game.Progress.TrackingSeconds==0.f && game.Progress.FiringSeconds==0.f
+                    && game.TrackedSeconds==0.0 && game.FiredSeconds==0.0 && !game.bPreviousContact && !game.bPreviousFiring,
+                    "restart carried prior score or firing clocks into the next run");
+            Require(game.SpawnedPawn.Discards==oldDiscards+1 && game.ProjectileClears>oldClears
+                    && game.Targets[0]->Hides>oldHides && game.IsInsidePracticeLane(&game.SpawnedPawn),
+                    "restart retained old inventory, projectiles, visible targets, or displaced trainee");
+            if (name!="restart_results") {
+                Require(oldWeapon->Stops[0]==oldPrimaryStops+1 && oldWeapon->Stops[1]==oldAltStops+1,
+                        "interrupting countdown or active run did not stop both old weapon fire modes");
+            }
+            Require(game.HeadshotClearedSlots==0 && game.Drill.Streak==0 && game.FlakAttemptShot==0
+                    && game.PendingFlakHitDamage==0.f && game.FlakHitFeedbackAt==0.f
+                    && game.FlakHitFeedbackLocation.X==0.f && game.FlakHitFeedbackLocation.Y==0.f
+                    && game.FlakHitFeedbackLocation.Z==0.f
+                    && game.FlakPellets.empty() && game.AirborneSpawnBalance.Count==0 && game.NextTrackingSlideTime==0.f
+                    && game.NextCrouchTime[0]==0.f && game.CrouchEndTime[0]==0.f && game.PopupLastMoveHold[0]==0.f
+                    && game.NextPopupSlideTime[0]==0.f && game.NextPopupLongStrafeTime[0]==0.f
+                    && game.NextPopupDodgeTime[0]==0.f && game.PopupSpawnVariants[0]==0 && game.PopupDodgeActions[0]==0,
+                    "restart retained previous target appearance or movement schedule state");
+        }
+    } else if (name == "abort_flak_feedback") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player); f.Game.StartTraining(&f.Player);
+        f.Game.Progress.Phase=2; f.Game.Progress.Scenario=11;
+        f.Game.PendingFlakHitDamage=75.f; f.Game.FlakHitFeedbackAt=2.035f;
+        f.Game.FlakHitFeedbackLocation=FVector(8.f,9.f,10.f);
+        f.Game.AbortTraining(&f.Player);
+        Require(f.Game.Progress.Phase==0 && f.Game.PendingFlakHitDamage==0.f && f.Game.FlakHitFeedbackAt==0.f
+                && f.Game.FlakHitFeedbackLocation.X==0.f && f.Game.FlakHitFeedbackLocation.Y==0.f
+                && f.Game.FlakHitFeedbackLocation.Z==0.f,
+                "abort retained old-run flak feedback for the next run");
+    } else if (name == "restart_authority") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player); f.Game.StartTraining(&f.Player);
+        f.Game.Progress.Phase=2; f.Game.Progress.Score=800;
+        auto oldSession=std::make_shared<LocalSessionAdapter>();
+        f.Game.LocalSession.Value=oldSession;
+        const Text oldRun=f.Game.RunId;
+        const int starts=f.Game.SessionStarts, hides=f.Game.Targets[0]->Hides;
+        const int discards=f.Game.SpawnedPawn.Discards, clears=f.Game.ProjectileClears;
+        ANCAimTrainerPlayerController other;
+        for (auto* caller : {&other, static_cast<ANCAimTrainerPlayerController*>(nullptr)}) {
+            f.Game.RestartTraining(caller,true);
+            Require(f.Game.Progress.Phase==2 && f.Game.Progress.Score==800 && f.Game.RunId==oldRun
+                    && f.Game.SessionStarts==starts && oldSession->Cancels==0 && f.Game.LocalSession.IsValid()
+                    && f.Game.Targets[0]->Hides==hides && f.Game.SpawnedPawn.Discards==discards
+                    && f.Game.ProjectileClears==clears && !f.Game.Progress.bUseLightningGun,
+                    "non-trainee restart disturbed an existing run");
+        }
+    } else if (name == "restart_failed_setup") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player); f.Game.SelectScenario(&f.Player,3,true);
+        f.Game.StartTraining(&f.Player,true); f.Game.Progress.Phase=2;
+        auto oldSession=std::make_shared<LocalSessionAdapter>();
+        f.Game.LocalSession.Value=oldSession;
+        const int starts=f.Game.SessionStarts;
+        f.Game.LightningClass=nullptr; MissingLightningAsset=true;
+        f.Game.RestartTraining(&f.Player,true);
+        Require(f.Game.Progress.Phase==0 && f.Game.RunId.empty() && !f.Game.RunWeapon
+                && oldSession->Cancels==1 && !f.Game.LocalSession.IsValid() && !f.Game.bLocalAuthPending
+                && f.Game.SessionStarts==starts && !f.Game.SetupError.empty(),
+                "failed restart setup left a live old run or began an invalid checkpoint session");
     } else if (name == "lane_bounds") {
         f.BeginWorld(); f.Game.PostLogin(&f.Player);
         AUTCharacter& pawn=f.Game.SpawnedPawn;
@@ -643,7 +855,7 @@ int main(int argc, char** argv) {
             f.Game.SetMovementPractice(requestor,true);
             f.Game.AbortTraining(requestor);
         }
-        f.Game.SelectScenario(&f.Player,6,false);
+        f.Game.SelectScenario(&f.Player,13,false);
         Require(f.Game.Progress.Phase == 0 && f.Game.Progress.Scenario == 1
                 && f.Game.Progress.bUseLightningGun && !f.Game.Progress.bMovementPractice
                 && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning
@@ -836,14 +1048,22 @@ class AimTrainerStartupTests(unittest.TestCase):
             "UClass* ANCAimTrainerGame::GetDefaultPawnClassForController_Implementation",
             "bool ANCAimTrainerGame::ConfigurePawn",
             "bool ANCAimTrainerGame::IsInsidePracticeLane",
+            "float ANCAimTrainerGame::PracticeFloorZ",
+            "float ANCAimTrainerGame::PracticeLaneX",
             "void ANCAimTrainerGame::SelectScenario",
             "void ANCAimTrainerGame::SetMovementPractice",
             "void ANCAimTrainerGame::StartTraining",
+            "void ANCAimTrainerGame::RestartTraining",
             "void ANCAimTrainerGame::AbortTraining",
+            "void ANCAimTrainerGame::ResetLocalSession",
+            "void ANCAimTrainerGame::HideAllTargets",
         )
         layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix()
         policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()
-        cls.translation = "\n".join([ADAPTER, f'#include "{layout}"', f'#include "{policy}"']
+        drill = (PLUGIN / "Source/Public/NCAimTrainerDrillPolicy.h").as_posix()
+        balance = (PLUGIN / "Source/Public/NCAimTrainerSpawnBalance.h").as_posix()
+        cls.translation = "\n".join([f'#include "{drill}"', f'#include "{balance}"', ADAPTER,
+                                     f'#include "{layout}"', f'#include "{policy}"']
                                     + [native_function(native, s) for s in signatures] + [CASES])
         cls.configure_function = native_function(native, "bool ANCAimTrainerGame::ConfigurePawn")
         cls.executable = cls.compile_fixture("trainer_startup", cls.translation)
@@ -855,7 +1075,7 @@ class AimTrainerStartupTests(unittest.TestCase):
         source.write_text(translation, encoding="utf-8")
         executable = directory / (name + (".exe" if os.name == "nt" else ""))
         if cls.msvc:
-            command = [cls.compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
+            command = [cls.compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", "/Zc:ternary", str(source),
                        f"/Fe{executable}", f"/Fo{directory / (name + '.obj')}"]
         else:
             command = [cls.compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror", "-pedantic", str(source), "-o", str(executable)]
@@ -880,6 +1100,12 @@ class AimTrainerStartupTests(unittest.TestCase):
     def test_missing_sactf_content_fails_closed_and_recovers_after_mount(self): self.run_case("sactf_assets")
     def test_sactf_requires_sniper_native_base_and_own_shot_counter(self): self.run_case("sactf_content")
     def test_restart_clears_firing_and_contact_clocks(self): self.run_case("run_clock_reset")
+    def test_restart_during_countdown_cancels_old_session_and_restarts_same_preset(self): self.run_case("restart_countdown")
+    def test_restart_during_run_clears_score_targets_weapon_and_pending_recording(self): self.run_case("restart_active")
+    def test_restart_from_results_uses_fresh_run_and_preserves_selected_preset(self): self.run_case("restart_results")
+    def test_abort_discards_pending_flak_feedback(self): self.run_case("abort_flak_feedback")
+    def test_restart_cannot_interrupt_another_players_run(self): self.run_case("restart_authority")
+    def test_failed_restart_setup_cancels_old_run_without_starting_invalid_session(self): self.run_case("restart_failed_setup")
     def test_lane_accepts_crouching_jumping_but_rejects_escapes(self): self.run_case("lane_bounds")
     def test_each_scenario_equips_its_real_weapon(self): self.run_case("tracking_weapon")
     def test_headshot_selection_uses_exact_lightning_asset_and_independent_cache(self): self.run_case("lightning_select")
@@ -889,6 +1115,9 @@ class AimTrainerStartupTests(unittest.TestCase):
     def test_missing_lightning_fails_closed_and_recovers_after_mount(self): self.run_case("lightning_assets")
     def test_lightning_requires_sniper_base_and_its_own_shot_counter(self): self.run_case("lightning_content")
     def test_tracking_requires_link_assets_and_recovers_after_mount(self): self.run_case("tracking_assets")
+    def test_new_presets_equip_matching_weapons_and_use_safe_airborne_ledge(self): self.run_case("new_presets")
+    def test_rocket_lane_moves_player_and_plane_and_restores_normal_scenarios(self): self.run_case("rocket_lane")
+
     def test_tracking_requires_real_beam_state_damage_and_range(self): self.run_case("tracking_beam_content")
     def test_tracking_refire_must_be_finite_and_positive(self): self.run_case("tracking_refire")
     def test_scenario_changes_replace_native_pawn_only_outside_run_and_use_class_height(self): self.run_case("profile_replacement")

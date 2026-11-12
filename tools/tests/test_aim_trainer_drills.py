@@ -1,0 +1,335 @@
+"""Execute production drill lifecycle, pellet aggregation and shot scoring.
+
+The adapter supplies actors and the native weapon's shot counter; Unreal
+collision, animation and packaged network play still require a playtest.
+"""
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+from test_wipeout_healing import PLUGIN, find_compiler, native_function
+
+ADAPTER = r'''
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
+#include <iostream>
+#include <string>
+#include <vector>
+#define TEXT(x) x
+using int32=int;
+constexpr int ROLE_Authority=3;
+constexpr float PI=3.14159265f;
+struct FMath {
+    static float Min(float a,float b){return std::min(a,b);}
+    template<class T> static T Max(T a,T b){return std::max(a,b);}
+    static float Abs(float x){return std::abs(x);}
+    static float Cos(float x){return std::cos(x);}
+    static float Sin(float x){return std::sin(x);}
+    static float Atan2(float y,float x){return std::atan2(y,x);}
+    static bool IsFinite(float x){return std::isfinite(x);}
+    static int RoundToInt(float x){return int(std::round(x));}
+};
+struct FVector {
+    static const FVector ZeroVector;
+    float X,Y,Z;
+    FVector(float x=0,float y=0,float z=0):X(x),Y(y),Z(z){}
+    FVector operator+(FVector v) const{return {X+v.X,Y+v.Y,Z+v.Z};}
+    FVector operator-(FVector v) const{return {X-v.X,Y-v.Y,Z-v.Z};}
+};
+const FVector FVector::ZeroVector{};
+struct FRotator { FRotator(float,float,float){} };
+struct FString:std::string {
+    using std::string::string; using std::string::operator=;
+    static FString Printf(const char* text,int a,int b,int c){char out[180];std::snprintf(out,sizeof(out),text,a,b,c);return out;}
+};
+template<class T> struct TArray:std::vector<T> {
+    using std::vector<T>::vector;
+    void Add(T x){this->push_back(x);}
+    void Empty(){this->clear();}
+    int Num()const{return int(this->size());}
+    bool IsValidIndex(int i)const{return i>=0&&i<Num();}
+    bool Contains(T x)const{return std::find(this->begin(),this->end(),x)!=this->end();}
+};
+struct AActor { virtual ~AActor()=default; };
+struct AUTPlayerState:AActor{};
+struct AController:AActor{};
+struct ANCAimTrainerPlayerController:AController {
+    AUTPlayerState* PlayerState=nullptr;
+    AActor Pawn; int Notifications=0; FString Status;
+    struct FlakFeedback { float Damage; FVector Location; };
+    std::vector<FlakFeedback> FlakNotifications;
+    std::function<void(float,const FVector&)> OnFlakFeedback;
+    AActor* GetPawn(){return &Pawn;}
+    void NotifyTrainerHit(float){++Notifications;}
+    void NotifyTrainerFlakHit(float damage,const FVector& location){
+        FlakNotifications.push_back({damage,location});
+        if(OnFlakFeedback)OnFlakFeedback(damage,location);
+    }
+    void SetTrainerOnlineStatus(const FString& s){Status=s;}
+};
+struct AUTWeapon:AActor {
+    float Shots=0;
+    float GetWeaponShotsStats(AUTPlayerState*) const{return Shots;}
+};
+struct AUTPlusFlakCannon:AUTWeapon { TArray<int> ProjClass{10},MultiShotProjClass{11}; };
+struct AUTPlusShockRifle:AUTWeapon {
+    struct Info { int DamageType=20; };
+    TArray<Info> InstantHitInfo=TArray<Info>(1);
+    int Mode=0;float Rewind=0;
+    int GetCurrentFireMode(){return Mode;}
+    float GetHitValidationPredictionTime()const{return Rewind;}
+};
+struct AUTProjectile:AActor {
+    int Role=ROLE_Authority,Type=10,MyDamageType=10;
+    AController* InstigatorController=nullptr; AActor* Instigator=nullptr;
+    float CreationTime=1.f;
+    int GetClass()const{return Type;}
+    AActor* GetInstigator()const{return Instigator;}
+};
+template<class T,class U>T* Cast(U* v){return dynamic_cast<T*>(v);}
+struct FDamageEvent{int DamageTypeClass=10;bool IsOfType(int)const{return true;}};
+struct FUTPointDamageEvent{static const int ClassID=101;};
+struct MovementBase{virtual ~MovementBase()=default;};
+struct UUTCharacterMovement:MovementBase {
+    float DodgeImpulseHorizontal=1500,DodgeImpulseVertical=500;
+    float GetGravityZ()const{return -2154;}
+};
+double TrainerNow=1.;
+float EngineWorldNow=5000.f;
+struct ANCAimTrainerTarget:AActor {
+    bool Visible=false,Crouched=false;double Appearance=0;float AppearanceWorld=0;
+    FVector Position; UUTCharacterMovement Movement;
+    int Impulses=0,Dodges=0,Reversals=0,Feints=0;
+    bool DodgeAllowed=true,ActionReady=true;
+    struct Capsule{float GetScaledCapsuleHalfHeight()const{return 108.f;}} Shape;
+    struct Class {template<class T>const T* GetDefaultObject()const{static T Target;return &Target;}} Type;
+    Class* GetClass(){return &Type;}
+    const Capsule* GetCapsuleComponent()const{return &Shape;}
+    MovementBase* GetCharacterMovement(){return &Movement;}
+    bool IsAvailable()const{return Visible;}
+    double GetAppearanceTime()const{return Appearance;}
+    float GetAppearanceWorldTime()const{return AppearanceWorld;}
+    FVector GetActorLocation()const{return Position;}
+    void ActivateTarget(FVector p,bool){Visible=true;Position=p;Appearance=TrainerNow;AppearanceWorld=EngineWorldNow;}
+    void HideTarget(){Visible=false;}
+    void SetActorRotation(FRotator){}
+    void ConfigureDrillMovement(bool,FVector){}
+    void ChooseDrillStrafe(float,float){++Feints;}
+    bool CanStartTrainerDrillAction()const{return ActionReady;}
+    bool SetTrainerCrouched(bool value){Crouched=value;return true;}
+    bool TryTrainerDrillDodge(float){++Dodges;return DodgeAllowed;}
+    bool TryTrainerDrillWallDodge(){return false;}
+    void ReverseStrafe(){++Reversals;}
+    void ApplyTrainerShockMomentum(const FDamageEvent&){++Impulses;}
+};
+struct ANCAimTrainerGame {
+    struct {int Phase=2,Scenario=11,Shots=0,Hits=0,TargetsExpired=0,Headshots=0,Score=0;float Accuracy=0;} Progress;
+    struct World{float GetTimeSeconds(){return EngineWorldNow;}} TheWorld;
+    struct Random{float Roll=.5f; float FRand(){return Roll;} float FRandRange(float a,float b){return a+(b-a)*Roll;} int RandRange(int a,int b){return a+int(float(b-a)*Roll);}} Schedule;
+    ANCAimTrainerPlayerController* Trainee=nullptr;
+    AUTWeapon* RunWeapon=nullptr;
+    TArray<ANCAimTrainerTarget*> Targets;
+    FVector ArenaOrigin;
+    NCAimTrainerDrillPolicy::FAttempt Drill;
+    int FlakAttemptShot=0;
+    TArray<AActor*> FlakPellets;
+    double NextDrillAction=0,PhaseStartedAt=0;float ShotStatBaseline=0;
+    float PendingFlakHitDamage=0;double FlakHitFeedbackAt=0;
+    FVector FlakHitFeedbackLocation;
+    bool bDrillDodgeQueued=false;
+    double NextWiggleTime[6]={},NextCrouchTime[6]={},CrouchEndTime[6]={},TargetExpiry[6]={},NextTargetTime[6]={};
+    int LocalAppearances[6]={},HitsRecorded=0,ExpiresRecorded=0,ProjectilesCleared=0;
+    bool bRankedRun=true;std::string UnrankedReason;
+    World* GetWorld(){return &TheWorld;}
+    double GetTrainerTimeSeconds()const{return TrainerNow;}
+    void InvalidateLocalRun(){}
+    void RecordLocalShotCount(){}
+    void RecordLocalTarget(int,bool hit){if(hit)++HitsRecorded;else ++ExpiresRecorded;}
+    void ClearTrainerProjectiles(){++ProjectilesCleared;}
+    void PublishDrillStatus();void UpdateDrillShots();void ActivateDrillTarget(double);
+    void QueueFlakHitFeedback(float,const FVector&);void FlushFlakHitFeedback();
+    void RetireDrillTarget(bool,double);void UpdateDrillTargets(double);void UpdateShotCount();
+    float RecordDrillHit(ANCAimTrainerTarget*,float,const FDamageEvent&,AActor*);
+};
+void Require(bool condition,const char* why){if(!condition){std::cerr<<why;std::exit(1);}}
+struct Fixture {
+    ANCAimTrainerGame G;ANCAimTrainerTarget T;ANCAimTrainerPlayerController P;AUTPlayerState PS;
+    AUTPlusFlakCannon Flak;AUTPlusShockRifle Shock;
+    Fixture(bool shock=false){TrainerNow=1;P.PlayerState=&PS;G.Trainee=&P;G.Targets.Add(&T);G.RunWeapon=shock?static_cast<AUTWeapon*>(&Shock):&Flak;G.Progress.Scenario=shock?12:11;G.UpdateDrillTargets(TrainerNow);}
+    AUTProjectile Pellet(){AUTProjectile p;p.Instigator=P.GetPawn();p.InstigatorController=&P;p.CreationTime=EngineWorldNow;return p;}
+    float Hit(AActor* causer,float damage=20){FDamageEvent e;e.DamageTypeClass=G.Progress.Scenario==11?10:20;return G.RecordDrillHit(&T,damage,e,causer);}
+    void Shot(){++G.RunWeapon->Shots;G.UpdateShotCount();}
+};
+'''
+
+CASES = r'''
+int main(int argc,char** argv){
+    Require(argc==2,"case missing");const std::string name(argv[1]);
+    if(name=="clock_domains") {
+        Fixture f;
+        TrainerNow=100000000.125; f.G.PhaseStartedAt=TrainerNow; f.G.ActivateDrillTarget(TrainerNow);
+        f.Shot(); auto pellet=f.Pellet();
+        Require(f.Hit(&pellet,30)==30,"new engine-time pellet was rejected against trainer timestamp");
+        Require(f.G.Drill.ShotAt==TrainerNow,"drill shot timestamp truncated to float");
+        const double start=TrainerNow;
+        TrainerNow=start+.034; f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.P.FlakNotifications.empty(),"grouping timer fired early at large trainer age");
+        TrainerNow=start+.036; f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.P.FlakNotifications.size()==1,"grouping timer followed the frozen engine world clock");
+        auto old=f.Pellet(); old.CreationTime=f.T.AppearanceWorld-1.f;
+        Require(f.Hit(&old,100)==0,"old engine-time pellet crossed the new appearance");
+    } else if(name=="flak_threshold"){
+        Fixture f;f.Shot();AUTProjectile pellets[6];
+        f.P.OnFlakFeedback=[&](float damage,const FVector&){
+            Require(f.T.Visible&&f.G.Drill.FlakDamage>=100.f,"lethal cue waited until target/attempt reset");
+            Require(std::abs(damage-100.f)<.001f&&f.G.PendingFlakHitDamage==0&&f.G.FlakHitFeedbackAt==0,
+                "lethal cue omitted accepted pellet damage or retained batch during callback");
+        };
+        for(int i=0;i<5;++i){pellets[i]=f.Pellet();Require(f.Hit(&pellets[i],19.9f)>0,"valid pellet rejected");}
+        Require(f.G.Progress.Hits==0&&f.T.Visible,"less than 100 damage killed");
+        Require(f.Hit(&pellets[0],100)==0,"same pellet counted twice");
+        pellets[5]=f.Pellet();f.Hit(&pellets[5],.5f);
+        Require(f.G.Progress.Hits==1&&!f.T.Visible&&f.G.Progress.Score==100&&f.G.HitsRecorded==1,"100 damage did not resolve exactly one lethal volley");
+        Require(f.P.FlakNotifications.size()==1&&f.P.Notifications==0,"lethal pellets emitted separate generic cues");
+        f.G.FlushFlakHitFeedback();Require(f.P.FlakNotifications.size()==1,"lethal cue replayed on flush");
+    } else if(name=="flak_feedback_group"){
+        Fixture f;f.Shot();auto p1=f.Pellet();auto p2=f.Pellet();auto p3=f.Pellet();
+        f.T.Position=FVector(12,34,108);f.Hit(&p1,20);
+        const double deadline=f.G.FlakHitFeedbackAt;
+        Require(std::abs(deadline-1.035f)<.0001f,"first pellet did not start 35ms cue window");
+        TrainerNow=1.02f;f.T.Position=FVector(100,200,500);f.Hit(&p2,30);
+        TrainerNow=1.034f;f.Hit(&p3,40);f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.P.FlakNotifications.empty()&&f.P.Notifications==0&&f.G.FlakHitFeedbackAt==deadline,
+            "pellets played independently or extended the first impact deadline");
+        TrainerNow=deadline+.0001f;f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.P.FlakNotifications.size()==1&&f.P.FlakNotifications[0].Damage==90.f,
+            "accepted pellets did not produce one summed cue on deadline");
+        const FVector where=f.P.FlakNotifications[0].Location;
+        Require(where.X==12&&where.Y==34&&std::abs(where.Z-232.2f)<.001f,
+            "queued damage number followed target movement instead of first impact location");
+        Require(f.T.Visible&&f.G.Progress.TargetsExpired==0,"partial cue waited for failed-attempt retirement");
+        TrainerNow=1.36f;f.G.UpdateDrillTargets(TrainerNow);
+        Require(!f.T.Visible&&f.P.FlakNotifications.size()==1,"failed-attempt retirement duplicated grouped cue");
+    } else if(name=="flak_feedback_late_pellet"){
+        Fixture f;f.Shot();auto p1=f.Pellet();auto p2=f.Pellet();f.Hit(&p1,20);
+        TrainerNow=1.05f;f.Hit(&p2,30); // No tick between impacts: queue must flush the mature first burst.
+        Require(f.P.FlakNotifications.size()==1&&f.P.FlakNotifications[0].Damage==20.f
+            &&f.G.PendingFlakHitDamage==30.f&&std::abs(f.G.FlakHitFeedbackAt-1.085f)<.0001f,
+            "late pellet merged into expired burst or lost its own feedback");
+        TrainerNow=1.086f;f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.P.FlakNotifications.size()==2&&f.P.FlakNotifications[1].Damage==30.f,
+            "late pellet burst did not flush on its own deadline");
+    } else if(name=="flak_feedback_rejections"){
+        Fixture f;f.Shot();auto accepted=f.Pellet();f.Hit(&accepted,30);
+        Require(f.Hit(&accepted,60)==0,"duplicate pellet accepted");
+        for(int guard=0;guard<5;++guard){auto invalid=f.Pellet();if(guard==0)invalid.Role=1;
+            if(guard==1)invalid.InstigatorController=nullptr;if(guard==2)invalid.Instigator=nullptr;
+            if(guard==3)invalid.Type=99;if(guard==4)invalid.MyDamageType=99;
+            Require(f.Hit(&invalid,90)==0,"invalid pellet accepted");}
+        TrainerNow=1.036f;f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.P.FlakNotifications.size()==1&&f.P.FlakNotifications[0].Damage==30.f
+            &&f.G.Drill.FlakDamage==30.f,"rejected pellet inflated score or feedback pitch damage");
+    } else if(name=="flak_feedback_retire_early"){
+        Fixture f;f.Shot();auto p=f.Pellet();f.Hit(&p,25);
+        TrainerNow=1.01f;f.Shot(); // A second volley retires the first attempt before its cue timer.
+        Require(!f.T.Visible&&f.P.FlakNotifications.size()==1&&f.P.FlakNotifications[0].Damage==25.f,
+            "early retirement dropped partial feedback");
+        TrainerNow=1.04f;f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.P.FlakNotifications.size()==1,"expired early-retired batch replayed");
+    } else if(name=="flak_feedback_scope"){
+        for(int guard=0;guard<3;++guard){Fixture f;f.G.QueueFlakHitFeedback(25,FVector(1,2,3));
+            if(guard==0)f.G.Progress.Phase=3;if(guard==1)f.G.Progress.Scenario=12;if(guard==2)f.G.Trainee=nullptr;
+            f.G.FlushFlakHitFeedback();
+            Require(f.P.FlakNotifications.empty()&&f.G.PendingFlakHitDamage==0&&f.G.FlakHitFeedbackAt==0
+                &&f.G.FlakHitFeedbackLocation.X==0,"inactive/foreign scenario leaked or retained pending flak cue");}
+    } else if(name=="flak_attempts"){
+        Fixture f;f.Shot();auto old=f.Pellet();f.Hit(&old,50);
+        TrainerNow=1.36f;f.G.UpdateDrillTargets(TrainerNow);
+        Require(!f.T.Visible&&f.G.Progress.TargetsExpired==1&&f.G.Progress.Hits==0,"partial volley was not a failed attempt");
+        TrainerNow=1.55f;f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.T.Visible&&f.G.LocalAppearances[0]==2&&f.G.ProjectilesCleared==2,"next target did not start clean");
+        Require(f.Hit(&old,100)==0,"old pellet damaged new appearance");
+        auto early=f.Pellet();Require(f.Hit(&early,100)==0,"prior shot reused on new target");
+        TrainerNow=2.f;f.Shot();auto fresh=f.Pellet();f.Hit(&fresh,100);
+        Require(f.G.Progress.Hits==1&&f.G.Progress.Shots==2,"next volley did not score");
+    } else if(name=="flak_identity"){
+        for(int guard=0;guard<5;++guard){Fixture f;f.Shot();auto p=f.Pellet();if(guard==0)p.Role=1;if(guard==1)p.InstigatorController=nullptr;if(guard==2)p.Instigator=nullptr;if(guard==3)p.Type=99;if(guard==4)p.MyDamageType=99;Require(f.Hit(&p,100)==0&&f.T.Visible,"foreign/alternate pellet accepted");}
+        Fixture f;f.Shot();TrainerNow=1.36f;auto late=f.Pellet();Require(f.Hit(&late,100)==0,"late flak pellet scored");
+    } else if(name=="shock_streak"){
+        Fixture f(true);
+        for(int i=0;i<4;++i){TrainerNow=1.f+float(i)*.7f;f.Shot();f.Hit(&f.Shock);Require(f.Hit(&f.Shock)==0,"duplicate beam advanced streak");}
+        Require(f.G.Drill.Streak==4&&f.T.Visible,"carrier reset before five hits");
+        TrainerNow+=.7f;f.Shot(); // miss
+        TrainerNow+=.7f;f.Shot();f.Hit(&f.Shock);Require(f.G.Drill.Streak==1&&f.T.Visible,"miss did not break consecutive hits");
+        for(int i=0;i<4;++i){TrainerNow+=.7f;f.Shot();f.Hit(&f.Shock);}
+        Require(!f.T.Visible&&f.G.Drill.Stops==1&&f.G.Progress.Hits==9&&f.T.Impulses==9,"five-hit reset or native impulse count wrong");
+        Require(f.G.Progress.Score==875,"shock score differs from server formula");
+        Require(f.P.Notifications==9&&f.P.FlakNotifications.empty()&&f.G.PendingFlakHitDamage==0,
+            "shock hits were delayed/grouped or emitted flak feedback");
+    } else if(name=="shock_capture"){
+        Fixture f(true);f.Shot();f.Hit(&f.Shock);f.T.Position=FVector(-1400,0,108);f.G.UpdateDrillTargets(TrainerNow);f.G.UpdateShotCount();
+        Require(!f.T.Visible&&f.G.Progress.TargetsExpired==1&&f.G.Drill.Streak==0&&f.G.Progress.Score==0,"capture did not retire/reset carrier");
+        TrainerNow+=.2f;f.G.UpdateDrillTargets(TrainerNow);Require(f.Hit(&f.Shock)==0,"capture reused preceding shot");
+        f.Shock.Mode=1;f.Shot();Require(f.Hit(&f.Shock)==0,"shock alternate fire counted");
+    } else if(name=="spawn_geometry"){
+        Fixture f;
+        for(int i=0;i<=100;++i){f.G.Schedule.Roll=float(i)/100.f;f.G.ActivateDrillTarget(TrainerNow);float radius=std::sqrt(f.T.Position.X*f.T.Position.X+f.T.Position.Y*f.T.Position.Y);Require(radius<=320.01f&&radius<=1500.f*500.f/2154.f,"flak spawn farther than half a dodge");}
+        Fixture shock(true);Require(shock.T.Position.X==1800.f,"carrier did not start at far end");
+    } else if(name=="evasive_sequence"){
+        Fixture f(true);f.G.Schedule.Roll=.2f;f.T.ActionReady=false;
+        TrainerNow=f.G.NextDrillAction;f.G.UpdateDrillTargets(TrainerNow);
+        Require(!f.T.Crouched&&!f.G.bDrillDodgeQueued&&f.T.Dodges==0,"landing recovery consumed the pending crouch choice");
+        f.T.ActionReady=true;TrainerNow=f.G.NextDrillAction;f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.T.Crouched&&f.G.bDrillDodgeQueued&&f.T.Dodges==0,"carrier omitted selected crouch feint");
+        TrainerNow=f.G.CrouchEndTime[0];f.G.UpdateDrillTargets(TrainerNow);
+        Require(!f.T.Crouched&&f.T.Dodges==0,"carrier dodged before completing crouch feint");
+        TrainerNow=f.G.NextDrillAction;f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.T.Dodges==1&&!f.T.Crouched&&!f.G.bDrillDodgeQueued,"crouch feint did not lead into dodge");
+        f.T.DodgeAllowed=false;f.G.Schedule.Roll=.8f;TrainerNow=f.G.NextDrillAction;f.G.UpdateDrillTargets(TrainerNow);
+        Require(f.G.bDrillDodgeQueued&&f.G.NextDrillAction-TrainerNow<=.161f,"native cooldown caused a long skipped dodge");
+        f.T.DodgeAllowed=true;f.G.Schedule.Roll=.1f;TrainerNow=f.G.NextDrillAction;f.G.UpdateDrillTargets(TrainerNow);
+        Require(!f.G.bDrillDodgeQueued&&!f.T.Crouched&&f.T.Dodges==3,"cooldown retry restarted crouch loop instead of dodging");
+        Require(f.T.Feints>1,"carrier did not refresh lateral approach");
+        Fixture flak;flak.G.Schedule.Roll=.2f;TrainerNow=flak.G.NextDrillAction;
+        Require(TrainerNow<=1.26f,"flak stood idle too long after spawn");
+        flak.G.UpdateDrillTargets(TrainerNow);
+        Require(flak.T.Dodges==1&&!flak.T.Crouched&&flak.G.NextDrillAction-TrainerNow<=.65f,"flak did not prioritize frequent dodges");
+    } else return 2;
+}
+'''
+
+
+class AimTrainerDrillTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        compiler, cls.environment, msvc = find_compiler()
+        cls.temporary = tempfile.TemporaryDirectory(prefix="ncp-drills-")
+        cls.addClassCleanup(cls.temporary.cleanup)
+        directory = Path(cls.temporary.name)
+        headers = [PLUGIN / p for p in ("Source/Public/NCAimTrainerDrillPolicy.h", "Source/Private/NCAimTrainerScenarioPolicy.h", "Source/Private/NCAimTrainerScoring.h")]
+        drills = (PLUGIN / "Source/Private/NCAimTrainerDrills.cpp").read_text()
+        game = (PLUGIN / "Source/Private/NCAimTrainerGame.cpp").read_text()
+        signatures = ["void ANCAimTrainerGame::" + name for name in ("QueueFlakHitFeedback", "FlushFlakHitFeedback", "PublishDrillStatus", "UpdateDrillShots", "ActivateDrillTarget", "RetireDrillTarget", "UpdateDrillTargets")]
+        source = directory / "drills.cpp"
+        source.write_text("\n".join([*(f'#include "{p.as_posix()}"' for p in headers), ADAPTER,
+            *(native_function(drills, s) for s in signatures), native_function(drills, "float ANCAimTrainerGame::RecordDrillHit"),
+            native_function(game, "void ANCAimTrainerGame::UpdateShotCount"), CASES]))
+        cls.executable = directory / ("drills.exe" if os.name == "nt" else "drills")
+        command = ([compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source), "/Fe:" + str(cls.executable)] if msvc else
+                   [compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(cls.executable)])
+        result = subprocess.run(command, cwd=directory, env=cls.environment, capture_output=True, text=True)
+        if result.returncode:
+            raise AssertionError(result.stdout + result.stderr)
+
+    def run_case(self, case):
+        result = subprocess.run([str(self.executable), case], env=self.environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+for _case in ("clock_domains", "flak_threshold", "flak_feedback_group", "flak_feedback_late_pellet", "flak_feedback_rejections", "flak_feedback_retire_early", "flak_feedback_scope", "flak_attempts", "flak_identity", "shock_streak", "shock_capture", "spawn_geometry", "evasive_sequence"):
+    setattr(AimTrainerDrillTests, "test_" + _case, lambda self, case=_case: self.run_case(case))
