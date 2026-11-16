@@ -37,6 +37,7 @@
 #include "NCAccuracyStatsReplicator.h"
 #include "NCICTFFlagLiftGuard.h"
 #include "NCSACTFPickupOpening.h"
+#include "NCCTFSpawnDebug.h"
 #include "NCPlusCTFOTInfo.h"
 #include "NCPlusCTFRatingSystem.h"
 #include "NCEloUploader.h"
@@ -2278,7 +2279,33 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 	return StockStart;
 }
 
-APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
+void ANCPlusCTFGameMode::GetSpawnDebugSnapshot(AController* Player, TArray<FNCCTFSpawnDebugEntry>& Out)
+{
+	Out.Reset();
+	if (!HasAuthority() || GetMatchState() != MatchState::WaitingToStart) { return; }
+	AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
+	if (!PS || PS->bOnlySpectator || !PS->Team || PS->Team->TeamIndex > 1) { return; }
+	if (bSpawnUseNewCTFSelection && (!bIsInstagib || CountSpawnSystemCompetitors() > SpawnSystemThreshold))
+	{
+		ChooseNewCTFPlayerStart(Player, &Out);
+		return;
+	}
+	// Do not claim NewCTF restrictions apply to stock/legacy selection. Avoid
+	// running either picker here: they can consume random choices/history.
+	if (!bSpawnPoolsBuilt) { BuildTeamSpawnPools(); }
+	const TArray<TWeakObjectPtr<APlayerStart>>& Pool = PS->Team->TeamIndex == 0 ? Team0Spawns : Team1Spawns;
+	for (const TWeakObjectPtr<APlayerStart>& Start : Pool)
+	{
+		if (!Start.IsValid()) { continue; }
+		FNCCTFSpawnDebugEntry Entry;
+		Entry.Start = Start.Get();
+		Entry.State = 4;
+		Entry.Reason = bSpawnUseNewCTFSelection ? 14 : 15;
+		Out.Add(Entry);
+	}
+}
+
+APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player, TArray<FNCCTFSpawnDebugEntry>* Debug)
 {
 	AUTPlayerState* SpawnPS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
 	if (!SpawnPS || !SpawnPS->Team || SpawnPS->Team->TeamIndex > 1 || !GetWorld())
@@ -2366,7 +2393,7 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 	}
 	auto LogEmergencySpawn = [&](APlayerStart* Selected, const TCHAR* System)
 	{
-		if (bRelaxedTeamCycle || bRelaxedPreviousSpawn)
+		if (!Debug && (bRelaxedTeamCycle || bRelaxedPreviousSpawn))
 		{
 			UE_LOG(LogGameMode, Warning,
 				TEXT("NCPlusCTF spawn emergency: %s(T%d) -> %s | system=%s reason=%s previousRelaxed=%s cycleRelaxed=%s last=%s lastLocation=%s chosenLocation=%s radius=%.0f"),
@@ -2397,6 +2424,8 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
 	{
 		AController* OtherController = It->Get();
+		// Preview a respawn, so the inspected player's current pawn is absent.
+		if (Debug && OtherController == Player) { continue; }
 		AUTPlayerState* OtherPS = OtherController ? Cast<AUTPlayerState>(OtherController->PlayerState) : nullptr;
 		AUTCharacter* OtherChar = OtherController ? Cast<AUTCharacter>(OtherController->GetPawn()) : nullptr;
 		if (!OtherPS || OtherPS->bOnlySpectator || OtherPS->bIsInactive || !OtherPS->Team || OtherPS->Team->TeamIndex > 1
@@ -2585,6 +2614,39 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 		bForcedThreatenedSpawn = LowestThreat > 0;
 	}
 
+	// Optional diagnostics observe the same filtered candidate set. They never
+	// commit a spawn, advance the team queue, or relax a gameplay restriction.
+	if (Debug)
+	{
+		Debug->Reset();
+		for (int32 Index = 0; Index < Pool.Num(); ++Index)
+		{
+			APlayerStart* Candidate = Pool[Index].Get();
+			FNCCTFSpawnDebugEntry Entry;
+			Entry.Start = Candidate;
+			if (!Candidates.Contains(Candidate))
+			{
+				Entry.State = 2;
+				Entry.Reason = IsPreviousSpawn(Candidate) ? 12
+					: (Index >= EligibleCount && !bRelaxedTeamCycle ? 11 : 13);
+			}
+			Debug->Add(Entry);
+		}
+	}
+	auto RecordDebug = [Debug](APlayerStart* Start, uint8 State, int32 Reason)
+	{
+		if (!Debug || !Start) { return; }
+		for (FNCCTFSpawnDebugEntry& Entry : *Debug)
+		{
+			if (Entry.Start == Start)
+			{
+				Entry.State = State;
+				if (Reason >= 0) { Entry.Reason = Reason; }
+				return;
+			}
+		}
+	};
+
 	// Rejection counters follow NewCTF's documented order, followed by NCP's
 	// last-killer and robbed-base protections.
 	int32 EnemyVisionBlocked = 0;
@@ -2597,7 +2659,7 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 	int32 RobbedBlocked = 0;
 	APlayerStart* Primary = nullptr;
 
-	for (int32 Index = 0; Index < Candidates.Num() && !Primary; ++Index)
+	for (int32 Index = 0; Index < Candidates.Num() && (!Primary || Debug); ++Index)
 	{
 		APlayerStart* Candidate = Candidates[Index];
 		if (!Candidate)
@@ -2688,9 +2750,10 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 			RejectReason = 9;
 		}
 
+		RecordDebug(Candidate, RejectReason == 0 ? 0 : 1, RejectReason);
 		switch (RejectReason)
 		{
-			case 0: Primary = Candidate; break;
+			case 0: if (!Primary) { Primary = Candidate; } break;
 			case 1: ++EnemyVisionBlocked; break;
 			case 2: ++EnemyRangeBlocked; break;
 			case 3: ++FriendlyVisionBlocked; break;
@@ -2705,7 +2768,7 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 
 	if (Primary)
 	{
-		if (bLogSpawnChoices)
+		if (bLogSpawnChoices && !Debug)
 		{
 			UE_LOG(LogGameMode, Warning,
 				TEXT("NCPlusCTF pick: %s(T%d) -> %s | system=primary cycle=%d/%d blocked=evis:%d enemy:%d fvis:%d friend:%d carrier:%d flag:%d killer:%d robbed:%d previousExcluded=%d"),
@@ -2714,6 +2777,7 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 				CarrierBlocked, FlagBlocked, KillerBlocked, RobbedBlocked, PreviousExcluded);
 		}
 		LogEmergencySpawn(Primary, TEXT("primary"));
+		RecordDebug(Primary, 3, -1);
 		return Primary;
 	}
 
@@ -2759,14 +2823,14 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 	const TCHAR* FallbackSystem = bSpawnSecondaryEnabled ? TEXT("secondary") : TEXT("stock-rating");
 	if (Secondary)
 	{
-		if (bForcedThreatenedSpawn)
+		if (bForcedThreatenedSpawn && !Debug)
 		{
 			UE_LOG(LogGameMode, Warning,
 				TEXT("NCPlusCTF spawn emergency: %s(T%d) -> %s | system=%s reason=no-combat-safe-start candidates=%d threatTier=%d previousRelaxed=%s cycleRelaxed=%s"),
 				*SpawnPS->PlayerName, TeamIndex, *Secondary->GetName(), FallbackSystem, Candidates.Num(), int32(LowestThreat),
 				bRelaxedPreviousSpawn ? TEXT("true") : TEXT("false"), bRelaxedTeamCycle ? TEXT("true") : TEXT("false"));
 		}
-		if (bLogSpawnChoices)
+		if (bLogSpawnChoices && !Debug)
 		{
 			UE_LOG(LogGameMode, Warning,
 				TEXT("NCPlusCTF pick: %s(T%d) -> %s | system=%s weight=%.0f cycle=%d/%d primaryBlocked=evis:%d enemy:%d fvis:%d friend:%d carrier:%d flag:%d killer:%d robbed:%d previousExcluded=%d"),
@@ -2776,6 +2840,7 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 		}
 		LogEmergencySpawn(Secondary, FallbackSystem);
 	}
+	RecordDebug(Secondary, 3, -1);
 	return Secondary;
 }
 
@@ -3824,6 +3889,41 @@ void ANCPlusCTFGameMode::PickMostCoolMoments(bool bClearCoolMoments, int32 CoolM
 
 // ── Match State Handlers ─────────────────────────────────────────────
 
+void ANCPlusCTFGameMode::ApplyRegulationRespawnWait()
+{
+	if (!HasAuthority()) { return; }
+	const bool bSACTF = NCSACTFPickupOpening::IsSACTF(this);
+	const int32 MaxP = GameSession ? GameSession->MaxPlayers : 10;
+	const bool bFixedRespawn = bSACTF || bIsInstagib;
+	const float WantRespawn = bFixedRespawn ? 1.f
+		: ((MaxP <= CTFSmallGameMaxPlayers) ? CTFRespawnWaitSmall : CTFRespawnWait);
+	RespawnWaitTime = WantRespawn;
+	if (CTFGameState)
+	{
+		CTFGameState->SetRespawnWaitTime(WantRespawn);
+		if (bFixedRespawn)
+		{
+			// Stock warmup deaths leave a 2s per-player floor. Clear it once on
+			// entry to live saCTF/iCTF, otherwise max(game, player) defeats the 1s rule.
+			// Reflect the field to preserve compatibility with retail UT DLL layouts.
+			for (APlayerState* PlayerState : CTFGameState->PlayerArray)
+			{
+				AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState);
+				UFloatProperty* Wait = NCPlusReflection::FindCachedProperty<UFloatProperty>(PS, TEXT("RespawnWaitTime"));
+				if (Wait && Wait->GetPropertyValue_InContainer(PS) != 0.f)
+				{
+					Wait->SetPropertyValue_InContainer(PS, 0.f);
+					PS->OnRespawnWaitReceived();
+					PS->ForceNetUpdate();
+				}
+			}
+			CTFGameState->ForceNetUpdate();
+		}
+	}
+	UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF respawn: MaxPlayers=%d -> %.2fs (saCTF=%d iCTF=%d; <=%d uses %.2f, else %.2f)"),
+		MaxP, WantRespawn, bSACTF ? 1 : 0, bIsInstagib ? 1 : 0, CTFSmallGameMaxPlayers, CTFRespawnWaitSmall, CTFRespawnWait);
+}
+
 void ANCPlusCTFGameMode::HandleMatchHasStarted()
 {
 	// Preserve the locked-ready identity/team snapshot into live play. A hard
@@ -3948,24 +4048,10 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		MatchStartWorldTime = GetWorld()->GetTimeSeconds();
 		MatchFullDurationSeconds = (bHasHalftime ? float(TimeLimit) * 2.f : float(TimeLimit)) * 60.f;
 
-		// Apply the regulation respawn wait, keyed on match size so bot-hosted AND
-		// hub-hosted (ruleset) games both get it automatically from MaxPlayers - no
-		// ?RespawnWait option required. Small games (1v1: MaxPlayers <=
-		// CTFSmallGameMaxPlayers) use CTFRespawnWaitSmall (1.0s); larger use
-		// CTFRespawnWait (1.5s). This is the authoritative value: the respawn
-		// countdown reads GameState->RespawnWaitTime (MAX'd with the per-player
-		// field, which CTF never raises in-match), and this runs after InitGame's
-		// ?RespawnWait parse so it wins. Supports fractional values; overtime
-		// escalation (DefaultTimer) still ramps respawn up from here.
-		const int32 MaxP = GameSession ? GameSession->MaxPlayers : 10;
-		const float WantRespawn = (MaxP <= CTFSmallGameMaxPlayers) ? CTFRespawnWaitSmall : CTFRespawnWait;
-		RespawnWaitTime = WantRespawn;
-		if (CTFGameState)
-		{
-			CTFGameState->SetRespawnWaitTime(WantRespawn);
-		}
-		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF respawn: MaxPlayers=%d -> %.2fs (<=%d uses %.2f, else %.2f)"),
-			MaxP, WantRespawn, CTFSmallGameMaxPlayers, CTFRespawnWaitSmall, CTFRespawnWait);
+		// Apply after BP/URL defaults and the first live reset. saCTF/iCTF always
+		// starts regulation at 1s; other CTF modes retain their configured policy.
+		// This once-per-map block must not reset live penalties at halftime or OT.
+		ApplyRegulationRespawnWait();
 
 		AUTGameState* GS = GetGameState<AUTGameState>();
 		if (GS)

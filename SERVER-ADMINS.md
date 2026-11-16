@@ -1049,3 +1049,30 @@ admins understand what's player‑side vs server‑side. None of these are serve
 - [ ] Net rate: `[ElimPlus] NetSpeed` for the NetcodePlus gamemodes, keep `SetNetSpeed` on stock+`NCWepMut`; `Engine.ini` ceilings ≥ that — §3.3, §8
 - [ ] Replay server configured if you want end‑of‑match cap replays — §8
 ```
+
+
+### CTF warmup spawn markers
+
+After RCON authentication, run `rconexec ncp.SpawnBlocks on` during warmup.
+Markers are visible only to authenticated RCON admins, each from their own
+player's perspective (or the player they are spectating). To inspect a specific
+player, use `rconexec ncp.SpawnBlocks on <PlayerID>`. Disable with
+`rconexec ncp.SpawnBlocks off`. This is an in-map overlay, not a spawn console dump.
+
+Red means excluded from the candidate set; amber means rejected by the primary
+pass but available as fallback; green means eligible; cyan is the predicted
+choice. Labels show the player, start name and rejection reason. Gray indicates
+that the stock/legacy selector is active and NewCTF restrictions do not apply
+(including iCTF at or below SpawnSystemThreshold). The preview treats the
+inspected player's current pawn as absent, as it would be on their respawn.
+
+The server refreshes at 4 Hz. The overlay ends when warmup ends, when disabled,
+on admin logout/deauthentication or map travel. It does not spawn players,
+advance spawn rotation/history or change which selector is active. Ordinary
+spawn selection stops at its first eligible primary as before; diagnostics
+evaluate remaining starts only to display their status. Shipping clients use
+runtime line/text components; no editor-only DrawDebug dependency is required.
+
+saCTF and iCTF now use a fixed 1-second regulation respawn wait at first live
+start, clearing the stale per-player warmup delay at that transition. Ordinary
+weapon CTF keeps its configured size-based delays. Overtime rules are unchanged.

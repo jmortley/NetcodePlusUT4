@@ -167,8 +167,14 @@ struct StockGameMode {
     AActor* ChoosePlayerStart_Implementation(AController*) { return nullptr; }
 };
 struct FGameSession { int32 MaxPlayers=16; };
+// PRODUCTION_DEBUG_TYPE
+namespace MatchState { const FName WaitingToStart="WaitingToStart"; }
 struct ANCPlusCTFGameMode : StockGameMode {
     using Super = StockGameMode;
+    bool Authority=true;
+    bool HasAuthority() const { return Authority; }
+    FName CurrentState="InProgress";
+    FName GetMatchState() const { return CurrentState; }
     // PRODUCTION_HISTORY
     TMap<TWeakObjectPtr<AController>, FRecentSpawns> PlayerRecentSpawns;
     TMap<TWeakObjectPtr<APlayerStart>, float> SpawnLastUsedTime;
@@ -204,7 +210,8 @@ struct ANCPlusCTFGameMode : StockGameMode {
     void RestartPlayerAtPlayerStart(AController*, AActor*);
     void CommitUsedSpawn(AController*, APlayerStart*);
     AActor* ChoosePlayerStart_Implementation(AController*);
-    APlayerStart* ChooseNewCTFPlayerStart(AController*);
+    APlayerStart* ChooseNewCTFPlayerStart(AController*, TArray<FNCCTFSpawnDebugEntry>* = nullptr);
+    void GetSpawnDebugSnapshot(AController*,TArray<FNCCTFSpawnDebugEntry>&);
     AActor* ChooseLegacyPlayerStartNative(AController*);
 };
 // PRODUCTION_FUNCTIONS
@@ -559,10 +566,65 @@ void LegacyFlagOutRotation() {
             "legacy flag-out exclusion advanced rotation in the wrong modes");
     }
 }
+void DebugSnapshot() {
+    Fixture f;f.Game.CurrentState=MatchState::WaitingToStart;
+    f.Commit(f.Victim,f.A);f.Commit(f.Teammate,f.C);f.Commit(f.Teammate,f.B);
+    const auto before=f.Game.Team0Spawns;
+    const auto history=f.Game.PlayerRecentSpawns.Find(&f.Victim)->Last.Get();
+    const int rotation=f.Game.RobbedSpawnRotation[0];
+    APlayerStart* expected=f.Choose();Logs.clear();
+    TArray<FNCCTFSpawnDebugEntry> rows;f.Game.GetSpawnDebugSnapshot(&f.Victim,rows);
+    Require(rows.Num()==3,"snapshot must include every own-team start");
+    auto row=[&](APlayerStart* s)->const FNCCTFSpawnDebugEntry& {
+        for(const auto& r:rows) if(r.Start==s) return r;
+        std::abort();
+    };
+    Require(row(&f.A).State==2 && row(&f.A).Reason==12,"previous spawn not marked blocked");
+    Require(row(&f.B).State==2 && row(&f.B).Reason==11,"recent team spawn not marked blocked");
+    Require(row(expected).State==3,"snapshot must choose the same primary as the real picker");
+    Require(f.Game.Team0Spawns==before && f.Game.PlayerRecentSpawns.Find(&f.Victim)->Last.Get()==history
+        && f.Game.RobbedSpawnRotation[0]==rotation,"debug altered live selection history");
+    Require(Logs.empty(),"map-only preview must not emit per-spawn logs");
+    f.Game.CurrentState="InProgress";f.Game.GetSpawnDebugSnapshot(&f.Victim,rows);
+    Require(rows.Num()==0,"live match retained diagnostic snapshot");
+    f.Game.CurrentState=MatchState::WaitingToStart;f.Game.Authority=false;
+    f.Game.GetSpawnDebugSnapshot(&f.Victim,rows);
+    Require(rows.Num()==0,"client generated authoritative snapshot");
+}
+void DebugFallback() {
+    Fixture f;f.Game.CurrentState=MatchState::WaitingToStart;f.Game.SpawnMinCycleDistance=0;
+    f.BlockPrimary();APlayerStart* expected=f.Choose();Logs.clear();
+    TArray<FNCCTFSpawnDebugEntry> rows;f.Game.GetSpawnDebugSnapshot(&f.Victim,rows);
+    for(const auto& row:rows) {
+        Require(row.Reason==2,"primary proximity reason lost");
+        Require(row.State==(row.Start==expected ? 3 : 1),"primary failure confused with hard exclusion");
+    }
+    Require(Logs.empty(),"fallback debug generated spawn logs");
+    f.Game.Competitors=2;f.Game.GetSpawnDebugSnapshot(&f.Victim,rows);
+    for(const auto& row:rows) Require(row.State==4 && row.Reason==14,"small iCTF must show inactive NewCTF filters");
+    Require(f.Game.StockCalls==0,"debug invoked stock picker");
+    f.Game.bSpawnUseNewCTFSelection=false;f.Game.GetSpawnDebugSnapshot(&f.Victim,rows);
+    for(const auto& row:rows) Require(row.State==4 && row.Reason==15,"legacy selector was mislabeled");
+    Require(f.Game.LegacyCalls==0,"debug invoked legacy picker");
+}
+void DebugAllCandidates() {
+    Fixture f;f.Game.CurrentState=MatchState::WaitingToStart;f.Game.SpawnMinCycleDistance=0;
+    f.Game.World.Controllers.push_back({&f.Enemy});
+    f.EnemyPawn.Location=f.C.Location;f.Game.SpawnEnemyHardRadius=100.f;
+    TArray<FNCCTFSpawnDebugEntry> rows;f.Game.GetSpawnDebugSnapshot(&f.Victim,rows);
+    Require(rows[0].State==3 && rows[1].State==0,"debug changed first-primary choice");
+    Require(rows[2].State==1 && rows[2].Reason==2,"starts after first eligible spawn were not evaluated");
+    f.Game.bIsInstagib=false;f.Game.GetSpawnDebugSnapshot(&f.Victim,rows);
+    Require(rows[2].State==2 && rows[2].Reason==13,"weapon CTF threat exclusion not shown");
+}
+
 int main(int argc, char** argv) {
     if (argc!=2) return 2;
     const std::string which=argv[1];
     if (which=="acrony") Acrony();
+    else if (which=="debug-snapshot") DebugSnapshot();
+    else if (which=="debug-fallback") DebugFallback();
+    else if (which=="debug-all") DebugAllCandidates();
     else if (which=="secondary") Secondary();
     else if (which=="positions") Positions();
     else if (which=="invalid-history") InvalidHistory();
