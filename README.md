@@ -109,6 +109,7 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
   - `PickBalancedTeam` override + full pre-match `TeamBalancer` rebalance at `HandleMatchHasStarted` (fires after engine bot-fill so the pool is complete). Respects `?BalanceTeams=true/false` URL flag.
   - Custom Canvas-drawn pre-match team-preview overlay with team rosters + ELOs + team-strength totals (replaces unreliable scoreboard auto-show).
   - Bot-match cap (±5 ELO) for matches where the human never faced human opposition. Skips never-played connections (e.g. plugin-mismatch kicks) at flush.
+  - **Recentre guard** (`ncp.ElimPlusRecentre`, default on) — the per-round blend is not zero-sum and used to sink a hub's whole ladder (~100 points a month for regulars). At match end each rated player now gets a small per-round step (capped at 0.3) that holds the hub's active established pool at the 1400 seed. A hub whose ladder had already sunk gets a one-time baseline by itself: one whole-number shift, recorded in Mods.db and applied when ratings are read, so stored ratings are never rewritten. See SERVER-ADMINS §12.3.
   - Lifetime PPR persistence (`TotalPoints` + `RoundsPlayed` columns in `NCRatingElimPlus`, queryable via sqlite).
   - Match-winning-kill instant replay via `ClientPlayInstantReplay` with conditional 7s EndGame delay (skipped in standalone PIE).
   - Hidden-while-respawning portrait visuals + last-man-standing pulse.

@@ -23,6 +23,53 @@
 DEFINE_LOG_CATEGORY_STATIC(LogElimPlusRating, Log, All);
 
 // =============================================================================
+// Recentre guard.
+//
+// The per-round blend is not zero-sum. The [0,1] clip on the blended score, and
+// newcomers being placed at 10-20x a regular's weight, take points out of the
+// pool every round. Measured on the stored round history of four hub databases
+// (2026-11, 124k rounds): 0.2-0.3 points per player per round, month after month.
+// Regulars lost ~100 points a month, and anyone who stopped playing was left
+// stranded above the players still playing, so the ordering degraded as well
+// (rank correlation of rating with points-per-round 0.64-0.77 on the older tables).
+//
+// The rule: at match end every rated human gets, for each round they played, one
+// small step toward a pool average of kDefaultRating. The pool is the established
+// players (kElimPlusRecentreEstablishedRounds or more) seen in the last
+// kElimPlusRecentreActiveDays, read from Mods.db so it spans every instance of the
+// hub. The step is the same for everyone in the match and scales with rounds
+// played: it offsets each player's own leak, leaves players who are not playing
+// where they are, and cannot be farmed by joining for the last round. Replayed on
+// the same real rounds it held the active pool at ~1395 with rank correlation
+// 0.94-0.96.
+//
+// The step alone must not be left to chase a pool that had already sunk hundreds
+// of points when this build arrived: on the real rounds that handed the missing
+// points to whoever plays most (the busiest players ended about 100 points above
+// the rest of the established pool). Such a hub first gets a one-time BASELINE:
+// one whole-number shift, measured once from its established pool and recorded
+// in NCRatingElimPlusBaseline (ResolveElimPlusBaseline).
+//
+// The shift is added when a rating is read and taken off again when it is
+// written (ElimPlusLiveFromStored / ElimPlusStoredFromLive). The stored Rating
+// column is never rewritten, and that is what lets the hub do this by itself.
+// A match instance that has players in it outlives a hub restart
+// (AUTGameMode::DefaultTimer only exits an EMPTY orphan), so an older build can
+// still be finishing a match, on ratings it loaded before the update, when the
+// first instance of this build starts. Had the rows been rewritten, that match
+// would save its players hundreds of points low for good, and a later match on
+// the same old instance would be saved correctly, with nothing in the table to
+// tell the two apart. A stored value means the same thing to every build, so
+// there is nothing to go stale: an older build simply shows the stored value.
+// NCRatingElimPlusLive is a view of the ratings as this build shows them, for
+// admins who read Mods.db.
+// =============================================================================
+static TAutoConsoleVariable<int32> CVarElimPlusRecentre(
+	TEXT("ncp.ElimPlusRecentre"), 1,
+	TEXT("Server-side ElimPlus rating recentre guard. 1 (default): at match end each rated player gets a small per-round step that holds the hub's active pool at the 1400 seed, and a hub whose ladder had already sunk gets a one-time baseline shift (recorded in Mods.db and applied when ratings are read; stored ratings are not rewritten). 0: no step and no new baseline; a baseline already recorded still applies (see SERVER-ADMINS)."),
+	ECVF_Default);
+
+// =============================================================================
 // Per-round capture for the upload's rounds[] array. ut4stats persists these and
 // re-runs a Python port of Tron's TeamGlicko2 over the real round history with
 // tuned params (kCarryWeight / kPerfSlope / kDefaultRD / ...) — backtesting the
@@ -125,6 +172,32 @@ struct FElimPlusRatingSystemImpl
 	 *  rounds[] array in BuildResultPayload. Cleared each SnapshotMatchStart so it
 	 *  holds exactly this match's rounds. */
 	TArray<FElimPlusRoundRecord> RoundLog;
+
+	// ---- Recentre guard ----
+	/** This map load read the hub's baseline from Mods.db: a row, or positively no
+	 *  row. False when that read (or the write that sets a first baseline) failed:
+	 *  the map then runs on the stored ratings as they are, with the guard off.
+	 *  Settled before the first rating is loaded and not changed after it. */
+	bool bBaselineKnown = false;
+
+	/** The hub has a baseline row (bBaselineKnown, and the read found one). The
+	 *  recentre step only runs on such a hub: a guard switched on in the middle of
+	 *  a map, on a hub that has not been measured yet, waits for the next map load
+	 *  instead of chasing a pool that may have sunk. */
+	bool bHasBaseline = false;
+
+	/** The hub's baseline in whole rating points: live rating = stored rating +
+	 *  this, for every row that has played a round. 0 while the hub has none.
+	 *  Fixed for the map load, so a match never loads under one shift and saves
+	 *  under another. */
+	int32 BaselineShift = 0;
+
+	/** Recentre points added to each player by this match's flush, and the per-round
+	 *  step they came from. Emitted by BuildResultPayload so ut4stats can reconcile
+	 *  its round-by-round replay with the hub's match delta. Reset each
+	 *  SnapshotMatchStart and at the top of each flush. */
+	TMap<FString, double> RecentreThisMatch;
+	double RecentreStepThisMatch = 0.0;
 };
 
 namespace
@@ -151,6 +224,172 @@ namespace
 	{
 		TArray<FDatabaseRow> Discard;
 		return ExecSql(World, Sql, Discard);
+	}
+
+	// ---- Recentre guard tunables (rationale in the block comment at the top of this file).
+	// ut4stats mirrors them in browse/elimplus_drift.py (RECENTRE_*) for its backtest: keep both in sync.
+	const double kElimPlusRecentreGainPerRound      = 0.03;  // share of the gap to the seed closed per rated round
+	const double kElimPlusRecentreCapPerRound       = 0.3;   // rating points per rated round, either direction
+	const int32  kElimPlusRecentreMinPoolPlayers    = 10;    // no step until the pool is at least this many players
+	const int32  kElimPlusRecentreEstablishedRounds = 20;    // rounds before a player counts toward the pool
+	const int32  kElimPlusRecentreActiveDays        = 30;    // ...and how recently they must have played
+
+	/** Rating points to add per rated round, from the hub's active-pool mean and size. */
+	double ElimPlusRecentreStepPerRound(double PoolMean, int32 PoolPlayers)
+	{
+		if (PoolPlayers < kElimPlusRecentreMinPoolPlayers)
+		{
+			return 0.0;
+		}
+		const double Step = kElimPlusRecentreGainPerRound * (TeamGlicko2::kDefaultRating - PoolMean);
+		return FMath::Clamp(Step, -kElimPlusRecentreCapPerRound, kElimPlusRecentreCapPerRound);
+	}
+
+	/** The rating the game works with, from the Rating column of a row. A row that
+	 *  has never played a round is the untouched 1400 seed and takes no shift. */
+	double ElimPlusLiveFromStored(double StoredRating, int32 RoundsPlayed, int32 BaselineShift)
+	{
+		return (RoundsPlayed > 0) ? StoredRating + static_cast<double>(BaselineShift) : StoredRating;
+	}
+
+	/** The inverse, for the row a flush writes. RoundsPlayed must be the value
+	 *  written in that same row, so that the next load takes the same branch. */
+	double ElimPlusStoredFromLive(double LiveRating, int32 RoundsPlayed, int32 BaselineShift)
+	{
+		return (RoundsPlayed > 0) ? LiveRating - static_cast<double>(BaselineShift) : LiveRating;
+	}
+
+	/** The hub's baseline row. Returns false when the read itself failed; a hub
+	 *  without a baseline is a successful read with bOutHasRow false. COUNT(*)
+	 *  leads because the engine wrapper drops NULL columns, and the MAX()s are
+	 *  NULL when there is no row. */
+	bool ReadElimPlusBaseline(UWorld* World, bool& bOutHasRow, int32& OutShift, int32& OutPoolPlayers, double& OutPoolMean)
+	{
+		bOutHasRow     = false;
+		OutShift       = 0;
+		OutPoolPlayers = 0;
+		OutPoolMean    = 0.0;
+
+		const FString ReadSql =
+			TEXT("SELECT COUNT(*), MAX(Shift), MAX(PoolPlayers), MAX(PoolMean) FROM NCRatingElimPlusBaseline WHERE Id = 1;");
+		TArray<FDatabaseRow> Rows;
+		if (!ExecSql(World, ReadSql, Rows) || Rows.Num() == 0 || Rows[0].Text.Num() < 1)
+		{
+			return false;
+		}
+		if (FCString::Atoi(*Rows[0].Text[0]) <= 0)
+		{
+			return true;
+		}
+		if (Rows[0].Text.Num() < 4)
+		{
+			return false;   // a row with an empty column: not one this build wrote, so not one to trust
+		}
+		bOutHasRow     = true;
+		OutShift       = FCString::Atoi(*Rows[0].Text[1]);
+		OutPoolPlayers = FCString::Atoi(*Rows[0].Text[2]);
+		OutPoolMean    = FCString::Atod(*Rows[0].Text[3]);
+		return true;
+	}
+
+	/** Settle this map load's baseline (rationale in the block comment at the top
+	 *  of this file). Sets the hub's baseline when it has none and the guard is
+	 *  enabled; otherwise reads what is there. Each statement is a single atomic
+	 *  one (the engine wrapper runs exactly one), so two instances doing this at
+	 *  the same moment agree: INSERT OR IGNORE lets one of them set the row and
+	 *  both read that row back. Must run before the first rating of the map load
+	 *  is read. */
+	void ResolveElimPlusBaseline(UWorld* World, FElimPlusRatingSystemImpl& Impl)
+	{
+		Impl.bBaselineKnown = false;
+		Impl.bHasBaseline   = false;
+		Impl.BaselineShift  = 0;
+
+		ExecSqlNoRows(World,
+			TEXT("CREATE TABLE IF NOT EXISTS NCRatingElimPlusBaseline (")
+			TEXT("  Id           INTEGER PRIMARY KEY NOT NULL,")
+			TEXT("  Shift        INTEGER NOT NULL,")
+			TEXT("  PoolPlayers  INTEGER NOT NULL,")
+			TEXT("  PoolMean     REAL NOT NULL,")
+			TEXT("  CreatedUtc   INTEGER NOT NULL")
+			TEXT(");"));
+
+		const bool bGuardEnabled = CVarElimPlusRecentre.GetValueOnGameThread() != 0;
+		bool   bHasRow     = false;
+		int32  Shift       = 0;
+		int32  PoolPlayers = 0;
+		double PoolMean    = 0.0;
+		bool bRead   = ReadElimPlusBaseline(World, bHasRow, Shift, PoolPlayers, PoolMean);
+		bool bSetNow = false;
+		if (bRead && !bHasRow && bGuardEnabled)
+		{
+			// Measured ONCE, the first time the guard meets this hub, on the pool the
+			// guard steps on (established, seen recently); a hub too quiet for that
+			// falls back to every established player. A row is written even when
+			// there are too few to measure (new or reset ladder, tiny hub), with a
+			// shift of 0, so the question is never asked again: a baseline measured
+			// later, on the first ten players to become established, would move
+			// everyone by the noise of ten ratings. The guard holds the level from
+			// here, and an admin can delete the row to have it measured afresh.
+			// The shift is a whole number so that every instance, and SQL, read back
+			// exactly the same value (the wrapper hands REAL columns back as floats).
+			const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
+			const FString SetSql = FString::Printf(
+				TEXT("INSERT OR IGNORE INTO NCRatingElimPlusBaseline (Id, Shift, PoolPlayers, PoolMean, CreatedUtc) ")
+				TEXT("SELECT 1, CASE WHEN PoolPlayers >= %d THEN CAST(ROUND(%.1f - PoolMean) AS INTEGER) ELSE 0 END, ")
+				TEXT("PoolPlayers, COALESCE(PoolMean, 0.0), %lld FROM (")
+				TEXT("SELECT CASE WHEN Recent.N >= %d THEN Recent.N ELSE Everyone.N END AS PoolPlayers, ")
+				TEXT("CASE WHEN Recent.N >= %d THEN Recent.M ELSE Everyone.M END AS PoolMean FROM ")
+				TEXT("(SELECT COUNT(*) AS N, AVG(Rating) AS M FROM NCRatingElimPlus WHERE RoundsPlayed >= %d AND LastSeenUtc >= %lld) AS Recent, ")
+				TEXT("(SELECT COUNT(*) AS N, AVG(Rating) AS M FROM NCRatingElimPlus WHERE RoundsPlayed >= %d) AS Everyone);"),
+				kElimPlusRecentreMinPoolPlayers,
+				TeamGlicko2::kDefaultRating,
+				static_cast<long long>(NowUtc),
+				kElimPlusRecentreMinPoolPlayers,
+				kElimPlusRecentreMinPoolPlayers,
+				kElimPlusRecentreEstablishedRounds,
+				static_cast<long long>(NowUtc - static_cast<int64>(kElimPlusRecentreActiveDays) * 86400),
+				kElimPlusRecentreEstablishedRounds);
+			// A failed write proves nothing about the row, so the read-back only
+			// counts after a write that ran.
+			bRead   = ExecSqlNoRows(World, SetSql) && ReadElimPlusBaseline(World, bHasRow, Shift, PoolPlayers, PoolMean);
+			bSetNow = bRead && bHasRow;
+		}
+
+		if (!bRead)
+		{
+			UE_LOG(LogElimPlusRating, Warning,
+				TEXT("Rating baseline unreadable (db busy?): this map runs on the stored ratings as they are, recentre guard off"));
+			return;
+		}
+
+		Impl.bBaselineKnown = true;
+		Impl.bHasBaseline   = bHasRow;
+		Impl.BaselineShift  = bHasRow ? Shift : 0;
+		const TCHAR* GuardState = bGuardEnabled ? TEXT("recentre guard ON") : TEXT("recentre guard OFF (ncp.ElimPlusRecentre 0)");
+		if (!bHasRow)
+		{
+			// Only reachable with the guard switched off: an enabled guard always leaves a row.
+			UE_LOG(LogElimPlusRating, Log, TEXT("No rating baseline for this hub; %s"), GuardState);
+		}
+		else if (PoolPlayers < kElimPlusRecentreMinPoolPlayers)
+		{
+			UE_LOG(LogElimPlusRating, Log,
+				TEXT("Rating baseline %+d (%s when the hub had %d established players, too few to measure one); %s"),
+				Shift, bSetNow ? TEXT("set just now,") : TEXT("set"), PoolPlayers, GuardState);
+		}
+		else if (bSetNow)
+		{
+			UE_LOG(LogElimPlusRating, Display,
+				TEXT("Rating baseline set for this hub: %+d, measured on %d established players averaging %.1f. The game now shows each stored rating %+d; the stored Rating column is not rewritten (NCRatingElimPlusLive shows the live values); %s"),
+				Shift, PoolPlayers, PoolMean, Shift, GuardState);
+		}
+		else
+		{
+			UE_LOG(LogElimPlusRating, Log,
+				TEXT("Rating baseline %+d (measured on %d established players averaging %.1f); %s"),
+				Shift, PoolPlayers, PoolMean, GuardState);
+		}
 	}
 }
 
@@ -259,6 +498,25 @@ bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 		}
 	}
 
+	// Recentre guard: settle the hub's baseline for this map load, before any
+	// rating is read (rationale in the block comment at the top of this file).
+	ResolveElimPlusBaseline(World, *Impl);
+
+	// For admins who read Mods.db: the ratings as the game shows them. The Rating
+	// column of NCRatingElimPlus itself stays as stored (StoredRating here). The
+	// view names v3 columns, so it waits for a table the probe confirmed as v3. To
+	// change its definition in a later build, DROP VIEW first: IF NOT EXISTS keeps
+	// whatever is there.
+	if (Impl->Schema == FElimPlusRatingSystemImpl::EDbSchema::V3)
+	{
+		ExecSqlNoRows(World,
+			TEXT("CREATE VIEW IF NOT EXISTS NCRatingElimPlusLive AS ")
+			TEXT("SELECT UniqueId, PlayerName, ")
+			TEXT("Rating + CASE WHEN RoundsPlayed > 0 THEN COALESCE((SELECT Shift FROM NCRatingElimPlusBaseline WHERE Id = 1), 0) ELSE 0 END AS Rating, ")
+			TEXT("RD, Sigma, RoundsPlayed, TotalPoints, TotalDamage, LastSeenUtc, PerfIndexEMA, PerfGames, Rating AS StoredRating ")
+			TEXT("FROM NCRatingElimPlus;"));
+	}
+
 	return bOk;
 }
 
@@ -269,6 +527,14 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 	// mid-session rename) — it's persisted at the next flush.
 	if (!PlayerName.IsEmpty()) { Impl->PlayerNameCache.Add(UniqueId, PlayerName); }
 	if (Impl->RatingCache.Contains(UniqueId)) return;
+
+	// InitDatabase could not settle the baseline (db busy at map load). Nobody has
+	// been loaded yet, so it can still be settled now; once a rating is in the
+	// cache the map keeps the shift it was read with.
+	if (!Impl->bBaselineKnown && Impl->RatingCache.Num() == 0)
+	{
+		ResolveElimPlusBaseline(World, *Impl);
+	}
 
 	const FString Esc = SqlEscape(UniqueId);
 
@@ -293,13 +559,16 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 			return 1;
 		}
 
-		const double Rating       = FCString::Atod(*Rows[0].Text[0]);
+		const double StoredRating = FCString::Atod(*Rows[0].Text[0]);
 		const double RD           = FCString::Atod(*Rows[0].Text[1]);
 		const double Sigma        = FCString::Atod(*Rows[0].Text[2]);
 		const double PerfIndexEMA = FCString::Atod(*Rows[0].Text[3]);
 		const int32  PerfGames    = FCString::Atoi(*Rows[0].Text[4]);
 		const double TotalPoints  = FCString::Atod(*Rows[0].Text[5]);
 		const int32  RoundsPlayed = FCString::Atoi(*Rows[0].Text[6]);
+		// Everything from here on (cache, scoreboard, balancer, upload) is the live
+		// rating; the flush takes the hub's baseline off again when it writes the row.
+		const double Rating       = ElimPlusLiveFromStored(StoredRating, RoundsPlayed, Impl->BaselineShift);
 
 		// v3 extras in a SEPARATE query so a missing migration degrades to defaults for
 		// damage/name instead of failing the whole load (InitDatabase warns when so).
@@ -324,8 +593,8 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 		Impl->RoundsPlayedCache.Add(UniqueId, RoundsPlayed);
 		Impl->TotalDamageCache.Add(UniqueId, TotalDamage);
 		if (PlayerName.IsEmpty() && !DbName.IsEmpty()) { Impl->PlayerNameCache.Add(UniqueId, DbName); }
-		UE_LOG(LogElimPlusRating, Log, TEXT("Loaded %s: Rating=%.1f RD=%.1f sigma=%.4f LifetimePPR=%.2f (%d rounds)"),
-			*UniqueId, Rating, RD, Sigma,
+		UE_LOG(LogElimPlusRating, Log, TEXT("Loaded %s: Rating=%.1f (stored %.1f) RD=%.1f sigma=%.4f LifetimePPR=%.2f (%d rounds)"),
+			*UniqueId, Rating, StoredRating, RD, Sigma,
 			(RoundsPlayed > 0) ? float(TotalPoints / RoundsPlayed) : 0.f, RoundsPlayed);
 		return 0;
 	};
@@ -419,6 +688,8 @@ void FElimPlusRatingSystem::SnapshotMatchStart()
 	Impl->ActiveHumansThisMatch.Empty();
 	Impl->HumansWithHumanOpposition.Empty();
 	Impl->RoundLog.Empty();
+	Impl->RecentreThisMatch.Empty();
+	Impl->RecentreStepThisMatch = 0.0;
 	Impl->bMatchActive = true;
 
 	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
@@ -627,6 +898,55 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 	int32 FailedCount    = 0;
 	int32 CappedCount    = 0;
 
+	// ---- Recentre guard (rationale in the block comment at the top of this file) ----
+	// The step needs the switch, a hub whose baseline this map load found in place,
+	// and a match that went through SnapshotMatchStart: bMatchActive makes a flush
+	// with no such match (or a second flush of the same one) step-free, because the
+	// step must never be applied twice.
+	Impl->RecentreThisMatch.Empty();
+	Impl->RecentreStepThisMatch = 0.0;
+	const bool bRecentre = Impl->bHasBaseline && Impl->bMatchActive && CVarElimPlusRecentre.GetValueOnGameThread() != 0;
+	TMap<FString, int32> RoundsThisMatch;
+	if (bRecentre)
+	{
+		// The hub's active pool as Mods.db holds it right now: every established
+		// player's row as last flushed, across all instances. This match's players
+		// are still at their pre-match values, which is fine for a pool average.
+		// COUNT(*) leads because the engine wrapper drops NULL columns and AVG() is
+		// NULL on an empty pool. The rows are stored ratings and every one of them
+		// has played, so the live pool mean is the stored one plus the baseline.
+		const FString PoolSql = FString::Printf(
+			TEXT("SELECT COUNT(*), AVG(Rating) FROM NCRatingElimPlus WHERE RoundsPlayed >= %d AND LastSeenUtc >= %lld;"),
+			kElimPlusRecentreEstablishedRounds,
+			static_cast<long long>(NowUtc - static_cast<int64>(kElimPlusRecentreActiveDays) * 86400));
+		TArray<FDatabaseRow> PoolRows;
+		if (ExecSql(World, PoolSql, PoolRows) && PoolRows.Num() > 0 && PoolRows[0].Text.Num() >= 2)
+		{
+			const int32  PoolPlayers = FCString::Atoi(*PoolRows[0].Text[0]);
+			const double PoolMean    = FCString::Atod(*PoolRows[0].Text[1]) + static_cast<double>(Impl->BaselineShift);
+			Impl->RecentreStepThisMatch = ElimPlusRecentreStepPerRound(PoolMean, PoolPlayers);
+			UE_LOG(LogElimPlusRating, Log,
+				TEXT("Recentre: pool mean %.1f over %d established players seen in the last %d days -> %+.3f per round"),
+				PoolMean, PoolPlayers, kElimPlusRecentreActiveDays, Impl->RecentreStepThisMatch);
+		}
+		else
+		{
+			UE_LOG(LogElimPlusRating, Log, TEXT("Recentre: no active pool to read (empty, or db busy) — no step this match"));
+		}
+
+		if (Impl->RecentreStepThisMatch != 0.0)
+		{
+			// Rounds each human was rated in this match: the round log holds exactly those.
+			for (const FElimPlusRoundRecord& Rec : Impl->RoundLog)
+			{
+				for (const FElimPlusRoundPlayerRecord& RoundPlayer : Rec.Players)
+				{
+					RoundsThisMatch.FindOrAdd(RoundPlayer.UniqueId) += 1;
+				}
+			}
+		}
+	}
+
 	for (TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
 	{
 		const FString& UniqueId = Pair.Key;
@@ -653,6 +973,20 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 			continue;
 		}
 
+		// Recentre step, before anything below reads the rating, so the scoreboard
+		// delta, the persisted row and the upload all carry it. Rated humans only: a
+		// player who never faced a human this match is on the bot-match path below
+		// (delta capped at +/-5) and gets none, or the step could be farmed on bots.
+		if (bRecentre && Impl->RecentreStepThisMatch != 0.0 && Impl->HumansWithHumanOpposition.Contains(UniqueId))
+		{
+			const double RecentreAdd = Impl->RecentreStepThisMatch * static_cast<double>(RoundsThisMatch.FindRef(UniqueId));
+			if (RecentreAdd != 0.0)
+			{
+				PR.SetRating(PR.GetRating() + RecentreAdd);
+				Impl->RecentreThisMatch.Add(UniqueId, RecentreAdd);
+			}
+		}
+
 		const int32 NewEloRaw = FMath::RoundToInt(PR.GetRating());
 		const int32 StartElo  = Impl->RatingAtMatchStart.FindRef(UniqueId);
 		int32 Delta = (StartElo != 0) ? (NewEloRaw - StartElo) : 0;
@@ -675,13 +1009,19 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 		const double TotalDamage  = Impl->TotalDamageCache.FindRef(UniqueId);
 		const FString PlayerName  = Impl->PlayerNameCache.FindRef(UniqueId);
 
+		// The row holds the STORED rating: the live one with the hub's baseline taken
+		// off again, by the same rule LoadPlayerFromDB put it on (keyed on the
+		// RoundsPlayed written in this very row). Everything above this line, and the
+		// replicator and upload below, work on the live rating.
+		const double StoredRating = ElimPlusStoredFromLive(PR.GetRating(), RoundsPlayed, Impl->BaselineShift);
+
 		const FString Esc = SqlEscape(UniqueId);
 		const FString Sql = FString::Printf(
 			TEXT("INSERT OR REPLACE INTO NCRatingElimPlus ")
 			TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, TotalDamage, PlayerName, SchemaVersion) ")
 			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, %.6f, %d, %lld, %.6f, %d, %.6f, '%s', 3);"),
 			*Esc,
-			PR.GetRating(), PR.GetRD(), PR.GetSigma(),
+			StoredRating, PR.GetRD(), PR.GetSigma(),
 			PR.GetPerfIndexEMA(), PR.GetPerfGames(),
 			static_cast<long long>(NowUtc),
 			TotalPoints, RoundsPlayed,
@@ -706,7 +1046,7 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 				TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, SchemaVersion) ")
 				TEXT("VALUES ('%s', %.6f, %.6f, %.6f, %.6f, %d, %lld, %.6f, %d, 2);"),
 				*Esc,
-				PR.GetRating(), PR.GetRD(), PR.GetSigma(),
+				StoredRating, PR.GetRD(), PR.GetSigma(),
 				PR.GetPerfIndexEMA(), PR.GetPerfGames(),
 				static_cast<long long>(NowUtc),
 				TotalPoints, RoundsPlayed);
@@ -733,8 +1073,8 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 		}
 	}
 
-	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d, failed %d, skipped %d (didn't play), capped %d (no human opposition)"),
-		PersistedCount, FailedCount, SkippedCount, CappedCount);
+	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d, failed %d, skipped %d (didn't play), capped %d (no human opposition), recentred %d (%+.3f per round)"),
+		PersistedCount, FailedCount, SkippedCount, CappedCount, Impl->RecentreThisMatch.Num(), Impl->RecentreStepThisMatch);
 
 	Impl->bMatchActive = false;
 }
@@ -749,11 +1089,17 @@ int32 FElimPlusRatingSystem::GetPlayerGlobalRank(UWorld* World, const FString& U
 	// 1-based rank = 1 + count of rated players with a strictly higher Rating.
 	// Returns exactly one row when this player has a rating row; zero rows -> 0
 	// (unranked, e.g. a bot or a brand-new id). Ties share a rank. Live query —
-	// call only at match start/end, never per-tick.
+	// call only at match start/end, never per-tick. Compared as LIVE ratings: the
+	// hub's baseline goes onto every row that has played a round, exactly as
+	// ElimPlusLiveFromStored does, so a never-played 1400 seed row is not ranked
+	// against stored values. With no baseline this is the plain comparison.
 	const FString Esc = SqlEscape(UniqueId);
 	const FString Sql = FString::Printf(
-		TEXT("SELECT (SELECT COUNT(*) FROM NCRatingElimPlus WHERE Rating > me.Rating) + 1 ")
+		TEXT("SELECT (SELECT COUNT(*) FROM NCRatingElimPlus other ")
+		TEXT("WHERE other.Rating + (CASE WHEN other.RoundsPlayed > 0 THEN %d ELSE 0 END) ")
+		TEXT("> me.Rating + (CASE WHEN me.RoundsPlayed > 0 THEN %d ELSE 0 END)) + 1 ")
 		TEXT("FROM NCRatingElimPlus me WHERE me.UniqueId='%s';"),
+		Impl->BaselineShift, Impl->BaselineShift,
 		*Esc);
 
 	TArray<FDatabaseRow> Rows;
@@ -901,6 +1247,16 @@ FString FElimPlusRatingSystem::BuildResultPayload(UWorld* World, const FNCElimPl
 	Writer->WriteValue(TEXT("winner_team"),   In.WinnerTeamIndex);
 	Writer->WriteValue(TEXT("red_score"),     In.RedScore);
 	Writer->WriteValue(TEXT("blue_score"),    In.BlueScore);
+	// Recentre guard (additive keys): the per-round step used by this match's flush,
+	// and per player below the points it added. They are already inside post/delta;
+	// ut4stats needs them apart to reconcile its round-by-round replay, which does
+	// not include the step. 0 when the guard was off; absent on older builds.
+	Writer->WriteValue(TEXT("recentre_per_round"), Impl->RecentreStepThisMatch);
+	// The hub's baseline this map (additive key; whole points, 0 when it has none,
+	// absent on older builds). pre/post/delta are live ratings and already include
+	// it: the hub's stored rating is post minus this. A player's first match after
+	// the baseline is set shows pre jumping by it from their previous post.
+	Writer->WriteValue(TEXT("baseline_shift"), Impl->BaselineShift);
 	Writer->WriteArrayStart(TEXT("players"));
 
 	for (int32 Idx : HumanIndices)
@@ -943,6 +1299,7 @@ FString FElimPlusRatingSystem::BuildResultPayload(UWorld* World, const FNCElimPl
 		Writer->WriteValue(TEXT("total_points"),   TotalPoints);
 		Writer->WriteValue(TEXT("rounds_played"),  RoundsPlayed);
 		Writer->WriteValue(TEXT("faced_humans"),   bFacedHumans);
+		Writer->WriteValue(TEXT("recentre"),       Impl->RecentreThisMatch.FindRef(P.UniqueId));
 		if (Impl->LoadFailedGuard.Contains(P.UniqueId))
 		{
 			// This player's session ran on unconfirmed default-seeded state (DB load
@@ -1011,6 +1368,7 @@ FString FElimPlusRatingSystem::BuildResultPayload(UWorld* World, const FNCElimPl
 		Writer->WriteValue(TEXT("total_points"),   Impl->TotalPointsCache.FindRef(Id));
 		Writer->WriteValue(TEXT("rounds_played"),  Impl->RoundsPlayedCache.FindRef(Id));
 		Writer->WriteValue(TEXT("faced_humans"),   Impl->HumansWithHumanOpposition.Contains(Id));
+		Writer->WriteValue(TEXT("recentre"),       Impl->RecentreThisMatch.FindRef(Id));
 		Writer->WriteValue(TEXT("left"),           true);
 		if (Impl->LoadFailedGuard.Contains(Id))
 		{

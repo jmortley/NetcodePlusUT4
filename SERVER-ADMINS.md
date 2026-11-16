@@ -559,6 +559,7 @@ cvars.** Most are live‑toggleable; none are cheat‑gated.
 | `ncp.CTFReplayMinDemoSeconds` | `200` | Min server‑demo age before the end‑of‑match decisive‑cap replay fires (0 = always — not advised; can crash the killcam in an early match). Requires a replay server (§8). |
 | `ncp.CTFReplayBuildupSeconds` | `8` | Seconds of run‑up shown before the featured cap. |
 | `ncp.ShockDebug` | `0` | Shock‑core diagnostics logging (0 off, 1 events). |
+| `ncp.ElimPlusRecentre` | `1` | ElimPlus rating recentre guard (§12.3). `1`: at match end each rated player gets a small per‑round step that holds the hub's active pool at the 1400 seed, and a hub whose ladder had already sunk gets a one‑time baseline (recorded in Mods.db, applied when ratings are read; stored ratings are not rewritten). `0`: no step, and no new baseline; a baseline already recorded still applies. Read at map load and again at match end. |
 
 > **328 render-estimate migration:** if an existing server set
 > `ncp.HitAttribRenderExtraMs=15` specifically to tune Link/Minigun, restore that
@@ -1008,6 +1009,76 @@ try {
 }
 finally { Remove-Item $tmp -Recurse -Force }
 ```
+
+### 12.3 ElimPlus ratings — recentre guard and hub baseline
+
+**What changed.** ElimPlus ratings used to sink: the per‑round formula removes a few tenths of a point
+from every player every round, so a hub's whole ladder drifted below the 1400 seed (regulars lost about
+100 points a month) and anyone who stopped playing was left stranded above the players still playing.
+The **recentre guard** (`ncp.ElimPlusRecentre`, on by default) stops that. At match end every rated player
+gets, for each round they played, one small step toward a pool average of 1400. The pool is the hub's
+established players (20+ rounds) seen in the last 30 days. Players who are not playing are not touched.
+
+**Nothing to do when you update.** A ladder that has already sunk is not left to climb back one step at
+a time, because that would hand the missing points to whoever plays most. Instead the first ElimPlus map
+load on this build measures the hub's established players once and records one whole number for the hub,
+its **baseline**: the amount that puts their average at 1400. The server log shows it:
+
+```
+LogElimPlusRating: Display: Rating baseline set for this hub: +137, measured on 138 established players averaging 1263.4. ...
+```
+
+From then on the game adds the baseline to every rating that has played a round. Every player moves up
+by the same amount, so every gap and every rank stays as it was. It is measured on the established
+players seen in the last 30 days, or on all established players if fewer than ten played recently. A hub
+with fewer than ten established players (a new or reset ladder, a very small hub) gets a baseline of 0
+and its ratings stay as they are.
+
+**The stored ratings are not rewritten.** `NCRatingElimPlus.Rating` keeps the value it had, and the
+rating the game shows is that value plus the baseline. If you read Mods.db, read the view
+**`NCRatingElimPlusLive`** instead of the table: its `Rating` column is the rating as the game shows it
+(`StoredRating` is the table's own value).
+
+```
+sqlite3 <UT install>/UnrealTournament/Saved/Mods.db "SELECT PlayerName, ROUND(Rating), RoundsPlayed FROM NCRatingElimPlusLive WHERE RoundsPlayed >= 20 ORDER BY Rating DESC;"
+```
+
+It is done this way because a match that is still running when you update keeps running: an instance
+with players in it survives a hub restart and saves its ratings when the match ends, on the old build.
+A stored value means the same to both builds, so those players lose nothing, whichever build saved them
+last. For the same reason a rollback to an older plugin is clean: it simply shows the stored ratings.
+
+**What you can change.** The baseline is the one row of the table `NCRatingElimPlusBaseline`.
+
+<!-- elimplus-admin-sql: tools/tests/test_elimplus_recentre.py runs every sql block from here to the next heading -->
+- **Reset the ladder** — everyone back to 1400; lifetime points and rounds are lost. Stop the hub and
+  every match instance first, or the players of a running match are written back when it ends.
+
+  ```sql
+  DELETE FROM NCRatingElimPlus;
+  DELETE FROM NCRatingElimPlusBaseline;
+  ```
+
+- **Measure the baseline again** — for example after a long spell with the guard switched off. The next
+  ElimPlus map load measures a new one from the ratings as stored.
+
+  ```sql
+  DELETE FROM NCRatingElimPlusBaseline;
+  ```
+
+- **Switch it off** — `ncp.ElimPlusRecentre 0` stops the per‑round step, and a hub that has no baseline
+  yet does not get one. A baseline already recorded still applies, so ratings do not jump back. To return
+  to the stored ratings as well, keep the guard at `0` and delete the baseline row as above.
+
+**In the log afterwards.** Every ElimPlus map load prints the baseline in use, and every match the step:
+
+```
+LogElimPlusRating: Rating baseline +137 (measured on 138 established players averaging 1263.4); recentre guard ON
+LogElimPlusRating: Recentre: pool mean 1393.8 over 142 established players seen in the last 30 days -> +0.186 per round
+```
+
+A typical step is +0.1 to +0.2 a round (two or three points a match); it is capped at 0.3 a round either
+way. A player who only ever faced bots in a match gets no step.
 
 ---
 
