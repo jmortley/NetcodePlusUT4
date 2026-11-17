@@ -5,13 +5,17 @@ for the engine types (elimplus_rating_adapter.h), and driven through its public 
 calls it (elimplus_rating_cases.cpp). Mods.db is a real sqlite database owned by this test: every statement the
 server process issues comes back here, is run with the engine wrapper's row format reproduced, and can be made to
 fail. So what is checked is what the shipped code does: loads, rounds through the real rating library, the match-end
-save, the rank query, the upload payload and the log lines.
+save, the rank query, the upload payload and the log lines. LifecycleFlowTests covers what happens to a player
+around the match: joining late, reconnecting, leaving, a drawn round, a failed load, a table without the newer
+columns, a server without its stats actor, and a round nobody opposed.
 
 Not covered: UBT, replication and anything in AElimPlusGame itself. That still needs the dedicated-server playtest.
+The stand-ins also differ from the engine in ways listed at the top of elimplus_rating_adapter.h.
 No sibling plugin or third-party Python module is required.
 """
 
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -33,6 +37,16 @@ SHIM_HEADERS = (
 BUILD = {}
 BASELINE_READ = "SELECT COUNT(*), MAX(Shift)"
 BASELINE_SET = "INSERT OR IGNORE INTO NCRatingElimPlusBaseline"
+# The whole statement LoadPlayerFromDB reads a player's row with, so a failure injected here hits nothing else.
+PLAYER_READ = ("SELECT Rating, RD, Sigma, PerfIndexEMA, PerfGames, TotalPoints, RoundsPlayed FROM NCRatingElimPlus "
+               "WHERE UniqueId='%s';")
+PLAYER_SAVE = "INSERT OR REPLACE INTO NCRatingElimPlus"
+# The table as it was before the TotalDamage and PlayerName columns (schema "v2").
+V2_TABLE = ("CREATE TABLE NCRatingElimPlus (UniqueId TEXT PRIMARY KEY NOT NULL, Rating REAL NOT NULL DEFAULT 1400.0, "
+            "RD REAL NOT NULL DEFAULT 350.0, Sigma REAL NOT NULL DEFAULT 0.03, PerfIndexEMA REAL NOT NULL DEFAULT 0.0, "
+            "PerfGames INTEGER NOT NULL DEFAULT 0, LastSeenUtc INTEGER NOT NULL DEFAULT 0, "
+            "TotalPoints REAL NOT NULL DEFAULT 0.0, RoundsPlayed INTEGER NOT NULL DEFAULT 0, "
+            "SchemaVersion INTEGER NOT NULL DEFAULT 2)")
 
 
 def setUpModule():
@@ -142,6 +156,10 @@ class Server(object):
     def end_match(self):
         self.call("flush")
 
+    def replicator(self, present):
+        """Whether the game mode has its stats actor. Without one it never counts a round for anyone."""
+        self.call("replicator", int(present))
+
     def upload(self, roster, winner=0):
         """BuildResultPayload for `roster` ([(id, team)]), parsed, with players keyed by id."""
         (text,) = self.call("payload", winner, 1, 0, ";".join("%s:%s:%d:0:0:0" % (name, name, team) for name, team in roster))
@@ -181,6 +199,16 @@ def four_v_four(server, rounds=6, seed=1, red=RED, blue=BLUE, leaver=None):
     return [(name, 0) for name in red] + [(name, 1) for name in blue]
 
 
+def row(connection, name):
+    """(Rating, RoundsPlayed) exactly as Mods.db holds them."""
+    return connection.execute("SELECT Rating, RoundsPlayed FROM NCRatingElimPlus WHERE UniqueId = ?", (name,)).fetchone()
+
+
+def rounded(rating):
+    """FMath::RoundToInt, which is how a rating becomes the whole number a player sees."""
+    return int(math.floor(rating + 0.5))
+
+
 class FlowCase(unittest.TestCase):
     def setUp(self):
         self.connection = database()
@@ -194,6 +222,13 @@ class FlowCase(unittest.TestCase):
         self.assertTrue(server.map_load())
         server.login(*players)
         return server
+
+    def hub_below_the_seed(self, shortfall):
+        """A measured hub whose active pool has since slipped `shortfall` points under the seed."""
+        sunk_hub(self.connection)
+        self.server().map_load()
+        self.connection.execute("UPDATE NCRatingElimPlus SET Rating = Rating - ? WHERE UniqueId LIKE 'active%'",
+                                (shortfall + 0.5,))
 
 
 class BaselineFlowTests(FlowCase):
@@ -309,13 +344,6 @@ class BaselineFlowTests(FlowCase):
 
 
 class StepFlowTests(FlowCase):
-    def hub_below_the_seed(self, shortfall):
-        """A measured hub whose active pool has since slipped `shortfall` points under the seed."""
-        sunk_hub(self.connection)
-        self.server().map_load()
-        self.connection.execute("UPDATE NCRatingElimPlus SET Rating = Rating - ? WHERE UniqueId LIKE 'active%'",
-                                (shortfall + 0.5,))
-
     def test_step_is_per_round_played_and_reported_apart(self):
         self.hub_below_the_seed(9.0)                                        # live pool mean 1391 -> +0.27 a round
         server = self.loaded_server()
@@ -573,10 +601,235 @@ class OlderBuildFlowTests(FlowCase):
         self.assertAlmostEqual(later.live("active5")["active5"], post + 10.0, places=3)   # not shifted twice
 
 
+class LifecycleFlowTests(FlowCase):
+    """What happens to a player around the match rather than in it: joining late, reconnecting, leaving, a drawn
+    round, a failed load, an older table, a server without its stats actor, a round nobody opposed."""
+
+    def test_player_who_joins_mid_match_starts_from_the_rating_they_joined_with(self):
+        sunk_hub(self.connection)
+        server = self.loaded_server(RED + BLUE[:3])
+        server.start_match()
+        four_v_four(server, rounds=2, seed=3, blue=BLUE[:3])
+        server.login("active7", "newcomer")                                 # PostLogin in the middle of the match
+        joined = server.live("active7", "newcomer")
+        self.assertAlmostEqual(joined["active7"], 1043.0 + 362, places=3)
+        self.assertEqual(joined["newcomer"], 1400.0)
+        roster = four_v_four(server, rounds=4, seed=4, red=RED + ["newcomer"])
+        server.end_match()
+        payload = server.upload(roster)
+        for name, start, lifetime in (("active7", 1405, 904), ("newcomer", 1400, 4)):
+            player = payload["players"][name]
+            self.assertEqual(player["pre"], float(start), name)             # not 0, which the site reads as "+post"
+            self.assertEqual(player["delta"], rounded(player["post"]) - start, name)
+            self.assertEqual(server.elo[name], (rounded(player["post"]), player["delta"]), name)   # the scoreboard
+            self.assertEqual(player["rounds_played"], lifetime, name)
+            self.assertAlmostEqual(row(self.connection, name)[0], player["post"] - 362, places=5, msg=name)
+        self.assertNotEqual(payload["players"]["newcomer"]["delta"], 0)
+        early = payload["players"]["active0"]                               # there from the start: measured from there
+        self.assertEqual(early["pre"], 980.0 + 362)
+
+    def test_reconnect_mid_match_keeps_the_rating_and_rounds_earned_so_far(self):
+        sunk_hub(self.connection)
+        server = self.loaded_server()
+        start = server.live("active2")["active2"]
+        server.start_match()
+        four_v_four(server, rounds=3, seed=5)
+        earned = server.live("active2")["active2"]
+        self.assertNotAlmostEqual(earned, start, places=2)
+        issued = len(server.statements)
+        server.login("active2")                                             # the same player's PostLogin again
+        self.assertEqual(server.statements[issued:], [])                    # nothing is read from Mods.db again
+        self.assertEqual(server.live("active2")["active2"], earned)
+        roster = four_v_four(server, rounds=3, seed=6)
+        server.end_match()
+        player = server.upload(roster)["players"]["active2"]
+        self.assertEqual(player["pre"], float(rounded(start)))              # still measured from the match start
+        self.assertEqual(player["rounds_played"], 906)
+        self.assertEqual(row(self.connection, "active2")[1], 906)
+        self.assertAlmostEqual(row(self.connection, "active2")[0], player["post"] - 362, places=5)
+
+    def test_player_who_left_is_still_uploaded_and_saved_with_their_step(self):
+        self.hub_below_the_seed(9.0)                                        # +0.27 a round
+        server = self.loaded_server()
+        server.start_match()
+        roster = four_v_four(server, rounds=5, leaver="active7")            # plays round one, then disconnects
+        server.end_match()
+        present = [entry for entry in roster if entry[0] != "active7"]      # the player list at match end
+        payload = server.upload(present)
+        gone = payload["players"]["active7"]
+        self.assertIs(gone["left"], True)
+        self.assertEqual((gone["team"], gone["result"]), (1, "loss"))       # the team comes from the round log
+        self.assertAlmostEqual(gone["recentre"], 0.27, places=6)            # one round's step, and it is in post
+        self.assertEqual((gone["pre"], gone["rounds_played"]), (1396.0, 901))
+        self.assertEqual(gone["delta"], rounded(gone["post"]) - 1396)
+        (their_round,) = [line for line in payload["rounds"][0]["players"] if line["id"] == "active7"]
+        self.assertEqual((gone["kills"], gone["deaths"], gone["damage"]),
+                         (their_round["kills"], their_round["deaths"], their_round["damage"]))
+        self.assertEqual(sum(1 for logged in payload["rounds"] for line in logged["players"] if line["id"] == "active7"), 1)
+        self.assertAlmostEqual(row(self.connection, "active7")[0], gone["post"] - 362, places=5)
+        self.assertEqual(row(self.connection, "active7")[1], 901)
+        for name, _ in present:
+            self.assertNotIn("left", payload["players"][name], name)
+            self.assertAlmostEqual(payload["players"][name]["recentre"], 0.27 * 5, places=6, msg=name)
+        self.assertEqual(len(server.logged("included 1 mid-match leaver(s) alongside 7 rostered player(s)")), 1)
+
+    def test_drawn_round_is_rated_as_a_draw(self):
+        names = [f"even{index}" for index in range(8)]
+        for name in names:
+            add_player(self.connection, name, 1250.0, 400, 1)
+        lines = [(2, 0, "310.0"), (1, 1, "150.0"), (0, 1, "80.0"), (1, 0, "220.0")]       # the same four on each side
+        red = [(name,) + line + (0,) for name, line in zip(names[:4], lines)]
+        blue = [(name,) + line + (1,) for name, line in zip(names[4:], lines)]
+        twin = sqlite3.connect(":memory:", isolation_level=None)
+        self.addCleanup(twin.close)
+        self.connection.backup(twin)
+        drawn, won = Server(self, self.connection), Server(self, twin)
+        for server, draw in ((drawn, True), (won, False)):
+            server.map_load()
+            server.login(*names)
+            server.start_match()
+            server.round(red, blue, draw=draw)
+        after_draw, after_win = drawn.live(*names), won.live(*names)
+        for mine, theirs in zip(names[:4], names[4:]):
+            self.assertAlmostEqual(after_draw[mine], after_draw[theirs], places=6, msg=mine)      # mirror images end level
+            self.assertGreater(after_win[mine] - after_win[theirs], 1.0, mine)                   # a win separates them
+        payload = drawn.upload([(name, 0) for name in names[:4]] + [(name, 1) for name in names[4:]], winner=-1)
+        (logged,) = payload["rounds"]
+        self.assertEqual((logged["draw"], logged["winner_team"]), (True, -1))
+        self.assertEqual({line["result"] for line in logged["players"]}, {"draw"})
+        self.assertEqual({player["result"] for player in payload["players"].values()}, {"draw"})
+        (decided,) = won.upload([(name, 0) for name in names[:4]] + [(name, 1) for name in names[4:]])["rounds"]
+        self.assertEqual((decided["draw"], decided["winner_team"]), (False, 0))
+
+    def test_player_whose_load_failed_plays_on_defaults_and_is_never_saved(self):
+        sunk_hub(self.connection)
+        self.server().map_load()
+        before = stored(self.connection)
+        server = self.server()
+        server.map_load()
+        server.fail_next(PLAYER_READ % "active3")                           # a locked database, for this one read
+        server.login(*RED, *BLUE)
+        self.assertEqual(server.failures, [])
+        self.assertEqual(len(server.logged("Load guard for active3 (db busy/unavailable)")), 1)
+        self.assertEqual(server.live("active3")["active3"], 1400.0)         # defaults, not their real 1369
+        server.start_match()
+        roster = four_v_four(server)
+        server.end_match()
+        payload = server.upload(roster)
+        self.assertIs(payload["players"]["active3"]["provisional"], True)   # the site applies nothing for them
+        self.assertNotIn("provisional", payload["players"]["active0"])
+        self.assertEqual(row(self.connection, "active3"), (before["active3"], 900))      # their real row is untouched
+        self.assertEqual(len(server.logged("Flush skip active3")), 1)
+        self.assertNotIn("active3", server.elo)
+        self.assertAlmostEqual(row(self.connection, "active0")[0], payload["players"]["active0"]["post"] - 362, places=5)
+        later = self.loaded_server(["active3"])
+        self.assertAlmostEqual(later.live("active3")["active3"], before["active3"] + 362, places=3)
+
+    def test_table_without_the_newer_columns_saves_stored_ratings_too(self):
+        connection = sqlite3.connect(":memory:", isolation_level=None)
+        self.addCleanup(connection.close)
+        connection.execute(V2_TABLE)
+        for index in range(14):
+            connection.execute(
+                "INSERT INTO NCRatingElimPlus (UniqueId, Rating, RD, Sigma, LastSeenUtc, TotalPoints, RoundsPlayed) "
+                "VALUES (?, ?, 45.0, 0.03, ?, 2250.0, 900)", (f"active{index}", 980.0 + 9 * index, NOW - index * 86400))
+        players = RED + BLUE + ["newcomer"]
+
+        def map_load():
+            server = Server(self, connection)
+            server.fail_next("ADD COLUMN TotalDamage", "ADD COLUMN PlayerName")       # locked: the migration does not land
+            server.map_load()
+            self.assertEqual(server.failures, [])
+            self.assertEqual(len(server.logged("v2-shape writes this session")), 1)
+            server.login(*players)
+            return server
+
+        server = map_load()
+        self.assertEqual(connection.execute("SELECT Shift FROM NCRatingElimPlusBaseline").fetchall(), [(362,)])
+        at_login = server.live(*players)
+        self.assertAlmostEqual(at_login["active0"], 980.0 + 362, places=3)
+        self.assertEqual(at_login["newcomer"], 1400.0)
+        server.start_match()
+        roster = four_v_four(server, red=RED + ["newcomer"])
+        server.end_match()
+        payload = server.upload(roster)
+        saves = [sql for sql in server.statements if sql.startswith(PLAYER_SAVE)]
+        self.assertEqual(len(saves), 9)
+        for sql in saves:                                                   # the shorter statement, marked version 2
+            self.assertNotIn("TotalDamage", sql)
+            self.assertTrue(sql.endswith(", 2);"), sql)
+        self.assertFalse(any("CREATE VIEW" in sql for sql in server.statements))
+        table = dict(connection.execute("SELECT UniqueId, Rating FROM NCRatingElimPlus"))
+        for name in players:
+            self.assertAlmostEqual(table[name], payload["players"][name]["post"] - 362, places=5, msg=name)
+        live = map_load().live(*players)
+        for name in players:
+            self.assertAlmostEqual(live[name], payload["players"][name]["post"], places=3, msg=name)
+
+    def test_without_the_stats_actor_ratings_still_survive_a_save_and_a_reload(self):
+        sunk_hub(self.connection)
+        server = self.loaded_server(RED + BLUE[:3] + ["newcomer"])
+        server.replicator(False)                                            # the actor failed to spawn
+        server.start_match()
+        roster = four_v_four(server, blue=BLUE[:3] + ["newcomer"])
+        server.end_match()
+        self.assertEqual((server.elo, server.ranks), ({}, {}))              # nobody to send a scoreboard to
+        payload = server.upload(roster)
+        regular, new = payload["players"]["active0"], payload["players"]["newcomer"]
+        self.assertEqual((regular["rounds_played"], new["rounds_played"]), (900, 0))       # no round was counted...
+        self.assertGreater(abs(new["post"] - 1400.0), 1.0)                                  # ...but everyone was rated
+        self.assertAlmostEqual(row(self.connection, "active0")[0], regular["post"] - 362, places=5)
+        # A rated row with no lifetime rounds takes no baseline, on the way out or on the way back in.
+        self.assertEqual(row(self.connection, "newcomer")[1], 0)
+        self.assertAlmostEqual(row(self.connection, "newcomer")[0], new["post"], places=5)
+        live = self.loaded_server(["active0", "newcomer"]).live("active0", "newcomer")
+        self.assertAlmostEqual(live["newcomer"], new["post"], places=3)
+        self.assertAlmostEqual(live["active0"], regular["post"], places=3)
+
+    def test_rated_row_from_before_rounds_were_counted_keeps_its_rating(self):
+        sunk_hub(self.connection)
+        add_player(self.connection, "veteran", 1450.0, 0, 90)               # a real rating, RoundsPlayed defaulted to 0
+        server = self.loaded_server(RED + BLUE[:3] + ["veteran"])
+        self.assertEqual(server.live("veteran")["veteran"], 1450.0)         # no rounds, so no baseline: shown as stored
+        server.start_match()
+        roster = four_v_four(server, blue=BLUE[:3] + ["veteran"])
+        server.end_match()
+        post = server.upload(roster)["players"]["veteran"]["post"]
+        self.assertEqual(row(self.connection, "veteran")[1], 6)
+        self.assertAlmostEqual(row(self.connection, "veteran")[0], post - 362, places=5)
+        self.assertAlmostEqual(self.loaded_server(["veteran"]).live("veteran")["veteran"], post, places=3)
+
+    def test_round_nobody_opposed_is_counted_for_the_player_but_not_rated_or_logged(self):
+        """The upload this produces is the fixture of ut4stats' drift-report regression
+        (browse/test_elimplus_drift.py, PLUGIN_SOLO_ROUND_UPLOAD): keep the two in step."""
+        sunk_hub(self.connection)
+        server = self.loaded_server(["p", "q", "s"])                        # three players new to this hub
+        server.start_match()
+        server.round([("p", 0, 0, "0.0", 0), ("s", 0, 0, "0.0", 0)], [])    # nobody on the other team yet
+        self.assertEqual(server.live("p", "s"), {"p": 1400.0, "s": 1400.0})  # the rating system rejected that round
+        server.round([("p", 2, 0, "260.0", 0)], [("q", 0, 1, "90.0", 1)])   # q arrives; s sits this one out
+        server.end_match()
+        payload = server.upload([("p", 0), ("q", 1), ("s", 0)])
+        self.assertEqual(payload["baseline_shift"], 362)
+        self.assertEqual(len(payload["rounds"]), 1)                         # only the rated round is in the log
+        p, q, s = (payload["players"][name] for name in "pqs")
+        self.assertEqual((p["pre"], p["rounds_played"]), (1400.0, 2))       # lifetime rounds run ahead of logged ones
+        self.assertEqual((q["pre"], q["rounds_played"]), (1400.0, 1))
+        self.assertEqual((s["pre"], s["post"], s["rounds_played"]), (1400.0, 1400.0, 1))
+        self.assertEqual(row(self.connection, "p")[1], 2)
+        self.assertAlmostEqual(row(self.connection, "p")[0], p["post"] - 362, places=5)
+        self.assertEqual(row(self.connection, "s"), (1400.0, 0))            # never rated: not saved, its round dropped
+        later = self.loaded_server(["p", "s"])
+        self.assertAlmostEqual(later.live("p")["p"], p["post"], places=3)
+        self.assertEqual(later.live("s")["s"], 1400.0)
+
+
 class ModelAgreementTests(FlowCase):
     def test_python_model_and_production_code_write_the_same_rows(self):
         """test_elimplus_recentre.Instance replays the same statements in Python. Feed it the movements the real
-        rating library produced and it must leave the database exactly as the production code did."""
+        rating library produced and it must leave Rating, RoundsPlayed and the baseline row as the production code
+        did. One successful match only: it does not compare the other columns or any failure path, so it is a
+        check on the model, not proof that the model equals the production code."""
         sunk_hub(self.connection)
         twin = database()
         self.addCleanup(twin.close)

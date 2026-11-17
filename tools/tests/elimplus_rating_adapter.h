@@ -8,6 +8,15 @@
 //
 // Where the engine's behaviour matters to the code under test it is copied: FString compares without case,
 // FMath::RoundToInt takes a float, TMap iterates in insertion order, TArray::Contains compares elements.
+//
+// Known differences from the engine, which these tests therefore cannot see:
+//  - TCHAR is narrow here and wide in the engine, so a format-specifier fault that only shows with wide strings
+//    passes. UBT and a real server are the check for those.
+//  - A failed statement comes back with no rows. The engine's ExecDatabaseCommand can return false after it has
+//    already appended rows.
+//  - This TMap keeps its elements in a deque, so a reference stays valid across a later Add. The engine's TMap
+//    may move its elements on Add, so code that held a reference across one would only break in the engine.
+//  - FDateTime prints a simplified ISO timestamp, and rounding uses this platform's C library.
 #pragma once
 
 #include <algorithm>

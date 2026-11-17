@@ -9,8 +9,10 @@ ones from before the baseline existed, can share one database in any order.
 `Instance` is a Python MODEL of the C++ control flow: its conversions are its own, so these tests alone would
 keep passing if the production load or save went wrong. What the shipped code does is checked in
 test_elimplus_rating_flow.py, which compiles ElimPlusRatingSystem.cpp whole and runs it against the same
-database helpers, and which also holds this model to the production code row for row. The structure tests here
-only pin the shape of the source. No sibling plugin or third-party Python module is required.
+database helpers. That file also compares this model with the production code, but only for one successful
+match and only the Rating and RoundsPlayed columns and the baseline row: a check on the model, not proof that
+the two are equivalent. The structure tests here only pin the shape of the source. No sibling plugin or
+third-party Python module is required.
 """
 
 import ctypes

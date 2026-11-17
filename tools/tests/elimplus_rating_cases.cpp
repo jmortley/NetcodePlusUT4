@@ -7,13 +7,22 @@
 //   cvar NAME VALUE             set a console variable
 //   now UNIX                    set the clock
 //   init                        InitDatabase
-//   load ID [NAME]              PostLogin: LoadPlayerFromDB then CaptureLateJoinBaseline
+//   load ID [NAME]              PostLogin: LoadPlayerFromDB then CaptureLateJoinBaseline. The game mode runs both
+//                               for every login, a reconnect in the middle of a match included.
 //   snapshot                    HandleMatchHasStarted: SnapshotMatchStart
 //   round DRAW WINNERS LOSERS   one round; each side is "id:kills:deaths:damage:team;..." (an id starting with
-//                               BOT: is a bot). RecordRoundPPR for each human, then ProcessRound.
+//                               BOT: is a bot). RecordRoundPPR for each human, then ProcessRound. A side may be
+//                               empty: the game mode still counts the round for the players who were in it, and
+//                               the rating system rejects it. In a draw the game mode passes team 0 as WINNERS.
+//   replicator 0|1              whether the game mode has its stats actor. Without one (the spawn failed) it skips
+//                               the RecordRoundPPR loop altogether and hands FlushAtMatchEnd a null pointer.
 //   flush                       HandleMatchHasEnded: FlushAtMatchEnd
-//   payload WINNER RED BLUE ROSTER   BuildResultPayload; ROSTER is "id:name:team:kills:deaths:damage;..."
+//   payload WINNER RED BLUE ROSTER   BuildResultPayload; ROSTER is "id:name:team:kills:deaths:damage;..." and
+//                               holds whoever is still connected at match end (a leaver is not in it)
 //   elo ID / rank ID            GetCachedElo / GetPlayerGlobalRank
+//
+// At login and at match start the game mode also pushes each cached rating and rank to its stats actor. Those
+// calls only read, so they are not replayed here; the elo and rank commands ask the same questions.
 //
 // Every command ends with a DONE line. In between come SQL (answered by the test), LOG, ELO, RANK and OUT lines.
 #include "CoreMinimal.h"
@@ -73,6 +82,7 @@ int main()
 	World.GameInstance = &GameInstance;
 	World.MapName = FString("DM-StandIn");
 	AElimPlusStatsReplicator Replicator;
+	bool bHasReplicator = true;
 	TUniquePtr<FElimPlusRatingSystem> System;
 
 	std::string Line;
@@ -120,11 +130,12 @@ int main()
 			Result.bIsDraw = Fields[1] == "1";
 			Result.WinnerTeam = ParseSide(Fields[2]);
 			Result.LoserTeam = ParseSide(Fields[3]);
+			// AElimPlusGame runs this loop only "if (GS && StatsReplicator)".
 			for (const TArray<FElimPlusPlayerRoundPerf>* Side : {&Result.WinnerTeam, &Result.LoserTeam})
 			{
 				for (const FElimPlusPlayerRoundPerf& Perf : *Side)
 				{
-					if (!Perf.UniqueId.StartsWith(FString("BOT:")))
+					if (bHasReplicator && !Perf.UniqueId.StartsWith(FString("BOT:")))
 					{
 						System->RecordRoundPPR(Perf.UniqueId, static_cast<float>(Perf.Kills) + Perf.Damage * 0.01f,
 							Perf.Damage, Perf.UniqueId);
@@ -133,9 +144,13 @@ int main()
 			}
 			System->ProcessRound(Result);
 		}
+		else if (Command == "replicator")
+		{
+			bHasReplicator = Fields[1] == "1";
+		}
 		else if (Command == "flush")
 		{
-			System->FlushAtMatchEnd(&World, &Replicator);
+			System->FlushAtMatchEnd(&World, bHasReplicator ? &Replicator : nullptr);
 		}
 		else if (Command == "payload")
 		{
