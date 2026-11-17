@@ -4,7 +4,7 @@ A UT4 plugin focused on improving netcode feel and adding new game modes for com
 
 Built on UE4 4.15 (UT4 fork, CL-3525360). Targets up to 720Hz on modern hardware.
 
-**Current build: 328.** Players install NetcodePlus and stay current through the community
+**Current build: 329.** Players install NetcodePlus and stay current through the community
 **[NetcodePlus launcher](https://github.com/jmortley/netcodeplus-launcher)** — it keeps the client DLL and
 the game-mode content paks up to date, so there's nothing to hand-copy. Running a server? The companion
 **[Server Admin Guide](SERVER-ADMINS.md)** has the full install / cvar / ruleset reference.
@@ -15,13 +15,30 @@ NetcodePlus replaces stock UT4's hit registration and projectile prediction with
 
 ## Features
 
-### Aim Trainer (329 development)
+### Aim Trainer (329)
 
-An optional game mode with real UT character targets: strafe tracking, covered
-headshots, and varied instagib pop-ups. Includes 60-second runs, an in-game
-scenario picker/results HUD, and a UT4Stats top 10 per scenario. See
-[Aim Trainer setup and scoring](Docs/AimTrainer329.md) for the NCWepMut content
-requirement, server approval, launch command and validation limits.
+An opt-in practice mode with real animated UT character targets. It does not
+enable aim assistance and changes nothing in other modes.
+
+- **Thirteen 60-second scenarios** — Link tracking (and a harder variant),
+  headshots behind cover, instagib / Sniper-LG / SACTF pop-ups, airborne
+  targets (instagib, Sniper-LG, SACTF, rockets), Flak Hexagon and Shock Defense.
+  Each has a fixed-position board and an optional **movement practice** board
+  (press **M**).
+- **Start it** — the launcher's **AIM TRAINER** button, or from the game's main
+  menu open the console and enter `aimtrain`. It runs standalone: no hub, login
+  or server is needed. The current **NCWepMut content pak** must be installed
+  (the launcher keeps it current).
+- **Controls** — pick a scenario with the mouse or **1–9, 0, minus**; **Enter**
+  starts; **R** restarts (rebindable under F5 > Home > Aim Trainer); **F6**
+  returns to the picker.
+- **Leaderboards** — the picker and results screen show the UT4Stats top 10 for
+  the selected scenario. Signed-in players can save complete standalone runs to
+  the local-run board; approved servers save to their own board. Practice works
+  offline, and the results screen says whether a run was saved.
+
+See [Aim Trainer setup and scoring](Docs/AimTrainer329.md) for every scenario's
+scoring rule, the server setup and approval, and the validation limits.
 
 ### Netcode
 
@@ -108,7 +125,7 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
   - **Carry-aware lobby-impact blend** — per-round PPR (Kills + Damage/100, no deaths — matches the community PPR board) z-scored across BOTH teams, blended into the Glicko update via `eff = 0.9·logistic(2.5·z) + 0.1·W/L`. Within-team performance scaling alone could only ever dampen the W/L delta (never flip its sign), so good players plateaued near the seed (~1600). The blend rescues a hard carry from a losing team and discounts a passenger on a winning team. Validated offline on 90k PHX Abs-Elim + UTPugs ElimPlus matches: Spearman 0.937 vs the community PPR board. Wipeout uses the same blend.
   - `PickBalancedTeam` override + full pre-match `TeamBalancer` rebalance at `HandleMatchHasStarted` (fires after engine bot-fill so the pool is complete). Respects `?BalanceTeams=true/false` URL flag.
   - Custom Canvas-drawn pre-match team-preview overlay with team rosters + ELOs + team-strength totals (replaces unreliable scoreboard auto-show).
-  - Bot-match cap (±5 ELO) for matches where the human never faced human opposition. Skips never-played connections (e.g. plugin-mismatch kicks) at flush.
+  - Bot-match cap (±5 ELO) for matches where the human never faced human opposition. Skips never-played connections (e.g. a player who joined and left before spawning) at flush.
   - **Recentre guard** (`ncp.ElimPlusRecentre`, default on) — the per-round blend is not zero-sum and used to sink a hub's whole ladder (~100 points a month for regulars). At match end each rated player now gets a small per-round step (capped at 0.3) that holds the hub's active established pool at the 1400 seed. A hub whose ladder had already sunk gets a one-time baseline by itself: one whole-number shift, recorded in Mods.db and applied when ratings are read, so stored ratings are never rewritten. See SERVER-ADMINS §12.3.
   - Lifetime PPR persistence (`TotalPoints` + `RoundsPlayed` columns in `NCRatingElimPlus`, queryable via sqlite).
   - Match-winning-kill instant replay via `ClientPlayInstantReplay` with conditional 7s EndGame delay (skipped in standalone PIE).
@@ -175,7 +192,7 @@ Open the editor in-game with the `nchud` console command. Layout persists to `Sa
 - **`weaponhand [right|left|center|hidden]`** — direct console command (writes to ProfileSettings).
 - **`ready` / `ncpready` console commands (Hotfix 10)** — exactly the F5 → Ready action, bindable. `ready` yields gracefully if another plugin already owns that name; `ncpready` always works.
 - **Network-visible weapon skins (new in 328)** — skins picked at F5 are no longer local-only cosmetics: the choice is validated server-side against a **fixed manifest of approved skins**, replicated, and rendered for everyone — other players, spectators (including joining spectate mid-match), on respawn/re-equip, and on dropped weapons, which keep the skin they were dropped with. Entitlement-checked and rate-limited, with a dedicated-server visual short-circuit so servers do no rendering work. Weapons whose skin doesn't live on material slot 0 (Flak, and the Lightning Gun — which is asymmetric, slot 0 in first person and slot 1 in third) are handled per-family rather than assuming slot 0.
-- **Plugin-version gate (`ANCVersionGate`)** — server-spawned per-player `AInfo` in `PostLogin`, owner-only replication. Client's `PostNetInit` reports `NETCODE_PLUGIN_VERSION` immediately; the server `KickPlayer`s a **mismatched** build with a clear "server v328, you are vN — update via launcher" message, and the player can rejoin once the launcher updates them. Players with **no** plugin are not auto-kicked — the no-reply timeout kick is currently disabled, so the grace window (`[NetcodePlus] VersionReportTimeoutSec`, default 100s, clamped 1–120) is the mitigation, not a hard gate. Wired into every NCPlus mode's `PostLogin`. Bots + listen-host local PC exempt.
+- **Plugin-version check — retired (November 2026).** Servers no longer run the version handshake and never disconnect a player over their plugin version; it was only needed while servers moved from 328 to 329. A player with a missing or out-of-date plugin now gets no message from the server, and the hub no longer whispers an install reminder. The launcher keeps players on the current build. Clients still report their version when they join, so that a 329 server which has not updated yet does not kick them.
 - **Concede vote ("gg vote")** — the losing team can end a lost match instead of playing it out. Any player types **`gg`** (or presses **F1** to confirm / **F4** to cancel) and the vote passes at **>50% of that team's humans**; the leading team is notified that a vote is brewing rather than being surprised by a sudden end. Server-authoritative, bots excluded from the count.
 - **Announcer packs** — optional replacement announcer voice sets, plus a "legacy immediacy" option that restores the snappier old announcement timing. Selected per player (F5); persisted as `[NetcodePlus] AnnouncerPack` in Mod.ini. Client-side only.
 - **Custom siphon powerup** — life-steal pickup spawning at sniper location with 90s timer.
@@ -229,7 +246,7 @@ Lives at `<Saved>/Config/Mod.ini`. Most plugin-side knobs go here; some are per-
 
 **`[NetcodePlus]`** (server-side):
 - `bUsePlayerReadyUp=False` — opt in to UTComp-style F5 Ready/Not Ready instead of host-controlled start. All active human players must be ready; spectators and bots are excluded. The final countdown locks readiness, so it cannot be cancelled by unreadying or roster changes after it begins unless every active human leaves.
-- `VersionReportTimeoutSec=100.0` — grace window (s) for a joining client to report its `NETCODE_PLUGIN_VERSION`. Default 100s; clamped 1–120s; garbage / missing value falls back to the default. (Mismatched builds are always kicked; the *no-reply* timeout kick itself is currently disabled — see the version-gate note above.)
+- `VersionReportTimeoutSec` — no longer does anything. It was the grace window of the plugin-version check, which was retired in November 2026 (see the note above). The line can be removed.
 - ElimPlus also reads `[NetcodePlus]` on the server for anti-camp (`ElimEnableAntiCamp` / `ElimCampThreshold` / `ElimCampCheckInterval` / `ElimCampWarnCooldown`), uneven-team health scaling, and the 6-0 mid-game shuffle. Full list with defaults in [SERVER-ADMINS.md](SERVER-ADMINS.md) §5.
 
 **`[NetcodePlus.WeaponSettings]`** (per-player):
