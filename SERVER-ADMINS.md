@@ -414,8 +414,8 @@ Shared section (StatSQL reads `Key`/`ServerName`/`SendStats` here too — see §
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `CTFRespawnWait` | float | `1.5` | Regulation respawn delay (s) in CTF (fractional supported). |
-| `CTFRespawnWaitSmall` | float | `1.0` | Respawn delay (s) in small games (≤ `CTFSmallGameMaxPlayers`). |
+| `CTFRespawnWait` | float | `1.5` | Regulation respawn delay (s) in ordinary weapon CTF (fractional supported). saCTF and iCTF ignore it and use a fixed 1 s. |
+| `CTFRespawnWaitSmall` | float | `1.0` | Respawn delay (s) in small ordinary weapon CTF games (≤ `CTFSmallGameMaxPlayers`). Ignored by saCTF and iCTF. |
 | `CTFSmallGameMaxPlayers` | int | `2` | At/below this player count a CTF match is "small" (2 = 1v1; raise to 4 for 2v2). |
 | `AutoPauseOnDrop` | bool | `true` | Immediately auto‑pause a bot PUG (`?PugId`) when a participant drops. Once all awaited IDs return (or an unpause is requested), resume through `UnpauseCountdownSec`; another tracked drop cancels that countdown. **Hotfix 10:** a pause‑immune watcher now detects hard drops by *connection silence* (`PauseDropDetectSeconds`) instead of waiting ~60 s for the engine Logout, coverage extends through the **locked F5 ready countdown** (a drop between "all readied" and "match live" pauses and waits; if the last ready participant leaves in warmup the countdown cancels cleanly), and a returning player must rejoin as a participant on their expected team — reconnecting as a spectator does not resume a short‑handed match. |
 | `PauseDropDetectSeconds` | float | `4.0` | Seconds of connection silence before the watcher freezes the match (clamped 1–30). The engine timeout still fires later as normal; this only front‑runs it. Raise on links with frequent multi‑second loss bursts if pauses trigger too eagerly. |
@@ -482,6 +482,9 @@ The warning includes the selected pass, previous/chosen starts and positions, an
 exclusion was relaxed. No tagged team pool falls back to Epic's selector with an explicit
 `reason=no-usable-team-pool` warning. The small-game threshold and legacy selector remain
 unchanged.
+
+This section is read at map load and again at the first live start, so warmup spawns and
+the admin spawn markers use the same tuning as the match.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -559,6 +562,7 @@ cvars.** Most are live‑toggleable; none are cheat‑gated.
 | `ncp.CTFReplayMinDemoSeconds` | `200` | Min server‑demo age before the end‑of‑match decisive‑cap replay fires (0 = always — not advised; can crash the killcam in an early match). Requires a replay server (§8). |
 | `ncp.CTFReplayBuildupSeconds` | `8` | Seconds of run‑up shown before the featured cap. |
 | `ncp.ShockDebug` | `0` | Shock‑core diagnostics logging (0 off, 1 events). |
+| `ncp.ElimPlusRecentre` | `1` | ElimPlus rating recentre guard (§12.3). `1`: at match end each rated player gets a small per‑round step that holds the hub's active pool at the 1400 seed, and a hub whose ladder had already sunk gets a one‑time baseline (recorded in Mods.db, applied when ratings are read; stored ratings are not rewritten). `0`: no step, and no new baseline; a baseline already recorded still applies. Read at map load and again at match end. |
 
 > **328 render-estimate migration:** if an existing server set
 > `ncp.HitAttribRenderExtraMs=15` specifically to tune Link/Minigun, restore that
@@ -639,7 +643,7 @@ The `?Key=Value` tokens NetcodePlus itself parses (in addition to stock UT4 opti
 Stock options the plugin **reads/honors** but doesn't parse itself (listed so you know they matter):
 `?HostId` (host pause / scoreboard host badge), `?BalanceTeams` (false skips the Glicko rebalance),
 `?RespawnWait` — **ignored for CTF**, which uses `[UTPUGS_STATS] CTFRespawnWait`/`CTFRespawnWaitSmall`
-instead.
+instead (saCTF and iCTF use a fixed 1 s and ignore those keys too).
 
 > Not parsed by the plugin (don't expect them to do anything NetcodePlus‑specific):
 > `?RandomSubsetSize`, `?MapLockoutDuration`, `?WTR`.
@@ -835,7 +839,8 @@ Set the net rate in Mod.ini: `[ElimPlus]` → `NetSpeed=72000`.
 ```
 
 CTF respawn + small‑game tuning is in Mod.ini `[UTPUGS_STATS]` (`CTFRespawnWait`, `CTFRespawnWaitSmall`,
-`CTFSmallGameMaxPlayers`). For tournaments add `?Tournament=1` for ServerShield.
+`CTFSmallGameMaxPlayers`); those respawn keys apply to ordinary weapon CTF only, since saCTF and iCTF use a
+fixed 1 s. For tournaments add `?Tournament=1` for ServerShield.
 
 ### 11.3 Wipeout — 4v4
 
@@ -1009,6 +1014,76 @@ try {
 finally { Remove-Item $tmp -Recurse -Force }
 ```
 
+### 12.3 ElimPlus ratings — recentre guard and hub baseline
+
+**What changed.** ElimPlus ratings used to sink: the per‑round formula removes a few tenths of a point
+from every player every round, so a hub's whole ladder drifted below the 1400 seed (regulars lost about
+100 points a month) and anyone who stopped playing was left stranded above the players still playing.
+The **recentre guard** (`ncp.ElimPlusRecentre`, on by default) stops that. At match end every rated player
+gets, for each round they played, one small step toward a pool average of 1400. The pool is the hub's
+established players (20+ rounds) seen in the last 30 days. Players who are not playing are not touched.
+
+**Nothing to do when you update.** A ladder that has already sunk is not left to climb back one step at
+a time, because that would hand the missing points to whoever plays most. Instead the first ElimPlus map
+load on this build measures the hub's established players once and records one whole number for the hub,
+its **baseline**: the amount that puts their average at 1400. The server log shows it:
+
+```
+LogElimPlusRating: Display: Rating baseline set for this hub: +137, measured on 138 established players averaging 1263.4. ...
+```
+
+From then on the game adds the baseline to every rating that has played a round. Every player moves up
+by the same amount, so every gap and every rank stays as it was. It is measured on the established
+players seen in the last 30 days, or on all established players if fewer than ten played recently. A hub
+with fewer than ten established players (a new or reset ladder, a very small hub) gets a baseline of 0
+and its ratings stay as they are.
+
+**The stored ratings are not rewritten.** `NCRatingElimPlus.Rating` keeps the value it had, and the
+rating the game shows is that value plus the baseline. If you read Mods.db, read the view
+**`NCRatingElimPlusLive`** instead of the table: its `Rating` column is the rating as the game shows it
+(`StoredRating` is the table's own value).
+
+```
+sqlite3 <UT install>/UnrealTournament/Saved/Mods.db "SELECT PlayerName, ROUND(Rating), RoundsPlayed FROM NCRatingElimPlusLive WHERE RoundsPlayed >= 20 ORDER BY Rating DESC;"
+```
+
+It is done this way because a match that is still running when you update keeps running: an instance
+with players in it survives a hub restart and saves its ratings when the match ends, on the old build.
+A stored value means the same to both builds, so those players lose nothing, whichever build saved them
+last. For the same reason a rollback to an older plugin is clean: it simply shows the stored ratings.
+
+**What you can change.** The baseline is the one row of the table `NCRatingElimPlusBaseline`.
+
+<!-- elimplus-admin-sql: tools/tests/test_elimplus_recentre.py runs every sql block from here to the next heading -->
+- **Reset the ladder** — everyone back to 1400; lifetime points and rounds are lost. Stop the hub and
+  every match instance first, or the players of a running match are written back when it ends.
+
+  ```sql
+  DELETE FROM NCRatingElimPlus;
+  DELETE FROM NCRatingElimPlusBaseline;
+  ```
+
+- **Measure the baseline again** — for example after a long spell with the guard switched off. The next
+  ElimPlus map load measures a new one from the ratings as stored.
+
+  ```sql
+  DELETE FROM NCRatingElimPlusBaseline;
+  ```
+
+- **Switch it off** — `ncp.ElimPlusRecentre 0` stops the per‑round step, and a hub that has no baseline
+  yet does not get one. A baseline already recorded still applies, so ratings do not jump back. To return
+  to the stored ratings as well, keep the guard at `0` and delete the baseline row as above.
+
+**In the log afterwards.** Every ElimPlus map load prints the baseline in use, and every match the step:
+
+```
+LogElimPlusRating: Rating baseline +137 (measured on 138 established players averaging 1263.4); recentre guard ON
+LogElimPlusRating: Recentre: pool mean 1393.8 over 142 established players seen in the last 30 days -> +0.186 per round
+```
+
+A typical step is +0.1 to +0.2 a round (two or three points a match); it is capped at 0.3 a round either
+way. A player who only ever faced bots in a match gets no step.
+
 ---
 
 ## Appendix A — client‑side settings (what players control)
@@ -1049,3 +1124,49 @@ admins understand what's player‑side vs server‑side. None of these are serve
 - [ ] Net rate: `[ElimPlus] NetSpeed` for the NetcodePlus gamemodes, keep `SetNetSpeed` on stock+`NCWepMut`; `Engine.ini` ceilings ≥ that — §3.3, §8
 - [ ] Replay server configured if you want end‑of‑match cap replays — §8
 ```
+
+
+### CTF warmup spawn markers
+
+After RCON authentication, run `rconexec ncp.SpawnBlocks on` during warmup.
+Markers are visible only to authenticated RCON admins, each from their own
+player's perspective (or the player they are spectating). To inspect a specific
+player, use `rconexec ncp.SpawnBlocks on <PlayerID>`. Disable with
+`rconexec ncp.SpawnBlocks off`. This is an in-map overlay, not a spawn console dump.
+
+Red means excluded from the candidate set; amber means rejected by the primary
+pass but available as fallback; green means eligible; cyan is the predicted
+choice. Labels show the player, start name and rejection reason. Gray indicates
+that the stock/legacy selector is active and NewCTF restrictions do not apply
+(including iCTF at or below SpawnSystemThreshold). The preview treats the
+inspected player's current pawn as absent, as it would be on their respawn.
+
+The server refreshes at 4 Hz. The overlay ends when warmup ends, when disabled,
+on admin logout/deauthentication or map travel. It does not spawn players,
+advance spawn rotation/history or change which selector is active. Ordinary
+spawn selection stops at its first eligible primary as before; diagnostics
+evaluate remaining starts only to display their status. Shipping clients use
+runtime line/text components; no editor-only DrawDebug dependency is required.
+
+Limits in this build:
+
+- **History rules.** Warmup spawns are not recorded, so the rules that depend on spawn
+  history (previous spawn/location, recent team spawn) have no match history to work
+  with. Everything else uses the hub's Mod.ini `[UTPUGS_SPAWN]` tuning, which is read
+  at map load as well as at the first live start, so warmup spawns follow it too.
+- **`<PlayerID>`** is the engine's numeric player id (it starts at 256). No in-game
+  screen shows it, and the admin dialog's "Player ID" column is the account id, which
+  this command rejects. Without an id the markers follow the player you are
+  spectating, or yourself.
+- **No reply.** A rejected command (bad id, wrong word, not in warmup) is reported in
+  the server log only.
+- **One setting for every admin.** `on`, `on <PlayerID>` and `off` replace the overlay
+  of every authenticated admin, not only yours.
+- **Two sets of markers.** The ordinary warmup markers (`ncp.WarmupSpawns`, a client
+  setting, on by default) are drawn at the same time, and there red means the red
+  team's start. Set `ncp.WarmupSpawns 0` on your client while you inspect.
+- **Client build.** An admin on a client older than this build sees no markers.
+
+saCTF and iCTF now use a fixed 1-second regulation respawn wait at first live
+start, clearing the stale per-player warmup delay at that transition. Ordinary
+weapon CTF keeps its configured size-based delays. Overtime rules are unchanged.

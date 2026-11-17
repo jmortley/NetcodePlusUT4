@@ -28,18 +28,6 @@ namespace
 		return Property ? Property->GetObjectPropertyValue_InContainer(Object) : nullptr;
 	}
 
-	bool IsSACTF(AUTGameMode* GameMode)
-	{
-		if (!GameMode || !GameMode->HasAuthority()) { return false; }
-		if (HasClassPath(GameMode->GetClass(), TEXT("/Game/Blueprints/Netcode/SACTF+.SACTF+_C"))) { return true; }
-		for (UObject* Mutator = ReadObject(GameMode, TEXT("BaseMutator")); Mutator;
-			Mutator = ReadObject(Mutator, TEXT("NextMutator")))
-		{
-			if (HasClassPath(Mutator->GetClass(), TEXT("/Game/Blueprints/Netcode/MutSaCTF.MutSaCTF_C"))) { return true; }
-		}
-		return false;
-	}
-
 	struct FOpeningAmp
 	{
 		TWeakObjectPtr<UWorld> World;
@@ -125,6 +113,18 @@ void NCSACTFPickupOpening::Cancel(UWorld* World)
 			if (Amp.World.IsValid()) { Amp.World->GetTimerManager().ClearTimer(Amp.OpeningHandle); }
 		}
 	}
+}
+
+bool NCSACTFPickupOpening::IsSACTF(AUTGameMode* GameMode)
+{
+	if (!GameMode || !GameMode->HasAuthority()) { return false; }
+	if (HasClassPath(GameMode->GetClass(), TEXT("/Game/Blueprints/Netcode/SACTF+.SACTF+_C"))) { return true; }
+	for (UObject* Mutator = ReadObject(GameMode, TEXT("BaseMutator")); Mutator;
+		Mutator = ReadObject(Mutator, TEXT("NextMutator")))
+	{
+		if (HasClassPath(Mutator->GetClass(), TEXT("/Game/Blueprints/Netcode/MutSaCTF.MutSaCTF_C"))) { return true; }
+	}
+	return false;
 }
 
 void NCSACTFPickupOpening::Prepare(AUTGameMode* GameMode)

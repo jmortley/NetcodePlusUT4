@@ -7,6 +7,8 @@ class UWorld;
 // later resets retain each amp's ordinary respawn interval.
 namespace NCSACTFPickupOpening
 {
+	// Shared server-side identity check: saCTF Blueprint ancestry or mutator chain.
+	bool IsSACTF(AUTGameMode* GameMode);
 	void Prepare(AUTGameMode* GameMode);
 	void Finish(AUTGameMode* GameMode);
 	void Cancel(UWorld* World);
