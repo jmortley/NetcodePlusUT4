@@ -195,7 +195,8 @@ struct FElimPlusRatingSystemImpl
 	/** Recentre points added to each player by this match's flush, and the per-round
 	 *  step they came from. Emitted by BuildResultPayload so ut4stats can reconcile
 	 *  its round-by-round replay with the hub's match delta. Reset each
-	 *  SnapshotMatchStart and at the top of each flush. */
+	 *  SnapshotMatchStart and at the top of the flush that ends a match; a repeat
+	 *  flush of the same match leaves them as the first one recorded them. */
 	TMap<FString, double> RecentreThisMatch;
 	double RecentreStepThisMatch = 0.0;
 };
