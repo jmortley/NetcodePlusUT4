@@ -902,9 +902,14 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 	// The step needs the switch, a hub whose baseline this map load found in place,
 	// and a match that went through SnapshotMatchStart: bMatchActive makes a flush
 	// with no such match (or a second flush of the same one) step-free, because the
-	// step must never be applied twice.
-	Impl->RecentreThisMatch.Empty();
-	Impl->RecentreStepThisMatch = 0.0;
+	// step must never be applied twice. Such a repeat flush also leaves alone what
+	// the first one recorded: the step is still inside every rating, so the upload
+	// must still report it.
+	if (Impl->bMatchActive)
+	{
+		Impl->RecentreThisMatch.Empty();
+		Impl->RecentreStepThisMatch = 0.0;
+	}
 	const bool bRecentre = Impl->bHasBaseline && Impl->bMatchActive && CVarElimPlusRecentre.GetValueOnGameThread() != 0;
 	TMap<FString, int32> RoundsThisMatch;
 	if (bRecentre)

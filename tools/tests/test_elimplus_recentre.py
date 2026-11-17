@@ -4,9 +4,13 @@ The pure helpers are compiled from the production source against the real TeamGl
 are lifted out of ElimPlusRatingSystem.cpp and run through sqlite on tables created by the production CREATE
 statements, with the engine wrapper's row format reproduced (NULL columns dropped, REAL through a 32-bit float).
 `Instance` then replays what a hub instance does with those statements, so that several instances, including
-ones from before the baseline existed, can share one database in any order. It is a model of the C++ control
-flow, pinned to it by the structure tests; the flush itself still needs the normal dedicated-server playtest.
-No sibling plugin or third-party Python module is required.
+ones from before the baseline existed, can share one database in any order.
+
+`Instance` is a Python MODEL of the C++ control flow: its conversions are its own, so these tests alone would
+keep passing if the production load or save went wrong. What the shipped code does is checked in
+test_elimplus_rating_flow.py, which compiles ElimPlusRatingSystem.cpp whole and runs it against the same
+database helpers, and which also holds this model to the production code row for row. The structure tests here
+only pin the shape of the source. No sibling plugin or third-party Python module is required.
 """
 
 import ctypes
