@@ -141,9 +141,14 @@ public:
 
 	/** Run the CREATE TABLE IF NOT EXISTS + migrations on Mods.db and probe the
 	 *  schema version (cached on this instance — FlushAtMatchEnd picks its INSERT
-	 *  shape from it). Instance method since the probe result must land on the
-	 *  Impl. Call once from gamemode BeginPlay (server only), on the instance,
-	 *  after construction. Idempotent. */
+	 *  shape from it). Also settles the hub's rating baseline for this map load: the
+	 *  one whole-number shift this build adds to a stored rating when it reads it
+	 *  and takes off again when it writes it (set once per hub, when the recentre
+	 *  guard first runs there; see the block comment in the .cpp). So it must run
+	 *  before the first LoadPlayerFromDB.
+	 *  Instance method since the probe results must land on the Impl. Call once
+	 *  from gamemode BeginPlay (server only), on the instance, after construction.
+	 *  Idempotent. */
 	bool InitDatabase(UWorld* World);
 
 	/** Pull this player's rating row from Mods.db into the in-memory cache.
@@ -170,7 +175,9 @@ public:
 	void ProcessRound(const FElimPlusRoundResult& Result);
 
 	/** Persist all cached ratings to Mods.db and push final values + match-delta
-	 *  to the replicator. Call from HandleMatchHasEnded. */
+	 *  to the replicator. Applies the recentre step first (when the guard runs:
+	 *  see the block comment in the .cpp), so the delta, the stored row and the
+	 *  upload all include it. Call ONCE per match, from HandleMatchHasEnded. */
 	void FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplicator* Replicator);
 
 	/** Server-side accessor for current cached rating (rounded int). Returns

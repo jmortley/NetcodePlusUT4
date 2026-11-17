@@ -177,6 +177,7 @@ template<class T> struct TActorIterator {
     T* operator*() const { return World->Pickups[Index]; }
 };
 namespace NCSACTFPickupOpening {
+    bool IsSACTF(AUTGameMode*);
     void Prepare(AUTGameMode*);
     void Finish(AUTGameMode*);
     void Cancel(UWorld*);

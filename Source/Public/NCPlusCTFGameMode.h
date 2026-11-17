@@ -15,6 +15,7 @@
 
 class ANCAutoPauseState;
 class ANCReadyUpState;
+struct FNCCTFSpawnDebugEntry;
 
 // Safe property access across DLL boundary — uses runtime UProperty reflection
 // instead of direct member access which has wrong offsets due to layout mismatch.
@@ -286,6 +287,8 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  The default path is NewCTF's rotating primary/secondary system; the old
 	 *  RatePlayerStart weighted selector remains available as a rollback. */
 	virtual AActor* ChoosePlayerStart_Implementation(AController* Player) override;
+	/** Warmup-only observer of the active spawn policy; never commits a start. */
+	void GetSpawnDebugSnapshot(AController* Player, TArray<FNCCTFSpawnDebugEntry>& Out);
 	virtual void ScoreObject_Implementation(AUTCarriedObject* GameObject, AUTCharacter* HolderPawn, AUTPlayerState* Holder, FName Reason) override;
 	virtual bool CheckScore_Implementation(AUTPlayerState* Scorer);
 	virtual void CheckGameTime() override;
@@ -375,6 +378,7 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	/** Regulation respawn delay (seconds). Applied in HandleMatchHasStarted AFTER
 	 *  InitGame's integer ?RespawnWait parse and any BP default, so it wins and
 	 *  supports fractional values (e.g. 1.5). Mod.ini [UTPUGS_STATS] CTFRespawnWait.
+	 *  saCTF/iCTF use a fixed 1s regulation override instead of these size-based values.
 	 *  Overtime escalation still ramps respawn up from here. */
 	float CTFRespawnWait = 1.5f;
 
@@ -510,6 +514,9 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void GetGood() override;
 
 protected:
+
+	/** First live start only: saCTF/iCTF use 1s and discard their warmup player delays. */
+	void ApplyRegulationRespawnWait();
 
 	virtual void HandleMatchHasStarted() override;
 	virtual void HandleEnteringOvertime();
@@ -693,7 +700,7 @@ protected:
 
 	/** NewCTF primary/secondary selector. Selection is side-effect free; a start
 	 *  is moved to the queue tail only after RestartPlayerAtPlayerStart succeeds. */
-	APlayerStart* ChooseNewCTFPlayerStart(AController* Player);
+	APlayerStart* ChooseNewCTFPlayerStart(AController* Player, TArray<FNCCTFSpawnDebugEntry>* Debug = nullptr);
 
 	/** Count connected, assigned competitors (alive or dead; spectators excluded). */
 	int32 CountSpawnSystemCompetitors() const;

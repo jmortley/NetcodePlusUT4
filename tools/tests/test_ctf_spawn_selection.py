@@ -33,15 +33,18 @@ class CTFSpawnSelectionTests(unittest.TestCase):
             "void ANCPlusCTFGameMode::CommitUsedSpawn(",
             "AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(",
             "APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(",
+            "void ANCPlusCTFGameMode::GetSpawnDebugSnapshot(",
         ))
         definitions += "\n" + native_function(
             source, "AActor* ANCPlusCTFGameMode::ChooseLegacyPlayerStart("
         ).replace("ANCPlusCTFGameMode::ChooseLegacyPlayerStart(",
                   "ANCPlusCTFGameMode::ChooseLegacyPlayerStartNative(", 1)
         history = native_function(header, "struct FRecentSpawns") + ";"
+        debug_header = (PLUGIN / "Source/Public/NCCTFSpawnDebug.h").read_text()
+        debug_type = native_function(debug_header, "struct FNCCTFSpawnDebugEntry") + ";"
         adapter = Path(__file__).with_name("ctf_spawn_selection_adapter.cpp").read_text(encoding="utf-8")
         generated = directory / "ctf_spawn.cpp"
-        generated.write_text(adapter.replace("// PRODUCTION_HISTORY", history).replace(
+        generated.write_text(adapter.replace("// PRODUCTION_DEBUG_TYPE", debug_type).replace("// PRODUCTION_HISTORY", history).replace(
             "// PRODUCTION_FUNCTIONS", definitions), encoding="utf-8")
         cls.executable = directory / ("ctf_spawn.exe" if os.name == "nt" else "ctf_spawn")
         if msvc:
@@ -59,6 +62,15 @@ class CTFSpawnSelectionTests(unittest.TestCase):
         result = subprocess.run([str(self.executable), name], env=self.environment,
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_debug_snapshot_preserves_selection_and_history(self):
+        self.run_case("debug-snapshot")
+
+    def test_debug_distinguishes_fallback_and_inactive_selectors(self):
+        self.run_case("debug-fallback")
+
+    def test_debug_evaluates_starts_after_the_first_primary(self):
+        self.run_case("debug-all")
 
     def test_acrony_teammate_interleaving_does_not_reenable_previous_start(self):
         self.run_case("acrony")
