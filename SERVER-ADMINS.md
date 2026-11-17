@@ -414,8 +414,8 @@ Shared section (StatSQL reads `Key`/`ServerName`/`SendStats` here too — see §
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `CTFRespawnWait` | float | `1.5` | Regulation respawn delay (s) in CTF (fractional supported). |
-| `CTFRespawnWaitSmall` | float | `1.0` | Respawn delay (s) in small games (≤ `CTFSmallGameMaxPlayers`). |
+| `CTFRespawnWait` | float | `1.5` | Regulation respawn delay (s) in ordinary weapon CTF (fractional supported). saCTF and iCTF ignore it and use a fixed 1 s. |
+| `CTFRespawnWaitSmall` | float | `1.0` | Respawn delay (s) in small ordinary weapon CTF games (≤ `CTFSmallGameMaxPlayers`). Ignored by saCTF and iCTF. |
 | `CTFSmallGameMaxPlayers` | int | `2` | At/below this player count a CTF match is "small" (2 = 1v1; raise to 4 for 2v2). |
 | `AutoPauseOnDrop` | bool | `true` | Immediately auto‑pause a bot PUG (`?PugId`) when a participant drops. Once all awaited IDs return (or an unpause is requested), resume through `UnpauseCountdownSec`; another tracked drop cancels that countdown. **Hotfix 10:** a pause‑immune watcher now detects hard drops by *connection silence* (`PauseDropDetectSeconds`) instead of waiting ~60 s for the engine Logout, coverage extends through the **locked F5 ready countdown** (a drop between "all readied" and "match live" pauses and waits; if the last ready participant leaves in warmup the countdown cancels cleanly), and a returning player must rejoin as a participant on their expected team — reconnecting as a spectator does not resume a short‑handed match. |
 | `PauseDropDetectSeconds` | float | `4.0` | Seconds of connection silence before the watcher freezes the match (clamped 1–30). The engine timeout still fires later as normal; this only front‑runs it. Raise on links with frequent multi‑second loss bursts if pauses trigger too eagerly. |
@@ -482,6 +482,9 @@ The warning includes the selected pass, previous/chosen starts and positions, an
 exclusion was relaxed. No tagged team pool falls back to Epic's selector with an explicit
 `reason=no-usable-team-pool` warning. The small-game threshold and legacy selector remain
 unchanged.
+
+This section is read at map load and again at the first live start, so warmup spawns and
+the admin spawn markers use the same tuning as the match.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -640,7 +643,7 @@ The `?Key=Value` tokens NetcodePlus itself parses (in addition to stock UT4 opti
 Stock options the plugin **reads/honors** but doesn't parse itself (listed so you know they matter):
 `?HostId` (host pause / scoreboard host badge), `?BalanceTeams` (false skips the Glicko rebalance),
 `?RespawnWait` — **ignored for CTF**, which uses `[UTPUGS_STATS] CTFRespawnWait`/`CTFRespawnWaitSmall`
-instead.
+instead (saCTF and iCTF use a fixed 1 s and ignore those keys too).
 
 > Not parsed by the plugin (don't expect them to do anything NetcodePlus‑specific):
 > `?RandomSubsetSize`, `?MapLockoutDuration`, `?WTR`.
@@ -836,7 +839,8 @@ Set the net rate in Mod.ini: `[ElimPlus]` → `NetSpeed=72000`.
 ```
 
 CTF respawn + small‑game tuning is in Mod.ini `[UTPUGS_STATS]` (`CTFRespawnWait`, `CTFRespawnWaitSmall`,
-`CTFSmallGameMaxPlayers`). For tournaments add `?Tournament=1` for ServerShield.
+`CTFSmallGameMaxPlayers`); those respawn keys apply to ordinary weapon CTF only, since saCTF and iCTF use a
+fixed 1 s. For tournaments add `?Tournament=1` for ServerShield.
 
 ### 11.3 Wipeout — 4v4
 
@@ -1143,6 +1147,25 @@ advance spawn rotation/history or change which selector is active. Ordinary
 spawn selection stops at its first eligible primary as before; diagnostics
 evaluate remaining starts only to display their status. Shipping clients use
 runtime line/text components; no editor-only DrawDebug dependency is required.
+
+Limits in this build:
+
+- **History rules.** Warmup spawns are not recorded, so the rules that depend on spawn
+  history (previous spawn/location, recent team spawn) have no match history to work
+  with. Everything else uses the hub's Mod.ini `[UTPUGS_SPAWN]` tuning, which is read
+  at map load as well as at the first live start, so warmup spawns follow it too.
+- **`<PlayerID>`** is the engine's numeric player id (it starts at 256). No in-game
+  screen shows it, and the admin dialog's "Player ID" column is the account id, which
+  this command rejects. Without an id the markers follow the player you are
+  spectating, or yourself.
+- **No reply.** A rejected command (bad id, wrong word, not in warmup) is reported in
+  the server log only.
+- **One setting for every admin.** `on`, `on <PlayerID>` and `off` replace the overlay
+  of every authenticated admin, not only yours.
+- **Two sets of markers.** The ordinary warmup markers (`ncp.WarmupSpawns`, a client
+  setting, on by default) are drawn at the same time, and there red means the red
+  team's start. Set `ncp.WarmupSpawns 0` on your client while you inspect.
+- **Client build.** An admin on a client older than this build sees no markers.
 
 saCTF and iCTF now use a fixed 1-second regulation respawn wait at first live
 start, clearing the stale per-player warmup delay at that transition. Ordinary

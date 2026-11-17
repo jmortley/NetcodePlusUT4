@@ -189,6 +189,29 @@ class CTFSpawnDebugTests(unittest.TestCase):
             result=subprocess.run([str(exe)],cwd=path,capture_output=True,text=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
+    def test_spawn_tuning_is_read_at_map_load_as_well_as_at_first_live_start(self):
+        """Source shape only; InitGame is not executed here. The markers and warmup spawns read the spawn tuning
+        members, and LoadSpawnConfig is what fills them from Mod.ini [UTPUGS_SPAWN]. Read only at the first live
+        start, they stayed at the constructor defaults for the whole of warmup."""
+        source = (PLUGIN / 'Source/Private/NCPlusCTFGameMode.cpp').read_text(encoding='utf-8')
+        init = native_function(source, 'void ANCPlusCTFGameMode::InitGame(')
+        live = native_function(source, 'void ANCPlusCTFGameMode::HandleMatchHasStarted(')
+
+        def calls(body):
+            return [line for line in body.splitlines() if line.strip() == 'LoadSpawnConfig();']
+
+        self.assertEqual(len(calls(init)), 1)
+        self.assertLess(init.index('Super::InitGame('), init.index('LoadSpawnConfig();'))
+        # Still read again when the match goes live, before warmup's queue and history are discarded and before
+        # the engine restarts every player.
+        self.assertEqual(len(calls(live)), 1)
+        self.assertLess(live.index('LoadSpawnConfig();'), live.index('bSpawnPoolsBuilt = false;'))
+        self.assertLess(live.index('bSpawnPoolsBuilt = false;'), live.index('Super::HandleMatchHasStarted();'))
+        # The loader itself must stay a pure read of the ini into members, or calling it twice is not safe.
+        loader = native_function(source, 'void ANCPlusCTFGameMode::LoadSpawnConfig(')
+        for mutation in ('.Reset()', 'bSpawnPoolsBuilt', 'SpawnActor', 'Destroy(', 'SaveConfig', 'Write('):
+            self.assertNotIn(mutation, loader, mutation)
+
 
 if __name__=='__main__':
     unittest.main()

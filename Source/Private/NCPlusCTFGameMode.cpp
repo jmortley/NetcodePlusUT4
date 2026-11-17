@@ -133,6 +133,12 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 	// The remaining perf values are harmless to load here and are consumed once
 	// live play starts; loading only in HandleMatchHasStarted was too late.
 	LoadCTFPerfConfig();
+	// Spawn tuning as well, so that warmup spawns and the admin spawn markers
+	// (ncp.SpawnBlocks) use the hub's [UTPUGS_SPAWN] values and not the constructor
+	// defaults. It only reads Mod.ini into members; HandleMatchHasStarted reads it
+	// again at the first live start, where it also discards warmup's spawn queue
+	// and history.
+	LoadSpawnConfig();
 
 	// Auto-add the warmup-roam mutator (all NCPlusCTF, incl. iCTF). `mutate warmup`
 	// lets players roam the map invulnerable + fire-disabled during warmup; it strips

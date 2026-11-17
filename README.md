@@ -87,7 +87,7 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
 
 - **NCPlusCTF** — Capture the Flag with adopted NewCTF advantage/OT mechanics, instant-end on flag-home, 5-min OT cap, ping-compensated spawning. Used for both regular CTF and iCTF (instagib).
   - HUD scorebar shows count-up overtime clock with "Overtime" label (replicated via `ANCPlusCTFOTInfo`); spectator list deduplicates the engine's stock count text.
-  - **Size-keyed respawn** — `MaxPlayers <= CTFSmallGameMaxPlayers` (default 2 = 1v1 / w00t) uses `CTFRespawnWaitSmall` (1.0s); larger uses `CTFRespawnWait` (1.5s). Works for bot-hosted PUGs and hub rulesets without anyone needing `?RespawnWait`.
+  - **Size-keyed respawn** — `MaxPlayers <= CTFSmallGameMaxPlayers` (default 2 = 1v1 / w00t) uses `CTFRespawnWaitSmall` (1.0s); larger uses `CTFRespawnWait` (1.5s). Works for bot-hosted PUGs and hub rulesets without anyone needing `?RespawnWait`. This is ordinary weapon CTF only: saCTF and iCTF use a fixed 1.0s from the first live start, whatever the size.
   - **`mutate warmup`** — warmup-only roam mode (`AWarmupRoamMutator`, auto-added). Toggles invulnerability + disables firing on the calling player so they can learn the map without dying or fragging others. Re-asserted on respawn; stripped from everyone the instant the match leaves `WaitingToStart`, so it can never carry into live play.
   - **Warmup spawn markers** (`ncp.WarmupSpawns`, default on) — during warmup only, team-colored markers sit on the map's spawn points with a facing tick and a distance label, a learning aid for approach/pre-aim lanes. They disappear the instant the match starts.
   - **Flag-status indicators and banners** (`UNCPlusHUDWidget_CTFFlagStatus`) — nchud can hide the carrier and missing-base world icons together, while retaining carrier position/scale/opacity controls. The yellow "You have the flag!" banner and new red "Enemy has your flag, recover it!" banner remain independently positionable/hideable/colorable/styleable.
@@ -244,7 +244,7 @@ Lives at `<Saved>/Config/Mod.ini`. Most plugin-side knobs go here; some are per-
 - `ShockBeam=(R=...,G=...,B=...,A=...)` — beam color for the Shock primary. Same format; read by `UTNPShockRifle`.
 
 **`[UTPUGS_STATS]`** (server-side — CTF perf + respawn tuning):
-- `CTFRespawnWait=1.5` — regulation CTF respawn for normal-sized matches (`MaxPlayers > CTFSmallGameMaxPlayers`). Fractional values honored.
+- `CTFRespawnWait=1.5` — regulation respawn for normal-sized ordinary weapon CTF matches (`MaxPlayers > CTFSmallGameMaxPlayers`). Fractional values honored. saCTF and iCTF ignore this and `CTFRespawnWaitSmall`: they use a fixed 1.0s.
 - `CTFRespawnWaitSmall=1.0` — respawn for small games (1v1 / w00t).
 - `CTFSmallGameMaxPlayers=2` — `MaxPlayers <= this` uses `CTFRespawnWaitSmall`. Raise to 4 if you want 2v2 to also get the fast respawn.
 - `AutoPauseOnDrop=True` — bot-PUG auto-pause. **Hotfix 10:** hard drops are now detected by connection silence in seconds (not the engine's ~60s timeout), and coverage extends through the locked F5 ready countdown; a returning player must rejoin their team slot before the match resumes.
