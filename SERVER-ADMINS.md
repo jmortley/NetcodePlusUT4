@@ -14,7 +14,7 @@ Games.
 > <https://downloads.ut4ever.box.ca/server/HubGuide.pdf> — then come back here. Quick prerequisites
 > checklist in §1.0.
 
-> Engine target: UT4 **4.15** (CL‑3525360). Current plugin build: **328**.
+> Engine target: UT4 **4.15** (CL‑3525360). Current plugin build: **329**.
 > Repos: [`jmortley/NetcodePlusUT4`](https://github.com/jmortley/NetcodePlusUT4) ·
 > [`jmortley/StatSQL`](https://github.com/jmortley/StatSQL) · ServerShield (private — see §10).
 
@@ -40,7 +40,7 @@ rules — just add `NCWepMut` and the gunplay is NetcodePlus.
   in this guide still applies — the lag‑comp cvars (§6), StatSQL (§9), ServerShield (§10).
 - **The full experience:** the dedicated NetcodePlus **gamemodes** (ElimPlus, Wipeout, iCTF, League
   Duel, Shaft Arena, Shock Domination — §4) layer ELO, fair‑spawn logic, the custom HUD, end‑of‑match
-  cap replays, host/captain pause and the version gate **on top of** those same weapons.
+  cap replays and host/captain pause **on top of** those same weapons.
 
 **Two weapon‑balance flavors — pick one.** There are two weapon-replacement paks.
 Their replacement lists and weapon tuning differ:
@@ -140,7 +140,7 @@ is live.
 Download the latest plugin zip from the releases page:
 
 **<https://github.com/jmortley/NetcodePlusUT4/releases>** → tag **`plugin-latest`** → asset
-**`NetcodePlus-328.zip`**.
+**`NetcodePlus-329.zip`**.
 
 Every release zip contains **all** build targets — you don't need a separate "server build":
 
@@ -167,15 +167,24 @@ Extract so the folder lands at:
 The dedicated‑server `.so` / `.dll` is what your hub loads; the same zip's client DLL is what the
 **launcher** ships to players. Restart the server after extracting. (To automate this, see §12.)
 
-### 1.3 Version gate
+### 1.3 Plugin versions — the version gate is retired
 
-NetcodePlus auto‑spawns a **version gate** on every match (no mutator token needed). When a client
-joins, it reports its plugin build; a **mismatched** build is kicked with a reason and can rejoin
-after updating. Players with **no** plugin are currently **not** auto‑kicked by the gate (the no‑reply
-timeout is disabled), so a hub can run mixed if you want — but a forced client roll (a build bump)
-will kick out‑of‑date clients until they update.
+Until November 2026 the server checked each joining client's plugin build and kicked a mismatch. That
+check was only needed while servers moved from 328 to 329, and it could remove an up‑to‑date player
+whose version report never arrived. **It is gone:** the server no longer runs the handshake, spawns no
+gate, and never disconnects a player over their plugin version.
 
-> Tunable: `[NetcodePlus] VersionReportTimeoutSec` (Mod.ini). See §5.
+What that means for a hub:
+
+- **Nothing on the server checks the plugin version.** A player with a missing or out‑of‑date plugin
+  is not kicked and gets no message, and the hub no longer whispers the install reminder.
+- **The launcher keeps players current.** It updates the plugin for them. Players who installed by
+  hand have to update by hand.
+- **Old and new 329 builds mix.** Players can join an updated server from an older 329 client and the
+  other way round. A change that breaks that will say so in its release notes.
+- **A server that has not updated still has the old gate** until it runs the update and restarts.
+
+> `[NetcodePlus] VersionReportTimeoutSec` (Mod.ini) no longer does anything and can be removed.
 
 ---
 
@@ -343,8 +352,12 @@ Notes:
 - **iCTF is not a separate gamemode** — it's NetcodePlus CTF + the external `MutInstagibNCP` mutator. The
   plugin detects instagib at runtime.
 - `AUWipeoutGame` really has the double‑U.
-- Each mode auto‑spawns the version gate; CTF/iCTF also auto‑adds an internal **Warmup Roam** mutator.
-  You don't add either.
+- CTF/iCTF auto‑adds an internal **Warmup Roam** mutator. You don't add it.
+- The **Aim Trainer** (`/Script/NetcodePlus.NCAimTrainerGame`) is a seventh, opt‑in mode that players
+  normally run standalone from the launcher, so a hub needs no ruleset for it. It supports one trainee
+  per server instance and needs the current NCWepMut content pak on client and server. To host it, and
+  to have a server's scores accepted on the approved‑server board, see
+  [Docs/AimTrainer329.md](Docs/AimTrainer329.md).
 
 ### 4.2 NetcodePlus / companion mutator tokens
 
@@ -358,7 +371,7 @@ Notes:
 | `MutStatSQL` | Stats upload to ut4stats.com — §9 | server |
 | `MutServerShield` | Behavioral anti‑cheat — §10 | server |
 
-There is **no token** for: Force Models (client‑only), the version gate (auto), Warmup Roam (auto),
+There is **no token** for: Force Models (client‑only), Warmup Roam (auto),
 host/captain pause (the in‑game `pause` command, gated by Mod.ini), or the concede vote (auto — see
 below).
 
@@ -398,7 +411,7 @@ weapon stuff, etc.) belong to **other** mutators/paks and are not covered here.
 | `bAllowCaptainPause` | bool | `false` | server | Let bot‑designated team captains (`?Captains`) pause in PUGs. |
 | `CaptainPauseCooldownSec` | int | `8` | server | Min unpaused seconds between captain pauses (0 = no cooldown). |
 | `UnpauseCountdownSec` | int | `7` | server | "Resuming in N…" countdown before a host/rcon or CTF auto-pause resume takes effect (clamped 0–60; 0 = instant). |
-| `VersionReportTimeoutSec` | float | `100.0` | server | Grace window for a joining client to report its plugin build (clamped 1–120). *Mismatch* kicks always fire; the *no‑reply* timeout kick is currently disabled. |
+| `VersionReportTimeoutSec` | float | — | server | **No longer used.** It was the grace window of the plugin‑version check, retired in November 2026 (§1.3). The line can be removed. |
 | `AnnouncerPack` | string | *(stock)* | **client** | **New in 328.** Player's chosen announcer voice pack (set at F5, not by admins). Listed here only so you recognise it in a player's Mod.ini — it is client‑side and never affects the server. |
 | `ElimEnableAntiCamp` | bool | `true` | server | **ElimPlus only.** Enable the anti-camp watch (flags a player who holds a tight box). Detection is C++; the warn/response is Blueprint. |
 | `ElimCampThreshold` | float | `400` | server | **ElimPlus.** Box radius/extent (uu) a player must stay within to be flagged. |
